@@ -1,4 +1,6 @@
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use crate::*;
 use crate::jellyfin::models::*;
 use crate::app::controller::*;
@@ -7,11 +9,6 @@ use crate::platform::appkit::*;
 use crate::ui::library::*;
 use crate::ui::settings::*;
 use crate::ui::shell::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, BOOL, NO, Object, Sel, YES};
-use objc::{sel, sel_impl};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -20,11 +17,11 @@ use std::sync::{Mutex, OnceLock};
 
 // ---- KVO / timer / actions ---------------------------------------------
 pub(crate) extern "C" fn kvo(
-    _this: &mut Object,
+    _this: *mut AnyObject,
     _cmd: Sel,
-    key_path: *mut Object,
-    obj: *mut Object,
-    _change: *mut Object,
+    key_path: *mut AnyObject,
+    obj: *mut AnyObject,
+    _change: *mut AnyObject,
     _ctx: *mut c_void,
 ) {
     unsafe {
@@ -59,15 +56,15 @@ pub(crate) extern "C" fn kvo(
             "pictureInPicturePossible" | "pictureInPictureActive" => crate::ui::playerbar::refresh_pip_button(),
             "externalPlaybackActive" => {
                 // AirPlay started or stopped: the video is on another screen.
-                let on: BOOL = msg_send![obj, externalPlaybackActive];
-                crate::ui::player::set_external(on == YES);
+                let on: Bool = msg_send![obj, externalPlaybackActive];
+                crate::ui::player::set_external(on == Bool::YES);
             }
             _ => {}
         }
     }
 }
 
-pub(crate) extern "C" fn tick(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
+pub(crate) extern "C" fn tick(_this: *mut AnyObject, _cmd: Sel, _t: *mut AnyObject) {
     unsafe {
         let ui = match UI.get_mut() {
             Some(u) => u,
@@ -129,12 +126,11 @@ pub(crate) unsafe fn schedule_retry(delay: f64) {
         release_obj(ui.retry_timer.get());
         ui.retry_timer = Ptr(nil());
     }
-    let t: *mut Object = msg_send![class!(NSTimer),
-        scheduledTimerWithTimeInterval: delay target: ui.ctl.get()
-        selector: sel!(jrRetry:) userInfo: nil() repeats: NO];
+    let t: *mut AnyObject = msg_send![class!(NSTimer),
+        scheduledTimerWithTimeInterval: delay, target: ui.ctl.get(), selector: sel!(jrRetry:), userInfo: nil(), repeats: Bool::NO];
     ui.retry_timer = Ptr::retained(t);
 }
-pub(crate) extern "C" fn retry_now(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
+pub(crate) extern "C" fn retry_now(_this: *mut AnyObject, _cmd: Sel, _t: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         release_obj(ui.retry_timer.get()); // fired non-repeating timer is invalid; drop our +1
@@ -148,7 +144,7 @@ pub(crate) unsafe fn ensure_media_groups() {
     if !ui.sub_group.is_null() || ui.playing.is_none() {
         return;
     }
-    let asset: *mut Object = msg_send![ui.pitem.get(), asset];
+    let asset: *mut AnyObject = msg_send![ui.pitem.get(), asset];
     if asset.is_null() {
         return;
     }
@@ -156,18 +152,18 @@ pub(crate) unsafe fn ensure_media_groups() {
     // first call; we only call it once, after the item is playing.
     let leg = ns("AVMediaCharacteristicLegible");
     let aud = ns("AVMediaCharacteristicAudible");
-    let g1: *mut Object = msg_send![asset, mediaSelectionGroupForMediaCharacteristic: leg];
-    let g2: *mut Object = msg_send![asset, mediaSelectionGroupForMediaCharacteristic: aud];
+    let g1: *mut AnyObject = msg_send![asset, mediaSelectionGroupForMediaCharacteristic: leg];
+    let g2: *mut AnyObject = msg_send![asset, mediaSelectionGroupForMediaCharacteristic: aud];
     for (group, opts_slot) in [(g1, 0usize), (g2, 1usize)] {
         if group.is_null() {
             continue;
         }
-        let opts: *mut Object = msg_send![group, options];
+        let opts: *mut AnyObject = msg_send![group, options];
         let n: NSUInteger = msg_send![opts, count];
         let mut vec = Vec::new();
         for i in 0..n {
-            let o: *mut Object = msg_send![opts, objectAtIndex: i];
-            let _: *mut Object = msg_send![o, retain];
+            let o: *mut AnyObject = msg_send![opts, objectAtIndex: i];
+            let _: *mut AnyObject = msg_send![o, retain];
             vec.push(o);
         }
         if opts_slot == 0 {
@@ -208,7 +204,7 @@ pub(crate) unsafe fn apply_lang_pref(which: usize) {
         if lang.starts_with(&want.to_ascii_lowercase()) || disp.starts_with(&want.to_ascii_lowercase())
         {
             let _: () = msg_send![ui.pitem.get(),
-                selectMediaOption: *o inMediaSelectionGroup: group];
+                selectMediaOption: *o, inMediaSelectionGroup: group];
             if which == 0 {
                 ui.sel_sub = i + 1;
             } else {
@@ -220,7 +216,7 @@ pub(crate) unsafe fn apply_lang_pref(which: usize) {
 }
 
 // ---- Menu & button actions ---------------------------------------------
-pub(crate) extern "C" fn play_pause(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn play_pause(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if ui.playing.is_none() {
@@ -235,7 +231,7 @@ pub(crate) extern "C" fn play_pause(_t: &mut Object, _c: Sel, _s: *mut Object) {
         }
     }
 }
-pub(crate) extern "C" fn stop_playback(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn stop_playback(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     stop_for_cast();
 }
 /// Stops local playback and reports the stop, before a cast hands the item to another device.
@@ -264,28 +260,27 @@ pub fn stop_playback_ui() {
         if !ui.pitem.get().is_null() {
             for kp in ["status", "presentationSize"] {
                 let _: () = msg_send![ui.pitem.get(),
-                    removeObserver: ui.ctl.get() forKeyPath: ns(kp)];
+                    removeObserver: ui.ctl.get(), forKeyPath: ns(kp)];
             }
         }
         // The timeControlStatus observer exists exactly while `playing` is Some.
-        let _: () = msg_send![ui.player.get(), removeObserver: ui.ctl.get()
-            forKeyPath: ns("timeControlStatus")];
+        let _: () = msg_send![ui.player.get(), removeObserver: ui.ctl.get(), forKeyPath: ns("timeControlStatus")];
         clear_media_groups();
         let _: () = msg_send![ui.player.get(), replaceCurrentItemWithPlayerItem: nil()];
         release_obj(ui.pitem.get());
         ui.pitem = Ptr(nil());
         ui.playing = None;
         crate::ui::skip::stop();
-        let content: *mut Object = msg_send![ui.win.get(), contentView];
+        let content: *mut AnyObject = msg_send![ui.win.get(), contentView];
         crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
         set_hidden(ui.player_host.get(), true);
         set_hidden(ui.content_host.get(), false);
         crate::ui::nowbar::hide();
         crate::ui::player::toast("", None, false);
         crate::ui::player::backdrop_hide();
-        let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: NO];
+        let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: Bool::NO];
         let _: () = msg_send![ui.win.get(), setTitle: ns("Jellyfast")];
-        let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
+        let _: Bool = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
         crate::ui::cast::layout(); // after the player host is hidden: the strip may come back
     }
 }
@@ -310,7 +305,7 @@ pub(crate) unsafe fn seek_to_secs(secs: f64) {
     let ui = UI.get_mut().unwrap();
     let tm = CMTimeMakeWithSeconds(secs.max(0.), 600);
     let zero = CMTimeMakeWithSeconds(0.0, 600);
-    let _: () = msg_send![ui.player.get(), seekToTime: tm toleranceBefore: zero toleranceAfter: zero];
+    let _: () = msg_send![ui.player.get(), seekToTime: tm, toleranceBefore: zero, toleranceAfter: zero];
 }
 
 pub(crate) unsafe fn seek_by(delta: f64) {
@@ -322,12 +317,12 @@ pub(crate) unsafe fn seek_by(delta: f64) {
     let target = (t.seconds() + delta).clamp(0.0, ui.playing.as_ref().unwrap().duration_secs.max(1.0));
     seek_to_secs(target);
 }
-pub(crate) extern "C" fn seek_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn seek_back(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         seek_by(-10.0)
     }
 }
-pub(crate) extern "C" fn seek_fwd(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn seek_fwd(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         seek_by(10.0)
     }
@@ -345,24 +340,24 @@ pub(crate) unsafe fn bump_volume(d: f64) {
     ui.cfg = cfg;
     crate::config::save_config_keeping_session(&ui.cfg);
 }
-pub(crate) extern "C" fn vol_up(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn vol_up(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         bump_volume(0.05)
     }
 }
-pub(crate) extern "C" fn vol_down(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn vol_down(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         bump_volume(-0.05)
     }
 }
-pub(crate) extern "C" fn mute_toggle(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn mute_toggle(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if ui.playing.is_none() {
             return;
         }
-        let m: BOOL = msg_send![ui.player.get(), isMuted];
-        let _: () = msg_send![ui.player.get(), setMuted: if m == NO { YES } else { NO }];
+        let m: Bool = msg_send![ui.player.get(), isMuted];
+        let _: () = msg_send![ui.player.get(), setMuted: if m == Bool::NO { Bool::YES } else { Bool::NO }];
     }
 }
 pub(crate) unsafe fn cycle(which: usize) {
@@ -398,7 +393,7 @@ pub(crate) unsafe fn set_track(which: usize, idx: usize) {
     } else {
         ui.audio_opts[idx - 1]
     };
-    let _: () = msg_send![ui.pitem.get(), selectMediaOption: opt inMediaSelectionGroup: group];
+    let _: () = msg_send![ui.pitem.get(), selectMediaOption: opt, inMediaSelectionGroup: group];
     if which == 0 {
         ui.sel_sub = idx;
     } else {
@@ -413,17 +408,17 @@ pub(crate) unsafe fn set_track(which: usize, idx: usize) {
         false,
     );
 }
-pub(crate) extern "C" fn sub_cycle(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn sub_cycle(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         cycle(0)
     }
 }
-pub(crate) extern "C" fn audio_cycle(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn audio_cycle(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         cycle(1)
     }
 }
-pub(crate) extern "C" fn set_speed(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn set_speed(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if ui.playing.is_none() {
@@ -448,14 +443,14 @@ pub fn start_playback(ps: &PlaybackStart) {
         if !ui.pitem.get().is_null() {
             for kp in ["status", "presentationSize"] {
                 let _: () = msg_send![ui.pitem.get(),
-                    removeObserver: ui.ctl.get() forKeyPath: ns(kp)];
+                    removeObserver: ui.ctl.get(), forKeyPath: ns(kp)];
             }
             release_obj(ui.pitem.get());
             ui.pitem = Ptr(nil());
         }
         clear_media_groups();
-        let url: *mut Object = msg_send![class!(NSURL), URLWithString: ns(&ps.url)];
-        let item: *mut Object = if url.is_null() {
+        let url: *mut AnyObject = msg_send![class!(NSURL), URLWithString: ns(&ps.url)];
+        let item: *mut AnyObject = if url.is_null() {
             nil()
         } else {
             msg_send![class!(AVPlayerItem), playerItemWithURL: url]
@@ -467,12 +462,10 @@ pub fn start_playback(ps: &PlaybackStart) {
         let _: () = msg_send![ui.player.get(), replaceCurrentItemWithPlayerItem: item];
         ui.pitem = Ptr::retained(item);
         for kp in ["status", "presentationSize"] {
-            let _: () = msg_send![item, addObserver: ui.ctl.get()
-                forKeyPath: ns(kp) options: 3usize context: nil()]; // new+old
+            let _: () = msg_send![item, addObserver: ui.ctl.get(), forKeyPath: ns(kp), options: 3usize, context: std::ptr::null_mut::<std::ffi::c_void>()]; // new+old
         }
         if ui.playing.is_none() {
-            let _: () = msg_send![ui.player.get(), addObserver: ui.ctl.get()
-                forKeyPath: ns("timeControlStatus") options: 1usize context: nil()];
+            let _: () = msg_send![ui.player.get(), addObserver: ui.ctl.get(), forKeyPath: ns("timeControlStatus"), options: 1usize, context: std::ptr::null_mut::<std::ffi::c_void>()];
         }
         let _: () = msg_send![ui.player.get(), setVolume: ui.cfg.volume.clamp(0.0, 1.0) as f32];
         let _: () = msg_send![ui.player.get(), setDefaultRate: 1.0f32];
@@ -511,7 +504,7 @@ pub fn start_playback(ps: &PlaybackStart) {
         }
         if ps.media_kind == MediaKind::Audio {
             // Audio: same AVPlayer, no video view. The library stays up with the bar below it.
-            let content: *mut Object = msg_send![ui.win.get(), contentView];
+            let content: *mut AnyObject = msg_send![ui.win.get(), contentView];
             if !is_hidden(ui.player_host.get()) {
                 // Coming from video: swap the player view out, and any Picture in Picture window with it.
                 crate::ui::playerbar::pip_stop();
@@ -521,15 +514,15 @@ pub fn start_playback(ps: &PlaybackStart) {
                 crate::ui::player::backdrop_hide();
             }
             crate::ui::player::toast("", None, false);
-            let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: NO];
+            let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: Bool::NO];
             crate::ui::nowbar::show(ps);
         } else {
             crate::ui::nowbar::hide();
-            let content: *mut Object = msg_send![ui.win.get(), contentView];
+            let content: *mut AnyObject = msg_send![ui.win.get(), contentView];
             crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
             set_hidden(ui.content_host.get(), true);
             set_hidden(ui.player_host.get(), false);
-            let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.avview.get()];
+            let _: Bool = msg_send![ui.win.get(), makeFirstResponder: ui.avview.get()];
             crate::ui::player::toast("", None, false);
             ui.bar_shown = false;
             crate::ui::player::show_bars();
@@ -538,7 +531,7 @@ pub fn start_playback(ps: &PlaybackStart) {
             {
                 use crate::ui::theme::*;
                 let poster = ps.image_key.and_then(|k| ui.poster_cache.get(&k).copied()).unwrap_or(nil());
-                let tint: *mut Object = crate::ui::theme::color(crate::ui::theme::Col::PlayerBackdrop);
+                let tint: *mut AnyObject = crate::ui::theme::color(crate::ui::theme::Col::PlayerBackdrop);
                 crate::ui::player::backdrop_show(tint, poster);
             }
         }
@@ -586,7 +579,7 @@ pub fn retry_playback() {
 
 pub(crate) unsafe fn drop_replace_item(url: &str, resume: f64) {
     let ui = UI.get_mut().unwrap();
-    let u: *mut Object = msg_send![class!(NSURL), URLWithString: ns(url)];
+    let u: *mut AnyObject = msg_send![class!(NSURL), URLWithString: ns(url)];
     if u.is_null() {
         let _ = ui.main_tx.send(MainMsg::PlaybackError("invalid stream URL".into()));
         return;
@@ -594,10 +587,10 @@ pub(crate) unsafe fn drop_replace_item(url: &str, resume: f64) {
     if !ui.pitem.get().is_null() {
         for kp in ["status", "presentationSize"] {
             let _: () = msg_send![ui.pitem.get(),
-                removeObserver: ui.ctl.get() forKeyPath: ns(kp)];
+                removeObserver: ui.ctl.get(), forKeyPath: ns(kp)];
         }
     }
-    let item: *mut Object = msg_send![class!(AVPlayerItem), playerItemWithURL: u];
+    let item: *mut AnyObject = msg_send![class!(AVPlayerItem), playerItemWithURL: u];
     clear_media_groups();
     let _: () = msg_send![ui.player.get(), replaceCurrentItemWithPlayerItem: item];
     if !ui.pitem.get().is_null() {
@@ -605,8 +598,7 @@ pub(crate) unsafe fn drop_replace_item(url: &str, resume: f64) {
     }
     ui.pitem = Ptr::retained(item);
     for kp in ["status", "presentationSize"] {
-        let _: () = msg_send![item, addObserver: ui.ctl.get()
-            forKeyPath: ns(kp) options: 3usize context: nil()];
+        let _: () = msg_send![item, addObserver: ui.ctl.get(), forKeyPath: ns(kp), options: 3usize, context: std::ptr::null_mut::<std::ffi::c_void>()];
     }
     if resume > 1.0 {
         seek_to_secs(resume);

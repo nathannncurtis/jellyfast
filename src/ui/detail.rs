@@ -12,15 +12,12 @@
 //! selected season's episodes as rows (thumbnail, number and title, runtime,
 //! overview snippet, watched or progress state). A row plays its episode.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::messages::*;
 use crate::jellyfin::urls::fmt_runtime;
 use crate::platform::appkit::*;
 use crate::ui::theme::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 
 const HERO_MIN: f64 = 240.;
 const HERO_MAX: f64 = 380.;
@@ -47,8 +44,8 @@ const SNIPPET_CHARS: usize = 180;
 #[derive(Clone, Copy)]
 pub struct Target {
     key: u64,
-    art: *mut Object,
-    glyph: *mut Object,
+    art: *mut AnyObject,
+    glyph: *mut AnyObject,
 }
 
 pub struct DetailUi {
@@ -95,37 +92,37 @@ impl DetailUi {
     }
 }
 
-extern "C" fn always_yes(_t: &mut Object, _c: Sel) -> BOOL {
-    YES
+extern "C" fn always_yes(_t: *mut AnyObject, _c: Sel) -> Bool {
+    Bool::YES
 }
 
 /// Forward to NSView, then re-render the page when its width changed.
-extern "C" fn doc_set_frame(this: &mut Object, _cmd: Sel, s: NSSize) {
+extern "C" fn doc_set_frame(this: *mut AnyObject, _cmd: Sel, s: NSSize) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), setFrameSize: s];
         let Some(ui) = UI.get_mut() else { return };
-        if ui.detail.open && this as *mut Object == ui.detail.doc.get() && (s.w - ui.detail.laid_w).abs() > 0.5 {
+        if ui.detail.open && this == ui.detail.doc.get() && (s.w - ui.detail.laid_w).abs() > 0.5 {
             render(ui);
         }
     }
 }
 
 /// Colours on layers are resolved once, so re-render when the appearance flips.
-extern "C" fn doc_appearance_changed(this: &mut Object, _cmd: Sel) {
+extern "C" fn doc_appearance_changed(this: *mut AnyObject, _cmd: Sel) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), viewDidChangeEffectiveAppearance];
         let Some(ui) = UI.get_mut() else { return };
-        if ui.detail.open && this as *mut Object == ui.detail.doc.get() {
+        if ui.detail.open && this == ui.detail.doc.get() {
             render(ui);
         }
     }
 }
 
-extern "C" fn on_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
+extern "C" fn on_back(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     hide();
 }
 
-extern "C" fn on_play(_t: &mut Object, _c: Sel, _s: *mut Object) {
+extern "C" fn on_play(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         if let Some(item) = ui.detail.item.as_ref() {
@@ -137,7 +134,7 @@ extern "C" fn on_play(_t: &mut Object, _c: Sel, _s: *mut Object) {
 }
 
 /// The series page's "Skip intros automatically": saved for this show on this Mac only.
-extern "C" fn on_skip_intros(_t: &mut Object, _c: Sel, sender: *mut Object) {
+extern "C" fn on_skip_intros(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let Some(item) = ui.detail.item.as_ref() else { return };
@@ -150,7 +147,7 @@ extern "C" fn on_skip_intros(_t: &mut Object, _c: Sel, sender: *mut Object) {
 }
 
 /// Cast button: Play On menu for the open movie, episode or series.
-extern "C" fn on_cast(_t: &mut Object, _c: Sel, sender: *mut Object) {
+extern "C" fn on_cast(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let Some(item) = ui.detail.item.as_ref() else { return };
@@ -168,7 +165,7 @@ extern "C" fn on_cast(_t: &mut Object, _c: Sel, sender: *mut Object) {
     }
 }
 
-extern "C" fn on_watched(_t: &mut Object, _c: Sel, _s: *mut Object) {
+extern "C" fn on_watched(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let Some(item) = ui.detail.item.as_mut() else { return };
@@ -183,7 +180,7 @@ extern "C" fn on_watched(_t: &mut Object, _c: Sel, _s: *mut Object) {
 }
 
 /// The season popup changed: load the chosen season's episodes.
-extern "C" fn on_season(_t: &mut Object, _c: Sel, sender: *mut Object) {
+extern "C" fn on_season(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let idx: isize = msg_send![sender, indexOfSelectedItem];
@@ -203,7 +200,7 @@ extern "C" fn on_season(_t: &mut Object, _c: Sel, sender: *mut Object) {
 }
 
 /// An episode row was clicked (its tag is the row index): play that episode.
-extern "C" fn on_episode(_t: &mut Object, _c: Sel, sender: *mut Object) {
+extern "C" fn on_episode(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let tag: isize = msg_send![sender, tag];
@@ -224,35 +221,35 @@ extern "C" fn on_episode(_t: &mut Object, _c: Sel, sender: *mut Object) {
 
 /// Classes used by the page. Called once at startup, with the other classes.
 pub(crate) unsafe fn register_detail_classes() {
-    let mut h = ClassDecl::new("JRDetailHost", class!(NSView)).unwrap();
-    h.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
-    h.add_method(sel!(detailBack:), on_back as extern "C" fn(&mut Object, Sel, *mut Object));
-    h.add_method(sel!(detailPlay:), on_play as extern "C" fn(&mut Object, Sel, *mut Object));
-    h.add_method(sel!(detailWatched:), on_watched as extern "C" fn(&mut Object, Sel, *mut Object));
-    h.add_method(sel!(detailCast:), on_cast as extern "C" fn(&mut Object, Sel, *mut Object));
-    h.add_method(sel!(detailSeason:), on_season as extern "C" fn(&mut Object, Sel, *mut Object));
-    h.add_method(sel!(detailEpisode:), on_episode as extern "C" fn(&mut Object, Sel, *mut Object));
-    h.add_method(sel!(detailSkipIntros:), on_skip_intros as extern "C" fn(&mut Object, Sel, *mut Object));
+    let mut h = ClassBuilder::new(c"JRDetailHost", class!(NSView)).unwrap();
+    h.add_method(sel!(isFlipped), always_yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
+    h.add_method(sel!(detailBack:), on_back as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    h.add_method(sel!(detailPlay:), on_play as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    h.add_method(sel!(detailWatched:), on_watched as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    h.add_method(sel!(detailCast:), on_cast as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    h.add_method(sel!(detailSeason:), on_season as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    h.add_method(sel!(detailEpisode:), on_episode as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    h.add_method(sel!(detailSkipIntros:), on_skip_intros as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
     h.register();
-    let mut d = ClassDecl::new("JRDetailDoc", class!(NSView)).unwrap();
-    d.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
-    d.add_method(sel!(setFrameSize:), doc_set_frame as extern "C" fn(&mut Object, Sel, NSSize));
+    let mut d = ClassBuilder::new(c"JRDetailDoc", class!(NSView)).unwrap();
+    d.add_method(sel!(isFlipped), always_yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
+    d.add_method(sel!(setFrameSize:), doc_set_frame as extern "C" fn(*mut AnyObject, Sel, NSSize));
     d.add_method(
         sel!(viewDidChangeEffectiveAppearance),
-        doc_appearance_changed as extern "C" fn(&mut Object, Sel),
+        doc_appearance_changed as extern "C" fn(*mut AnyObject, Sel),
     );
     d.register();
-    let mut f = ClassDecl::new("JRDetailFlip", class!(NSView)).unwrap();
-    f.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
+    let mut f = ClassBuilder::new(c"JRDetailFlip", class!(NSView)).unwrap();
+    f.add_method(sel!(isFlipped), always_yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
     f.register();
 }
 
 /// Create the (hidden) page inside the content host. `frame` is the library area.
-pub(crate) unsafe fn build(content_host: *mut Object, frame: NSRect) {
+pub(crate) unsafe fn build(content_host: *mut AnyObject, frame: NSRect) {
     let ui = UI.get_mut().unwrap();
-    let host_cls = Class::get("JRDetailHost").unwrap();
-    let host: *mut Object = msg_send![host_cls, alloc];
-    let host: *mut Object = msg_send![host, initWithFrame: frame];
+    let host_cls = AnyClass::get(c"JRDetailHost").unwrap();
+    let host: *mut AnyObject = msg_send![host_cls, alloc];
+    let host: *mut AnyObject = msg_send![host, initWithFrame: frame];
     set_autoresize(host, RESIZE_W | RESIZE_H);
     set_hidden(host, true);
     add_sub(content_host, host);
@@ -260,27 +257,26 @@ pub(crate) unsafe fn build(content_host: *mut Object, frame: NSRect) {
     ui.detail.host = Ptr(host);
 
     let bar_h = HEADER_H;
-    let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: rect(0., bar_h, frame.size.w, frame.size.h - bar_h)];
-    let _: () = msg_send![sc, setHasVerticalScroller: YES];
-    let _: () = msg_send![sc, setDrawsBackground: YES];
+    let sc: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+    let sc: *mut AnyObject = msg_send![sc, initWithFrame: rect(0., bar_h, frame.size.w, frame.size.h - bar_h)];
+    let _: () = msg_send![sc, setHasVerticalScroller: Bool::YES];
+    let _: () = msg_send![sc, setDrawsBackground: Bool::YES];
     let _: () = msg_send![sc, setBackgroundColor: color(C_CANVAS)];
     set_autoresize(sc, RESIZE_W | RESIZE_H);
     add_sub(host, sc);
     autorel(sc);
     ui.detail.scroll = Ptr(sc);
 
-    let doc_cls = Class::get("JRDetailDoc").unwrap();
-    let doc: *mut Object = msg_send![doc_cls, alloc];
-    let doc: *mut Object = msg_send![doc, initWithFrame: rect(0., 0., frame.size.w, 10.)];
+    let doc_cls = AnyClass::get(c"JRDetailDoc").unwrap();
+    let doc: *mut AnyObject = msg_send![doc_cls, alloc];
+    let doc: *mut AnyObject = msg_send![doc, initWithFrame: rect(0., 0., frame.size.w, 10.)];
     set_autoresize(doc, RESIZE_W);
     let _: () = msg_send![sc, setDocumentView: doc];
     autorel(doc);
     ui.detail.doc = Ptr(doc);
 
-    let back: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Back")
-        target: host action: sel!(detailBack:)];
-    let _: () = msg_send![back, setBordered: NO];
+    let back: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Back"), target: host, action: sel!(detailBack:)];
+    let _: () = msg_send![back, setBordered: Bool::NO];
     let chev = symbol("chevron.left", 13., Weight::Medium);
     if !chev.is_null() {
         let _: () = msg_send![back, setImage: chev];
@@ -408,14 +404,14 @@ pub fn image_ready(key: u64) {
     }
 }
 
-unsafe fn set_art(art: *mut Object, glyph: *mut Object, img: *mut Object) {
+unsafe fn set_art(art: *mut AnyObject, glyph: *mut AnyObject, img: *mut AnyObject) {
     let cg = cg_image(img);
     if cg.is_null() {
         return;
     }
     let layer = layer_of(art);
     tx_begin_instant();
-    let _: () = msg_send![layer, setContents: cg];
+    let _: () = msg_send![layer, setContents: cg as *mut AnyObject];
     tx_end();
     if !glyph.is_null() {
         set_hidden(glyph, true);
@@ -423,7 +419,7 @@ unsafe fn set_art(art: *mut Object, glyph: *mut Object, img: *mut Object) {
 }
 
 /// Register an artwork view for `key` and fill it now if the image is cached.
-unsafe fn bind(ui: &mut Ui, key: Option<u64>, art: *mut Object, glyph: *mut Object) {
+unsafe fn bind(ui: &mut Ui, key: Option<u64>, art: *mut AnyObject, glyph: *mut AnyObject) {
     let Some(key) = key else { return };
     ui.detail.targets.push(Target { key, art, glyph });
     if let Some(img) = ui.poster_cache.get(&key).copied() {
@@ -431,34 +427,34 @@ unsafe fn bind(ui: &mut Ui, key: Option<u64>, art: *mut Object, glyph: *mut Obje
     }
 }
 
-unsafe fn new_view(frame: NSRect) -> *mut Object {
-    let v: *mut Object = msg_send![class!(NSView), alloc];
-    let v: *mut Object = msg_send![v, initWithFrame: frame];
+unsafe fn new_view(frame: NSRect) -> *mut AnyObject {
+    let v: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let v: *mut AnyObject = msg_send![v, initWithFrame: frame];
     autorel(v)
 }
 
-unsafe fn flip_view(frame: NSRect) -> *mut Object {
-    let cls = Class::get("JRDetailFlip").unwrap();
-    let v: *mut Object = msg_send![cls, alloc];
-    let v: *mut Object = msg_send![v, initWithFrame: frame];
+unsafe fn flip_view(frame: NSRect) -> *mut AnyObject {
+    let cls = AnyClass::get(c"JRDetailFlip").unwrap();
+    let v: *mut AnyObject = msg_send![cls, alloc];
+    let v: *mut AnyObject = msg_send![v, initWithFrame: frame];
     autorel(v)
 }
 
 /// Layer-backed rounded rectangle that shows artwork (aspect-fill) over a fill colour.
-unsafe fn art_view(frame: NSRect, radius: f64) -> *mut Object {
+unsafe fn art_view(frame: NSRect, radius: f64) -> *mut AnyObject {
     let v = new_view(frame);
     let layer = layer_of(v);
     set_corner(layer, radius);
-    let _: () = msg_send![layer, setMasksToBounds: YES];
+    let _: () = msg_send![layer, setMasksToBounds: Bool::YES];
     let _: () = msg_send![layer, setContentsGravity: ns("resizeAspectFill")];
     let _: () = msg_send![layer, setBackgroundColor: cg(C_FILL_SEL)];
     v
 }
 
 /// Centred placeholder glyph inside `frame`.
-unsafe fn glyph_in(frame: NSRect, name: &str, pt: f64) -> *mut Object {
-    let g: *mut Object = msg_send![class!(NSImageView), alloc];
-    let g: *mut Object = msg_send![g, initWithFrame: rect(
+unsafe fn glyph_in(frame: NSRect, name: &str, pt: f64) -> *mut AnyObject {
+    let g: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let g: *mut AnyObject = msg_send![g, initWithFrame: rect(
         frame.origin.x + (frame.size.w - pt) / 2., frame.origin.y + (frame.size.h - pt) / 2., pt, pt)];
     let img = symbol(name, pt, Weight::Regular);
     if !img.is_null() {
@@ -469,13 +465,13 @@ unsafe fn glyph_in(frame: NSRect, name: &str, pt: f64) -> *mut Object {
 }
 
 /// Height a wrapping label needs at `width`.
-unsafe fn text_height(v: *mut Object, width: f64) -> f64 {
-    let cell: *mut Object = msg_send![v, cell];
+unsafe fn text_height(v: *mut AnyObject, width: f64) -> f64 {
+    let cell: *mut AnyObject = msg_send![v, cell];
     let sz: NSSize = msg_send![cell, cellSizeForBounds: rect(0., 0., width, 1.0e6)];
     sz.h.ceil()
 }
 
-unsafe fn place_text(doc: *mut Object, text: &str, t: TypeStyle, c: Col, frame: NSRect) {
+unsafe fn place_text(doc: *mut AnyObject, text: &str, t: TypeStyle, c: Col, frame: NSRect) {
     let l = label(text, t, c, ALIGN_LEFT);
     set_frame(l, frame);
     add_sub(doc, l);
@@ -500,8 +496,8 @@ fn meta_line(item: &DetailView) -> String {
 }
 
 /// Action button sized to its title and symbol; returns the view and its width.
-unsafe fn action_button(title: &str, symbol_name: &str, action: Sel, target: *mut Object, primary: bool) -> (*mut Object, f64) {
-    let b: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns(title) target: target action: action];
+unsafe fn action_button(title: &str, symbol_name: &str, action: Sel, target: *mut AnyObject, primary: bool) -> (*mut AnyObject, f64) {
+    let b: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(title), target: target, action: action];
     let _: () = msg_send![b, setBezelStyle: 1isize];
     let img = symbol(symbol_name, 12., Weight::Medium);
     if !img.is_null() {
@@ -523,32 +519,32 @@ unsafe fn action_button(title: &str, symbol_name: &str, action: Sel, target: *mu
 unsafe fn render(ui: &mut Ui) {
     let Some(item) = ui.detail.item.clone() else { return };
     let doc = ui.detail.doc.get();
-    let clip: *mut Object = msg_send![ui.detail.scroll.get(), contentView];
+    let clip: *mut AnyObject = msg_send![ui.detail.scroll.get(), contentView];
     let w = bounds_of(clip).size.w.max(320.);
     ui.detail.laid_w = w;
     ui.detail.targets.clear();
-    let none: *mut Object = msg_send![class!(NSArray), array];
+    let none: *mut AnyObject = msg_send![class!(NSArray), array];
     let _: () = msg_send![doc, setSubviews: none];
     let host = ui.detail.host.get();
     let h = build_page(ui, doc, host, &item, w);
     set_frame(doc, rect(0., 0., w, h));
 }
 
-unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &DetailView, w: f64) -> f64 {
+unsafe fn build_page(ui: &mut Ui, doc: *mut AnyObject, host: *mut AnyObject, item: &DetailView, w: f64) -> f64 {
     // Backdrop with a fade into the canvas.
     let hero_h = (w * 0.36).round().clamp(HERO_MIN, HERO_MAX);
     let hero = new_view(rect(0., 0., w, hero_h));
     add_sub(doc, hero);
     let hero_layer = layer_of(hero);
-    let _: () = msg_send![hero_layer, setMasksToBounds: YES];
+    let _: () = msg_send![hero_layer, setMasksToBounds: Bool::YES];
     let _: () = msg_send![hero_layer, setContentsGravity: ns("resizeAspectFill")];
     let _: () = msg_send![hero_layer, setBackgroundColor: cg(C_FILL_SEL)];
-    let fade: *mut Object = msg_send![class!(CAGradientLayer), layer];
+    let fade: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
     let _: () = msg_send![fade, setFrame: rect(0., 0., w, hero_h)];
-    let clear: *mut Object = msg_send![color_a(C_CANVAS, 0.0), CGColor];
-    let solid: *mut Object = msg_send![color(C_CANVAS), CGColor];
-    let cols = [clear, solid];
-    let arr: *mut Object = msg_send![class!(NSArray), arrayWithObjects: cols.as_ptr() count: 2usize];
+    let clear: *mut CGColor = msg_send![color_a(C_CANVAS, 0.0), CGColor];
+    let solid: *mut CGColor = msg_send![color(C_CANVAS), CGColor];
+    let cols = [clear as *mut AnyObject, solid as *mut AnyObject];
+    let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObjects: cols.as_ptr(), count: 2usize];
     let _: () = msg_send![fade, setColors: arr];
     let _: () = msg_send![fade, setStartPoint: NSPoint { x: 0., y: 1. }];
     let _: () = msg_send![fade, setEndPoint: NSPoint { x: 0., y: 0. }];
@@ -603,8 +599,7 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
     if is_series {
         bx += bw + SP2;
         let on = crate::config::skip_intros_for(&item.id, ui.cfg.settings.skip_intros_default);
-        let cb: *mut Object = msg_send![class!(NSButton), checkboxWithTitle: ns("Skip intros automatically")
-            target: host action: sel!(detailSkipIntros:)];
+        let cb: *mut AnyObject = msg_send![class!(NSButton), checkboxWithTitle: ns("Skip intros automatically"), target: host, action: sel!(detailSkipIntros:)];
         let _: () = msg_send![cb, setState: on as NSInteger];
         let _: () = msg_send![cb, setToolTip: ns("Skip intros as soon as they start, for this show on this Mac.")];
         let _: () = msg_send![cb, sizeToFit];
@@ -637,11 +632,11 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
         let n = item.people.len();
         let inner_w = EDGE * 2. + n as f64 * CAST_W + (n as f64 - 1.) * CAST_GAP;
         let row_h = CAST_H + SP4; // room for a legacy horizontal scroller
-        let row: *mut Object = msg_send![class!(NSScrollView), alloc];
-        let row: *mut Object = autorel(msg_send![row, initWithFrame: rect(0., sy, w, row_h)]);
-        let _: () = msg_send![row, setHasHorizontalScroller: YES];
-        let _: () = msg_send![row, setHasVerticalScroller: NO];
-        let _: () = msg_send![row, setDrawsBackground: NO];
+        let row: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+        let row: *mut AnyObject = autorel(msg_send![row, initWithFrame: rect(0., sy, w, row_h)]);
+        let _: () = msg_send![row, setHasHorizontalScroller: Bool::YES];
+        let _: () = msg_send![row, setHasVerticalScroller: Bool::NO];
+        let _: () = msg_send![row, setDrawsBackground: Bool::NO];
         set_autoresize(row, RESIZE_W);
         let inner = flip_view(rect(0., 0., inner_w, CAST_H));
         for (i, p) in item.people.iter().enumerate() {
@@ -669,7 +664,7 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
 }
 
 /// Season picker and the selected season's episodes. Returns the y below them.
-unsafe fn build_seasons(ui: &mut Ui, doc: *mut Object, host: *mut Object, w: f64, mut y: f64) -> f64 {
+unsafe fn build_seasons(ui: &mut Ui, doc: *mut AnyObject, host: *mut AnyObject, w: f64, mut y: f64) -> f64 {
     let st = ui.detail.seasons.clone();
     let content_w = w - 2. * EDGE;
     let head_h = 24.;
@@ -723,10 +718,10 @@ unsafe fn build_seasons(ui: &mut Ui, doc: *mut Object, host: *mut Object, w: f64
 }
 
 /// Season popup: lists the seasons; choosing one loads its episodes.
-unsafe fn season_popup(st: &SeasonsUi, host: *mut Object) -> *mut Object {
-    let pop: *mut Object = msg_send![class!(NSPopUpButton), alloc];
-    let pop: *mut Object = msg_send![pop, initWithFrame: rect(0., 0., 160., 24.) pullsDown: NO];
-    let names: *mut Object = msg_send![class!(NSMutableArray), array];
+unsafe fn season_popup(st: &SeasonsUi, host: *mut AnyObject) -> *mut AnyObject {
+    let pop: *mut AnyObject = msg_send![class!(NSPopUpButton), alloc];
+    let pop: *mut AnyObject = msg_send![pop, initWithFrame: rect(0., 0., 160., 24.), pullsDown: Bool::NO];
+    let names: *mut AnyObject = msg_send![class!(NSMutableArray), array];
     for s in &st.seasons {
         let _: () = msg_send![names, addObject: ns(&s.name)];
     }
@@ -741,7 +736,7 @@ unsafe fn season_popup(st: &SeasonsUi, host: *mut Object) -> *mut Object {
 /// One episode row: thumbnail (progress bar underneath), number and title, runtime,
 /// overview snippet, and a check when watched. A transparent button over the whole
 /// row plays it; it is added last so it sits on top. Returns the y below the row.
-unsafe fn episode_row(ui: &mut Ui, doc: *mut Object, host: *mut Object, ep: &EpisodeRow, idx: usize, w: f64, y: f64) -> f64 {
+unsafe fn episode_row(ui: &mut Ui, doc: *mut AnyObject, host: *mut AnyObject, ep: &EpisodeRow, idx: usize, w: f64, y: f64) -> f64 {
     let rw = w - 2. * EDGE;
     let text_x = ROW_PAD + THUMB_W + SP4;
     let check_w = if ep.played { 18. } else { 0. };
@@ -795,8 +790,8 @@ unsafe fn episode_row(ui: &mut Ui, doc: *mut Object, host: *mut Object, ep: &Epi
         add_sub(row, g);
     }
 
-    let hit: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("") target: host action: sel!(detailEpisode:)];
-    let _: () = msg_send![hit, setBordered: NO];
+    let hit: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: host, action: sel!(detailEpisode:)];
+    let _: () = msg_send![hit, setBordered: Bool::NO];
     let _: () = msg_send![hit, setTag: idx as isize];
     let _: () = msg_send![hit, setToolTip: ns(&title)];
     set_frame(hit, rect(0., 0., rw, row_h));
@@ -909,8 +904,8 @@ pub fn art_filled(key: u64) -> Option<bool> {
     let ui = UI.get()?;
     let t = ui.detail.targets.iter().find(|t| t.key == key)?;
     unsafe {
-        let layer: *mut Object = msg_send![t.art, layer];
-        let c: *mut Object = msg_send![layer, contents];
+        let layer: *mut AnyObject = msg_send![t.art, layer];
+        let c: *mut AnyObject = msg_send![layer, contents];
         Some(!c.is_null())
     }
 }
@@ -925,7 +920,7 @@ pub fn layout_matches_clip() -> bool {
     let Some(ui) = UI.get() else { return false };
     unsafe {
         let doc = ui.detail.doc.get();
-        let clip: *mut Object = msg_send![ui.detail.scroll.get(), contentView];
+        let clip: *mut AnyObject = msg_send![ui.detail.scroll.get(), contentView];
         let df: NSRect = msg_send![doc, frame];
         let cb: NSRect = msg_send![clip, bounds];
         (df.size.w - cb.size.w).abs() < 0.5 && df.size.h > 0.

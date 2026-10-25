@@ -2,18 +2,15 @@
 //! the buffering backdrop. Everything lives inside `player_host`, which is
 //! forced to the dark appearance so white-on-video text is always legible.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use crate::platform::appkit::*;
 use crate::ui::shell::{fix_height, is_hidden};
 use crate::ui::theme::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 use std::sync::OnceLock;
 
-pub(crate) static PLAYER_HOST_CLASS: OnceLock<&'static Class> = OnceLock::new();
-pub(crate) static GRADIENT_CLASS: OnceLock<&'static Class> = OnceLock::new();
+pub(crate) static PLAYER_HOST_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+pub(crate) static GRADIENT_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 
 /// Standard window buttons occupy the first ~72 pt of the title band; chrome starts after them.
 pub const TL_RESERVE: f64 = 84.;
@@ -22,22 +19,22 @@ const TOAST_TOP: f64 = PLAYER_BAR_H + SP2;
 const INFO_TOP: f64 = TOAST_TOP + 32. + SP2;
 
 pub(crate) unsafe fn register_player_classes() {
-    let mut d = ClassDecl::new("JRPlayerHost", class!(NSView)).unwrap();
-    d.add_method(sel!(mouseMoved:), host_mouse_moved as extern "C" fn(&mut Object, Sel, *mut Object));
+    let mut d = ClassBuilder::new(c"JRPlayerHost", class!(NSView)).unwrap();
+    d.add_method(sel!(mouseMoved:), host_mouse_moved as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
     PLAYER_HOST_CLASS.set(d.register()).ok();
-    let mut g = ClassDecl::new("JRGradientView", class!(NSView)).unwrap();
-    g.add_method(sel!(makeBackingLayer), gradient_layer as extern "C" fn(&mut Object, Sel) -> *mut Object);
+    let mut g = ClassBuilder::new(c"JRGradientView", class!(NSView)).unwrap();
+    g.add_method(sel!(makeBackingLayer), gradient_layer as extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject);
     GRADIENT_CLASS.set(g.register()).ok();
 }
-extern "C" fn host_mouse_moved(_t: &mut Object, _c: Sel, _e: *mut Object) {
+extern "C" fn host_mouse_moved(_t: *mut AnyObject, _c: Sel, _e: *mut AnyObject) {
     unsafe { show_bars() }
 }
-extern "C" fn gradient_layer(_t: &mut Object, _c: Sel) -> *mut Object {
+extern "C" fn gradient_layer(_t: *mut AnyObject, _c: Sel) -> *mut AnyObject {
     unsafe {
-        let l: *mut Object = msg_send![class!(CAGradientLayer), layer];
-        let arr: *mut Object = {
-            let cols = [cg_black(0.55), cg_black(0.0)];
-            msg_send![class!(NSArray), arrayWithObjects: cols.as_ptr() count: 2usize]
+        let l: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
+        let arr: *mut AnyObject = {
+            let cols = [cg_black(0.55) as *mut AnyObject, cg_black(0.0) as *mut AnyObject];
+            msg_send![class!(NSArray), arrayWithObjects: cols.as_ptr(), count: 2usize]
         };
         let _: () = msg_send![l, setColors: arr];
         let _: () = msg_send![l, setStartPoint: NSPoint { x: 0.5, y: 1.0 }];
@@ -46,7 +43,7 @@ extern "C" fn gradient_layer(_t: &mut Object, _c: Sel) -> *mut Object {
     }
 }
 
-pub(crate) unsafe fn dark_appearance() -> *mut Object {
+pub(crate) unsafe fn dark_appearance() -> *mut AnyObject {
     msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameDarkAqua")]
 }
 
@@ -95,14 +92,14 @@ pub(crate) unsafe fn set_external(active: bool) {
 }
 
 /// Builds the AirPlay card inside `ph`, above AVKit's view and below the bars.
-unsafe fn build_external(ph: *mut Object, b: NSRect) {
+unsafe fn build_external(ph: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
-    let v: *mut Object = msg_send![class!(NSView), alloc];
-    let v: *mut Object = autorel(msg_send![v, initWithFrame: b]);
+    let v: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let v: *mut AnyObject = autorel(msg_send![v, initWithFrame: b]);
     set_autoresize(v, RESIZE_W | RESIZE_H);
-    let _: () = msg_send![v, setWantsLayer: YES];
-    let black: *mut Object = msg_send![class!(NSColor), blackColor];
-    let cg: *mut Object = msg_send![black, CGColor];
+    let _: () = msg_send![v, setWantsLayer: Bool::YES];
+    let black: *mut AnyObject = msg_send![class!(NSColor), blackColor];
+    let cg: *mut CGColor = msg_send![black, CGColor];
     let _: () = msg_send![layer_of(v), setBackgroundColor: cg];
     set_hidden(v, true);
     add_sub(ph, v);
@@ -111,8 +108,8 @@ unsafe fn build_external(ph: *mut Object, b: NSRect) {
     let cx = b.size.w / 2.;
     let cy = b.size.h / 2.;
     let flex = MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY;
-    let iv: *mut Object = msg_send![class!(NSImageView), alloc];
-    let iv: *mut Object = autorel(msg_send![iv, initWithFrame: rect(cx - 36., cy + 12., 72., 60.)]);
+    let iv: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let iv: *mut AnyObject = autorel(msg_send![iv, initWithFrame: rect(cx - 36., cy + 12., 72., 60.)]);
     let img = symbol("airplayvideo", 56., Weight::Regular);
     if !img.is_null() {
         let _: () = msg_send![iv, setImage: img];
@@ -134,36 +131,34 @@ unsafe fn build_external(ph: *mut Object, b: NSRect) {
 }
 
 /// Builds bar, toast, info panel and backdrop inside `ph` (the player host) around `avv`.
-pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: NSRect) {
+pub(crate) unsafe fn build_player_chrome(ph: *mut AnyObject, avv: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
     let _: () = msg_send![ph, setAppearance: dark_appearance()];
-    let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
-    let ta: *mut Object = msg_send![ta,
-        initWithRect: rect(0., 0., 10., 10.)
-        options: (0x02usize | 0x01usize | 0x20usize | 0x200usize) owner: ph userInfo: nil()];
+    let ta: *mut AnyObject = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut AnyObject = msg_send![ta,
+        initWithRect: rect(0., 0., 10., 10.), options: (0x02usize | 0x01usize | 0x20usize | 0x200usize), owner: ph, userInfo: nil()];
     let _: () = msg_send![ph, addTrackingArea: ta];
     autorel(ta);
 
     // AVKit's own controls are off: the custom transport bar (ui::playerbar) is the transport.
     // Media keys / Control Centre still work through now-playing.
     let _: () = msg_send![avv, setControlsStyle: 0isize];
-    let _: () = msg_send![avv, setUpdatesNowPlayingInfoCenter: YES];
+    let _: () = msg_send![avv, setUpdatesNowPlayingInfoCenter: Bool::YES];
 
     build_external(ph, b);
 
     // ---- top bar (gradient) ----
     let gcls = *GRADIENT_CLASS.get().unwrap();
-    let bar: *mut Object = msg_send![gcls, alloc];
-    let bar: *mut Object = msg_send![bar, initWithFrame: rect(0., b.size.h - PLAYER_BAR_H, b.size.w, PLAYER_BAR_H)];
-    let _: () = msg_send![bar, setWantsLayer: YES];
+    let bar: *mut AnyObject = msg_send![gcls, alloc];
+    let bar: *mut AnyObject = msg_send![bar, initWithFrame: rect(0., b.size.h - PLAYER_BAR_H, b.size.w, PLAYER_BAR_H)];
+    let _: () = msg_send![bar, setWantsLayer: Bool::YES];
     set_autoresize(bar, RESIZE_W | MARGIN_MINY);
     add_sub(ph, bar);
     autorel(bar);
     ui.top_bar = Ptr(bar);
 
-    let back: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-        target: ui.ctl.get() action: sel!(stopPlayback:)];
-    let _: () = msg_send![back, setBordered: NO];
+    let back: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: sel!(stopPlayback:)];
+    let _: () = msg_send![back, setBordered: Bool::NO];
     let bi = symbol("chevron.left", 17., Weight::Medium);
     if !bi.is_null() {
         let _: () = msg_send![back, setImage: bi];
@@ -197,12 +192,12 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     set_autoresize(chip, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY);
     let cl = layer_of(chip);
     set_corner(cl, 16.);
-    let _: () = msg_send![cl, setMasksToBounds: YES];
+    let _: () = msg_send![cl, setMasksToBounds: Bool::YES];
     let _: () = msg_send![chip, setAlphaValue: 0.0f64];
     add_sub(ph, chip);
     ui.chip = Ptr(chip);
-    let ti: *mut Object = msg_send![class!(NSImageView), alloc];
-    let ti: *mut Object = autorel(msg_send![ti, initWithFrame: rect(SP3, 8., 16., 16.)]);
+    let ti: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let ti: *mut AnyObject = autorel(msg_send![ti, initWithFrame: rect(SP3, 8., 16., 16.)]);
     let _: () = msg_send![ti, setContentTintColor: color(C_ON_MEDIA)];
     set_hidden(ti, true);
     add_sub(chip, ti);
@@ -218,7 +213,7 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     set_autoresize(ip, MARGIN_MAXX | MARGIN_MINY);
     let il = layer_of(ip);
     set_corner(il, 8.);
-    let _: () = msg_send![il, setMasksToBounds: YES];
+    let _: () = msg_send![il, setMasksToBounds: Bool::YES];
     add_sub(ph, ip);
     set_hidden(ip, !ui.cfg.settings.show_stats);
     ui.info_panel = Ptr(ip);
@@ -229,36 +224,36 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     ui.info_label = Ptr(ilab);
 
     // ---- buffering backdrop (inside AVKit's overlay view, under its controls) ----
-    let overlay: *mut Object = msg_send![avv, contentOverlayView];
+    let overlay: *mut AnyObject = msg_send![avv, contentOverlayView];
     let parent = if overlay.is_null() { ph } else { overlay };
     let ob = bounds_of(parent);
-    let bd: *mut Object = msg_send![class!(NSView), alloc];
-    let bd: *mut Object = msg_send![bd, initWithFrame: ob];
-    let _: () = msg_send![bd, setWantsLayer: YES];
+    let bd: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let bd: *mut AnyObject = msg_send![bd, initWithFrame: ob];
+    let _: () = msg_send![bd, setWantsLayer: Bool::YES];
     set_autoresize(bd, RESIZE_W | RESIZE_H);
     set_hidden(bd, true);
     add_sub(parent, bd);
     autorel(bd);
     ui.backdrop = Ptr(bd);
     let (pw, ph_) = (180., 270.);
-    let pv: *mut Object = msg_send![class!(NSImageView), alloc];
-    let pv: *mut Object = autorel(msg_send![pv, initWithFrame: rect((ob.size.w - pw) / 2., (ob.size.h - ph_) / 2. + 20., pw, ph_)]);
+    let pv: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let pv: *mut AnyObject = autorel(msg_send![pv, initWithFrame: rect((ob.size.w - pw) / 2., (ob.size.h - ph_) / 2. + 20., pw, ph_)]);
     let _: () = msg_send![pv, setImageScaling: 3isize]; // axes independently: we size it to the aspect ourselves
     let pl = layer_of(pv);
     set_corner(pl, R_POSTER);
-    let _: () = msg_send![pl, setMasksToBounds: YES];
+    let _: () = msg_send![pl, setMasksToBounds: Bool::YES];
     set_autoresize(pv, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
     add_sub(bd, pv);
     ui.backdrop_poster = Ptr(pv);
-    let sp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
-    let sp: *mut Object = autorel(msg_send![sp, initWithFrame: rect(ob.size.w / 2. - 14., (ob.size.h - ph_) / 2. - 36., 28., 28.)]);
+    let sp: *mut AnyObject = msg_send![class!(NSProgressIndicator), alloc];
+    let sp: *mut AnyObject = autorel(msg_send![sp, initWithFrame: rect(ob.size.w / 2. - 14., (ob.size.h - ph_) / 2. - 36., 28., 28.)]);
     let _: () = msg_send![sp, setStyle: 1isize];
-    let _: () = msg_send![sp, setIndeterminate: YES];
-    let _: () = msg_send![sp, setUsesThreadedAnimation: YES];
+    let _: () = msg_send![sp, setIndeterminate: Bool::YES];
+    let _: () = msg_send![sp, setUsesThreadedAnimation: Bool::YES];
     set_autoresize(sp, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
     add_sub(bd, sp);
     ui.backdrop_spin = Ptr(sp);
-    let _ = (fix_height as unsafe fn(*mut Object, f64), is_hidden as unsafe fn(*mut Object) -> bool);
+    let _ = (fix_height as unsafe fn(*mut AnyObject, f64), is_hidden as unsafe fn(*mut AnyObject) -> bool);
 }
 
 #[cfg(test)]
@@ -324,13 +319,13 @@ pub(crate) unsafe fn hide_bars_if_idle() {
             ui.bar_shown = false;
             fade(ui.top_bar.get(), 0.0, M_STD);
             fade_transport(0.0, M_STD);
-            let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: YES];
+            let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: Bool::YES];
         }
     }
 }
-pub(crate) unsafe fn fade(v: *mut Object, to: f64, d: f64) {
+pub(crate) unsafe fn fade(v: *mut AnyObject, to: f64, d: f64) {
     anim_begin(d, if to > 0.5 { timing_ease_out() } else { timing_ease_in_out() });
-    let a: *mut Object = msg_send![v, animator];
+    let a: *mut AnyObject = msg_send![v, animator];
     let _: () = msg_send![a, setAlphaValue: to];
     anim_end();
 }
@@ -340,8 +335,7 @@ pub(crate) unsafe fn fade(v: *mut Object, to: f64, d: f64) {
 pub(crate) unsafe fn toast(text: &str, symbol_name: Option<&str>, is_err: bool) {
     let ui = UI.get_mut().unwrap();
     let ctl = ui.ctl.get();
-    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl
-        selector: sel!(jrHideToast:) object: nil()];
+    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl, selector: sel!(jrHideToast:), object: nil()];
     if text.is_empty() {
         let _: () = msg_send![ui.chip.get(), setAlphaValue: 0.0f64];
         return;
@@ -355,7 +349,7 @@ pub(crate) unsafe fn toast(text: &str, symbol_name: Option<&str>, is_err: bool) 
         let _: () = msg_send![ui.toast_icon.get(), setContentTintColor: tint];
     }
     set_hidden(ui.toast_icon.get(), !has_icon);
-    let cell: *mut Object = msg_send![ui.chip_label.get(), cell];
+    let cell: *mut AnyObject = msg_send![ui.chip_label.get(), cell];
     let tsz: NSSize = msg_send![cell, cellSize];
     let icon_w = if has_icon { 16. + SP2 } else { 0. };
     let w = (tsz.w.ceil() + 2. * SP4 + icon_w).clamp(96., 420.);
@@ -365,9 +359,9 @@ pub(crate) unsafe fn toast(text: &str, symbol_name: Option<&str>, is_err: bool) 
     set_frame(ui.chip_label.get(), rect(SP4 + icon_w, 7., w - 2. * SP4 - icon_w, 17.));
     fade(ui.chip.get(), 1.0, M_STD);
     let delay = if is_err { 6.0f64 } else { 1.8f64 };
-    let _: () = msg_send![ctl, performSelector: sel!(jrHideToast:) withObject: nil() afterDelay: delay];
+    let _: () = msg_send![ctl, performSelector: sel!(jrHideToast:), withObject: nil(), afterDelay: delay];
 }
-pub(crate) extern "C" fn hide_toast(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn hide_toast(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         fade(ui.chip.get(), 0.0, M_STD);
@@ -380,7 +374,7 @@ pub(crate) unsafe fn toast_visible() -> bool {
 }
 
 // ---- playback info -------------------------------------------------------------------------------------
-pub(crate) extern "C" fn toggle_info(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn toggle_info(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.show_stats = !ui.cfg.settings.show_stats;
@@ -402,13 +396,12 @@ pub(crate) unsafe fn apply_info_visibility() {
 
 // ---- backdrop ---------------------------------------------------------------------------------------------
 /// Show the buffering backdrop: a tinted fill, the poster when we have one, and a spinner.
-pub(crate) unsafe fn backdrop_show(tint: *mut Object, poster: *mut Object) {
+pub(crate) unsafe fn backdrop_show(tint: *mut AnyObject, poster: *mut AnyObject) {
     let ui = UI.get_mut().unwrap();
     let ctl = ui.ctl.get();
-    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl
-        selector: sel!(jrBackdropOff:) object: nil()];
+    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl, selector: sel!(jrBackdropOff:), object: nil()];
     let l = layer_of(ui.backdrop.get());
-    let c: *mut Object = msg_send![tint, CGColor];
+    let c: *mut CGColor = msg_send![tint, CGColor];
     let _: () = msg_send![l, setBackgroundColor: c];
     if poster.is_null() {
         set_hidden(ui.backdrop_poster.get(), true);
@@ -435,9 +428,9 @@ pub(crate) unsafe fn backdrop_hide() {
     let _: () = msg_send![ui.backdrop_spin.get(), stopAnimation: nil()];
     fade(ui.backdrop.get(), 0.0, M_STD);
     let ctl = ui.ctl.get();
-    let _: () = msg_send![ctl, performSelector: sel!(jrBackdropOff:) withObject: nil() afterDelay: M_STD + 0.05];
+    let _: () = msg_send![ctl, performSelector: sel!(jrBackdropOff:), withObject: nil(), afterDelay: M_STD + 0.05];
 }
-pub(crate) extern "C" fn backdrop_off(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn backdrop_off(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         set_hidden(ui.backdrop.get(), true);
@@ -447,4 +440,4 @@ pub(crate) unsafe fn backdrop_visible() -> bool {
     let ui = UI.get().unwrap();
     !is_hidden(ui.backdrop.get())
 }
-pub const _KEEP: BOOL = NO;
+pub const _KEEP: Bool = Bool::NO;

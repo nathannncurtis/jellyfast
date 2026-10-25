@@ -1,4 +1,8 @@
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
+use objc2::encode::{Encode, Encoding, RefEncode};
+use std::ffi::CStr;
 use crate::*;
 use crate::jellyfin::models::*;
 use crate::app::controller::*;
@@ -7,11 +11,6 @@ use crate::platform::avkit::*;
 use crate::ui::library::*;
 use crate::ui::settings::*;
 use crate::ui::shell::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, BOOL, NO, Object, Sel, YES};
-use objc::{sel, sel_impl};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -47,6 +46,39 @@ pub fn rect(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat) -> NSRect {
 }
 pub fn size(w: CGFloat, h: CGFloat) -> NSSize {
     NSSize { w, h }
+}
+
+/// Opaque CoreGraphics reference types. They encode as `^{CGColor=}` and friends, which is what
+/// objc2's signature checks expect for CGColorRef / CGImageRef / CGPathRef arguments and returns.
+#[repr(C)]
+pub struct CGColor {
+    _opaque: [u8; 0],
+}
+unsafe impl Encode for CGColor {
+    const ENCODING: Encoding = Encoding::Struct("CGColor", &[]);
+}
+unsafe impl RefEncode for CGColor {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+#[repr(C)]
+pub struct CGImage {
+    _opaque: [u8; 0],
+}
+unsafe impl Encode for CGImage {
+    const ENCODING: Encoding = Encoding::Struct("CGImage", &[]);
+}
+unsafe impl RefEncode for CGImage {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+#[repr(C)]
+pub struct CGPath {
+    _opaque: [u8; 0],
+}
+unsafe impl Encode for CGPath {
+    const ENCODING: Encoding = Encoding::Struct("CGPath", &[]);
+}
+unsafe impl RefEncode for CGPath {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
 }
 
 /// CMTime must be ABI-identical to CoreMedia's (24 bytes; the uint8 flags
@@ -94,23 +126,23 @@ pub fn offscreen_mode() -> bool {
 }
 /// Right edge of the union of all screens.
 pub unsafe fn screens_max_x() -> f64 {
-    let screens: *mut Object = msg_send![class!(NSScreen), screens];
+    let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
     let n: NSUInteger = msg_send![screens, count];
     let mut max_x: f64 = 0.0;
     for i in 0..n {
-        let s: *mut Object = msg_send![screens, objectAtIndex: i];
+        let s: *mut AnyObject = msg_send![screens, objectAtIndex: i];
         let f: NSRect = msg_send![s, frame];
         max_x = max_x.max(f.origin.x + f.size.w);
     }
     max_x
 }
 /// Self-test only: move a window fully off every screen (size unchanged).
-pub unsafe fn place_offscreen(win: *mut Object) {
+pub unsafe fn place_offscreen(win: *mut AnyObject) {
     let x = screens_max_x() + 2000.0;
     let _: () = msg_send![win, setFrameOrigin: NSPoint { x, y: 100.0 }];
 }
 /// Center normally; off-screen in self-test mode.
-pub unsafe fn place_window(win: *mut Object) {
+pub unsafe fn place_window(win: *mut AnyObject) {
     if offscreen_mode() {
         place_offscreen(win);
     } else {
@@ -118,49 +150,49 @@ pub unsafe fn place_window(win: *mut Object) {
     }
 }
 /// Window subclass that, in self-test mode, lets AppKit keep it off-screen.
-extern "C" fn constrain_frame(this: &mut Object, _c: Sel, r: NSRect, screen: *mut Object) -> NSRect {
+extern "C" fn constrain_frame(this: *mut AnyObject, _c: Sel, r: NSRect, screen: *mut AnyObject) -> NSRect {
     unsafe {
         if offscreen_mode() {
             r
         } else {
-            msg_send![super(this, class!(NSWindow)), constrainFrameRect: r toScreen: screen]
+            msg_send![super(this, class!(NSWindow)), constrainFrameRect: r, toScreen: screen]
         }
     }
 }
 pub(crate) unsafe fn register_window_class() {
-    let mut d = ClassDecl::new("JRWindow", class!(NSWindow)).unwrap();
+    let mut d = ClassBuilder::new(c"JRWindow", class!(NSWindow)).unwrap();
     d.add_method(
         sel!(constrainFrameRect:toScreen:),
-        constrain_frame as extern "C" fn(&mut Object, Sel, NSRect, *mut Object) -> NSRect,
+        constrain_frame as extern "C" fn(*mut AnyObject, Sel, NSRect, *mut AnyObject) -> NSRect,
     );
     d.register();
 }
-pub(crate) unsafe fn jr_window_class() -> *const Class {
-    objc::runtime::objc_getClass(b"JRWindow\0".as_ptr() as *const std::os::raw::c_char) as *const Class
+pub(crate) unsafe fn jr_window_class() -> *const AnyClass {
+    AnyClass::get(c"JRWindow").map_or(std::ptr::null(), |c| c as *const AnyClass)
 }
 
 // ---- Tiny pointer RAII for process-lifetime globals --------------------
 #[derive(Clone, Copy)]
-pub struct Ptr(pub *mut Object);
+pub struct Ptr(pub *mut AnyObject);
 unsafe impl Send for Ptr {}
 impl Ptr {
-    pub fn retained(p: *mut Object) -> Ptr {
+    pub fn retained(p: *mut AnyObject) -> Ptr {
         unsafe {
-            let _: *mut Object = msg_send![p, retain];
+            let _: *mut AnyObject = msg_send![p, retain];
         }
         Ptr(p)
     }
-    pub fn get(&self) -> *mut Object {
+    pub fn get(&self) -> *mut AnyObject {
         self.0
     }
 }
 
 // ---- String/nil helpers ------------------------------------------------
-pub unsafe fn ns(s: &str) -> *mut Object {
+pub unsafe fn ns(s: &str) -> *mut AnyObject {
     let c = CString::new(s).unwrap_or_default();
     msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()]
 }
-pub unsafe fn to_str(o: *mut Object) -> String {
+pub unsafe fn to_str(o: *mut AnyObject) -> String {
     if o.is_null() {
         return String::new();
     }
@@ -171,47 +203,57 @@ pub unsafe fn to_str(o: *mut Object) -> String {
         std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
     }
 }
-pub unsafe fn nil() -> *mut Object {
+/// Registers (or looks up) a selector from a Rust string, for selectors only known at run time.
+pub fn sel_named(name: &str) -> Sel {
+    let c = std::ffi::CString::new(name).expect("selector name has no NUL");
+    Sel::register(&c)
+}
+pub unsafe fn nil() -> *mut AnyObject {
     std::ptr::null_mut()
 }
-pub unsafe fn release_obj(p: *mut Object) {
+pub unsafe fn release_obj(p: *mut AnyObject) {
     if !p.is_null() {
         let _: () = msg_send![p, release];
     }
 }
-pub(crate) unsafe fn menu_item(title: &str, action: Sel, key: &str) -> *mut Object {
-    let alloc: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let it: *mut Object = msg_send![alloc, initWithTitle: ns(title) action: action keyEquivalent: ns(key)];
+pub(crate) unsafe fn menu_item(title: &str, action: Sel, key: &str) -> *mut AnyObject {
+    let alloc: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
+    let it: *mut AnyObject = msg_send![alloc, initWithTitle: ns(title), action: action, keyEquivalent: ns(key)];
     autorel(it)
 }
-pub(crate) unsafe fn autorel(p: *mut Object) -> *mut Object {
-    let _: *mut Object = msg_send![p, autorelease];
+/// Address of an instance variable declared at class registration (`add_ivar`). Replaces the
+/// deprecated `Object::get_ivar`/`set_ivar`; the ivar is looked up on the object's own class.
+pub(crate) unsafe fn ivar_ptr<T: Encode>(obj: &AnyObject, name: &CStr) -> *mut T {
+    obj.class().instance_variable(name).expect("ivar declared at class registration").load_ptr::<T>(obj)
+}
+pub(crate) unsafe fn autorel(p: *mut AnyObject) -> *mut AnyObject {
+    let _: *mut AnyObject = msg_send![p, autorelease];
     p
 }
-pub(crate) unsafe fn frame_of(v: *mut Object) -> NSRect {
+pub(crate) unsafe fn frame_of(v: *mut AnyObject) -> NSRect {
     msg_send![v, frame]
 }
-pub(crate) unsafe fn set_frame(v: *mut Object, r: NSRect) {
+pub(crate) unsafe fn set_frame(v: *mut AnyObject, r: NSRect) {
     let _: () = msg_send![v, setFrame: r];
 }
-pub(crate) unsafe fn bounds_of(v: *mut Object) -> NSRect {
+pub(crate) unsafe fn bounds_of(v: *mut AnyObject) -> NSRect {
     msg_send![v, bounds]
 }
-pub(crate) unsafe fn add_sub(parent: *mut Object, child: *mut Object) {
+pub(crate) unsafe fn add_sub(parent: *mut AnyObject, child: *mut AnyObject) {
     let _: () = msg_send![parent, addSubview: child];
 }
-pub(crate) unsafe fn set_hidden(v: *mut Object, h: bool) {
-    let _: () = msg_send![v, setHidden: h as BOOL];
+pub(crate) unsafe fn set_hidden(v: *mut AnyObject, h: bool) {
+    let _: () = msg_send![v, setHidden: Bool::new(h)];
 }
-pub(crate) unsafe fn set_autoresize(v: *mut Object, mask: NSUInteger) {
+pub(crate) unsafe fn set_autoresize(v: *mut AnyObject, mask: NSUInteger) {
     let _: () = msg_send![v, setAutoresizingMask: mask];
 }
 /// Layer of a view, making the view layer-backed first (`layer` is nil otherwise).
-pub(crate) unsafe fn layer_of(v: *mut Object) -> *mut Object {
-    let _: () = msg_send![v, setWantsLayer: YES];
+pub(crate) unsafe fn layer_of(v: *mut AnyObject) -> *mut AnyObject {
+    let _: () = msg_send![v, setWantsLayer: Bool::YES];
     msg_send![v, layer]
 }
-pub(crate) unsafe fn color_named(name: &str) -> *mut Object {
+pub(crate) unsafe fn color_named(name: &str) -> *mut AnyObject {
     use crate::ui::theme::*;
     match name {
         "label" => color(C_TEXT),
@@ -223,35 +265,35 @@ pub(crate) unsafe fn color_named(name: &str) -> *mut Object {
         _ => color(C_TEXT),
     }
 }
-pub(crate) unsafe fn symbol_image(name: &str, point_size: CGFloat) -> *mut Object {
+pub(crate) unsafe fn symbol_image(name: &str, point_size: CGFloat) -> *mut AnyObject {
     use crate::ui::theme::*;
     if point_size <= 0.0 {
-        return msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name) accessibilityDescription: nil()];
+        return msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name), accessibilityDescription: nil()];
     }
     symbol(name, point_size, Weight::Regular)
 }
 
 // ---- Global UI state (main thread only) --------------------------------
 pub struct CellHandle {
-    pub container: *mut Object,
+    pub container: *mut AnyObject,
     /// Clipped artwork layer (radius, placeholder colour, poster contents).
-    pub art: *mut Object,
+    pub art: *mut AnyObject,
     /// Unclipped shadow host that also takes the hover transform.
-    pub shadow: *mut Object,
-    pub prog_track: *mut Object,
-    pub prog_fill: *mut Object,
+    pub shadow: *mut AnyObject,
+    pub prog_track: *mut AnyObject,
+    pub prog_fill: *mut AnyObject,
     pub prog_frac: f64,
-    pub dim: *mut Object,
-    pub circle: *mut Object,
-    pub glyph: *mut Object,
-    pub play_icon: *mut Object,
-    pub badge: *mut Object,
-    pub title: *mut Object,
-    pub sub: *mut Object,
-    pub btn: *mut Object,
+    pub dim: *mut AnyObject,
+    pub circle: *mut AnyObject,
+    pub glyph: *mut AnyObject,
+    pub play_icon: *mut AnyObject,
+    pub badge: *mut AnyObject,
+    pub title: *mut AnyObject,
+    pub sub: *mut AnyObject,
+    pub btn: *mut AnyObject,
     /// Skeleton text bars (null for real cells).
-    pub skel_title: *mut Object,
-    pub skel_sub: *mut Object,
+    pub skel_title: *mut AnyObject,
+    pub skel_sub: *mut AnyObject,
     pub key: u64,
     pub meta: ListItem,
 }
@@ -367,7 +409,7 @@ pub struct Ui {
     pub seerr: crate::ui::seerr::SeerrUi,
     pub detail: crate::ui::detail::DetailUi,
     // Rust-side state
-    pub rows: Vec<(*mut Object, String)>, // sidebar row buttons + view ids
+    pub rows: Vec<(*mut AnyObject, String)>, // sidebar row buttons + view ids
     pub views: Vec<(String, String, Option<String>)>, // sidebar: visible, ordered
     pub all_views: Vec<(String, String, Option<String>)>, // every library from the server (+ Live TV)
     pub user_label: String,
@@ -375,18 +417,18 @@ pub struct Ui {
     pub lib_hidden: Vec<String>,                          // Settings working copy
     pub lib_sel: usize,
     pub items: Vec<ListItem>,
-    pub poster_cache: HashMap<u64, *mut Object>, // +1 owned NSImage
+    pub poster_cache: HashMap<u64, *mut AnyObject>, // +1 owned NSImage
     pub grid_data: Option<Box<GridData>>,
     pub playing: Option<PlayingNow>,
-    pub sub_group: *mut Object,
-    pub sub_opts: Vec<*mut Object>,
-    pub audio_group: *mut Object,
-    pub audio_opts: Vec<*mut Object>,
+    pub sub_group: *mut AnyObject,
+    pub sub_opts: Vec<*mut AnyObject>,
+    pub audio_group: *mut AnyObject,
+    pub audio_opts: Vec<*mut AnyObject>,
     pub sel_sub: usize,
     pub sel_audio: usize,
     pub mode_stack: Vec<(String, String, Option<String>)>, // for back nav
     pub selected_view: Option<usize>,
-    pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
+    pub side_dyn: Vec<*mut AnyObject>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
     /// Home screen views (scroll, rows, cards, sidebar row).
     pub home: crate::ui::home::HomeUi,
@@ -439,8 +481,8 @@ pub static PUMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize
 /// Sender worker-side code uses; main.rs forwards it to the UI and kicks the pump.
 pub static WORKER_TX: OnceLock<UnboundedSender<MainMsg>> = OnceLock::new();
 pub static MAIN_RX: OnceLock<Mutex<UnboundedReceiver<MainMsg>>> = OnceLock::new();
-pub static GRID_CLASS: OnceLock<&'static Class> = OnceLock::new();
-pub(crate) static CELL_CLASS: OnceLock<&'static Class> = OnceLock::new();
+pub static GRID_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+pub(crate) static CELL_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 
 
 // ---- Main-thread pump (worker → UI) ------------------------------------
@@ -449,20 +491,19 @@ pub(crate) static CELL_CLASS: OnceLock<&'static Class> = OnceLock::new();
 // the `block` crate for no benefit). Box is reconstructed exactly once.
 pub fn on_main(f: impl FnOnce() + Send + 'static) {
     unsafe {
-        let pump = PUMP.load(std::sync::atomic::Ordering::SeqCst) as *mut Object;
+        let pump = PUMP.load(std::sync::atomic::Ordering::SeqCst) as *mut AnyObject;
         if pump.is_null() {
             return;
         }
         let b: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
         let p = Box::into_raw(Box::new(b)) as *mut c_void;
         // Foundation retains the argument, so it must be a real object: wrap in NSValue.
-        let v: *mut Object = msg_send![class!(NSValue), valueWithPointer: p as *const c_void];
-        let _: () = msg_send![pump, performSelectorOnMainThread: sel!(jrCall:)
-            withObject: v waitUntilDone: NO];
+        let v: *mut AnyObject = msg_send![class!(NSValue), valueWithPointer: p as *const c_void];
+        let _: () = msg_send![pump, performSelectorOnMainThread: sel!(jrCall:), withObject: v, waitUntilDone: Bool::NO];
     }
 }
 
-pub(crate) extern "C" fn pump_call(_this: &mut Object, _cmd: Sel, boxed: *mut Object) {
+pub(crate) extern "C" fn pump_call(_this: *mut AnyObject, _cmd: Sel, boxed: *mut AnyObject) {
     unsafe {
         if boxed.is_null() {
             return;
@@ -477,34 +518,34 @@ pub(crate) extern "C" fn pump_call(_this: &mut Object, _cmd: Sel, boxed: *mut Ob
 pub(crate) unsafe fn register_classes() {
     // App delegate
     {
-        let mut d = ClassDecl::new("JRAppDelegate", class!(NSObject)).unwrap();
+        let mut d = ClassBuilder::new(c"JRAppDelegate", class!(NSObject)).unwrap();
         d.add_method(
             sel!(applicationDidFinishLaunching:),
-            app_did_finish_launch as extern "C" fn(&mut Object, Sel, *mut Object),
+            app_did_finish_launch as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
         d.add_method(
             sel!(applicationShouldTerminate:),
-            app_should_terminate as extern "C" fn(&mut Object, Sel, *mut Object) -> NSInteger,
+            app_should_terminate as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> NSInteger,
         );
         d.add_method(
             sel!(applicationShouldTerminateAfterLastWindowClosed:),
-            crate::ui::playerbar::terminate_after_last_window as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
+            crate::ui::playerbar::terminate_after_last_window as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool,
         );
         d.add_method(
             sel!(applicationSupportsSecureRestorableState:),
-            always_yes_obj as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
+            always_yes_obj as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool,
         );
         d.register();
     }
     // Pump (main-thread closure trampoline)
     {
-        let mut d = ClassDecl::new("JRPump", class!(NSObject)).unwrap();
-        d.add_method(sel!(jrCall:), pump_call as extern "C" fn(&mut Object, Sel, *mut Object));
+        let mut d = ClassBuilder::new(c"JRPump", class!(NSObject)).unwrap();
+        d.add_method(sel!(jrCall:), pump_call as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
         d.register();
     }
     // Controller: menu/button/KVO/timer targets
     {
-        let mut d = ClassDecl::new("JRCtl", class!(NSObject)).unwrap();
+        let mut d = ClassBuilder::new(c"JRCtl", class!(NSObject)).unwrap();
         for (s, f) in [
             (sel!(playPause:), play_pause as Extern0),
             (sel!(stopPlayback:), stop_playback as Extern0),
@@ -593,7 +634,7 @@ pub(crate) unsafe fn register_classes() {
         d.add_method(sel!(observeValueForKeyPath:ofObject:change:context:), kvo as KvoFn);
         d.add_method(
             sel!(validateMenuItem:),
-            crate::ui::shortcuts::validate_menu_item as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
+            crate::ui::shortcuts::validate_menu_item as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool,
         );
         d.register();
     }
@@ -607,39 +648,39 @@ pub(crate) unsafe fn register_classes() {
     crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
     {
-        let mut d = ClassDecl::new("JRGridView", class!(NSView)).unwrap();
-        d.add_ivar::<*mut c_void>("jrData");
-        d.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
-        d.add_method(sel!(layout), grid_layout as extern "C" fn(&mut Object, Sel));
+        let mut d = ClassBuilder::new(c"JRGridView", class!(NSView)).unwrap();
+        d.add_ivar::<*mut c_void>(c"jrData");
+        d.add_method(sel!(isFlipped), always_yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
+        d.add_method(sel!(layout), grid_layout as extern "C" fn(*mut AnyObject, Sel));
         d.add_method(
             sel!(viewDidChangeEffectiveAppearance),
-            grid_appearance_changed as extern "C" fn(&mut Object, Sel),
+            grid_appearance_changed as extern "C" fn(*mut AnyObject, Sel),
         );
         d.add_method(
             sel!(setFrameSize:),
-            grid_set_frame as extern "C" fn(&mut Object, Sel, NSSize),
+            grid_set_frame as extern "C" fn(*mut AnyObject, Sel, NSSize),
         );
         GRID_CLASS.set(d.register()).ok();
     }
     // Poster cell (hover)
     {
-        let mut d = ClassDecl::new("JRCellView", class!(NSView)).unwrap();
-        d.add_ivar::<*mut c_void>("jrCell");
-        d.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
-        d.add_method(sel!(layout), cell_layout as extern "C" fn(&mut Object, Sel));
+        let mut d = ClassBuilder::new(c"JRCellView", class!(NSView)).unwrap();
+        d.add_ivar::<*mut c_void>(c"jrCell");
+        d.add_method(sel!(isFlipped), always_yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
+        d.add_method(sel!(layout), cell_layout as extern "C" fn(*mut AnyObject, Sel));
         d.add_method(
             sel!(mouseEntered:),
-            cell_hover as extern "C" fn(&mut Object, Sel, *mut Object),
+            cell_hover as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
         d.add_method(
             sel!(mouseExited:),
-            cell_unhover as extern "C" fn(&mut Object, Sel, *mut Object),
+            cell_unhover as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
         CELL_CLASS.set(d.register()).ok();
     }
 }
-pub(crate) type Extern0 = extern "C" fn(&mut Object, Sel, *mut Object);
-pub(crate) type KvoFn = extern "C" fn(&mut Object, Sel, *mut Object, *mut Object, *mut Object, *mut c_void);
+pub(crate) type Extern0 = extern "C" fn(*mut AnyObject, Sel, *mut AnyObject);
+pub(crate) type KvoFn = extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject, *mut AnyObject, *mut c_void);
 
 /// Refresh the playback-info panel text (time, resolution, bitrate, method). No-op while it is off.
 pub(crate) unsafe fn update_chip() {
@@ -669,13 +710,13 @@ pub(crate) unsafe fn update_chip() {
     if sz.w > 0.0 {
         s.push_str(&format!("  ·  {}×{}", sz.w as i64, sz.h as i64));
     }
-    let log: *mut Object = msg_send![ui.pitem.get(), accessLog];
+    let log: *mut AnyObject = msg_send![ui.pitem.get(), accessLog];
     if !log.is_null() {
-        let events: *mut Object = msg_send![log, events];
+        let events: *mut AnyObject = msg_send![log, events];
         if !events.is_null() {
             let n: NSUInteger = msg_send![events, count];
             if n > 0 {
-                let ev: *mut Object = msg_send![events, objectAtIndex: n - 1];
+                let ev: *mut AnyObject = msg_send![events, objectAtIndex: n - 1];
                 let br: f64 = msg_send![ev, indicatedBitrate];
                 if br > 0.0 {
                     s.push_str(&format!("  ·  {:.1} Mb/s", br / 1_000_000.0));
@@ -686,7 +727,7 @@ pub(crate) unsafe fn update_chip() {
     s.push_str(&format!("  ·  {}", crate::transcode::decision::method_label(pn.method)));
     set_text(ui.info_label.get(), &s);
     // Fit the pill to its text (the label truncates if the window is too narrow).
-    let cell: *mut Object = msg_send![ui.info_label.get(), cell];
+    let cell: *mut AnyObject = msg_send![ui.info_label.get(), cell];
     let tsz: NSSize = msg_send![cell, cellSize];
     let w = (tsz.w.ceil() + 2. * crate::ui::theme::SP2 + 2.).min(bounds_of(ui.player_host.get()).size.w - 2. * crate::ui::theme::SP4);
     let f = frame_of(ui.info_panel.get());
@@ -694,7 +735,7 @@ pub(crate) unsafe fn update_chip() {
     set_frame(ui.info_label.get(), rect(crate::ui::theme::SP2, 5., w - 2. * crate::ui::theme::SP2, 16.));
 }
 
-pub(crate) extern "C" fn fullscreen(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn fullscreen(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if offscreen_mode() {
@@ -704,7 +745,7 @@ pub(crate) extern "C" fn fullscreen(_t: &mut Object, _c: Sel, _s: *mut Object) {
         let _: () = msg_send![ui.win.get(), toggleFullScreen: nil()];
     }
 }
-pub(crate) extern "C" fn show_settings(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn show_settings(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let _ = ui.main_tx.send(MainMsg::SettingsSnapshot(Box::new(ui.cfg.clone())));
@@ -715,22 +756,22 @@ pub(crate) extern "C" fn show_settings(_t: &mut Object, _c: Sel, _s: *mut Object
 pub(crate) unsafe fn settings_open() -> bool {
     let ui = UI.get_mut().unwrap();
     if offscreen_mode() {
-        let v: BOOL = msg_send![ui.settings_win.get(), isVisible];
-        return v == YES;
+        let v: Bool = msg_send![ui.settings_win.get(), isVisible];
+        return v == Bool::YES;
     }
-    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
+    let attached: *mut AnyObject = msg_send![ui.win.get(), attachedSheet];
     !attached.is_null()
 }
 /// Standard About panel, with a credits line saying what this is and where the idea came from.
-pub(crate) extern "C" fn show_about(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn show_about(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get().unwrap();
-        let credits: *mut Object = msg_send![class!(NSAttributedString), alloc];
-        let credits: *mut Object = msg_send![credits, initWithString: ns("A native client for Jellyfin. Inspired by Spotifast.")];
-        let opts: *mut Object = msg_send![class!(NSMutableDictionary), dictionary];
-        let _: () = msg_send![opts, setObject: credits forKey: ns("Credits")];
-        let _: () = msg_send![opts, setObject: ns("Jellyfast") forKey: ns("ApplicationName")];
-        let _: () = msg_send![opts, setObject: ns(env!("CARGO_PKG_VERSION")) forKey: ns("ApplicationVersion")];
+        let credits: *mut AnyObject = msg_send![class!(NSAttributedString), alloc];
+        let credits: *mut AnyObject = msg_send![credits, initWithString: ns("A native client for Jellyfin. Inspired by Spotifast.")];
+        let opts: *mut AnyObject = msg_send![class!(NSMutableDictionary), dictionary];
+        let _: () = msg_send![opts, setObject: credits, forKey: ns("Credits")];
+        let _: () = msg_send![opts, setObject: ns("Jellyfast"), forKey: ns("ApplicationName")];
+        let _: () = msg_send![opts, setObject: ns(env!("CARGO_PKG_VERSION")), forKey: ns("ApplicationVersion")];
         let _: () = msg_send![ui.app.get(), orderFrontStandardAboutPanelWithOptions: opts];
         autorel(credits);
     }
@@ -745,9 +786,9 @@ pub(crate) unsafe fn show_settings_sheet() {
         let _: () = msg_send![ui.settings_win.get(), orderFront: nil()];
         return;
     }
-    let _: () = msg_send![ui.win.get(), beginSheet: ui.settings_win.get() completionHandler: nil()];
+    let _: () = msg_send![ui.win.get(), beginSheet: ui.settings_win.get(), completionHandler: nil()];
 }
-pub(crate) extern "C" fn cancel_settings(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn cancel_settings(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         close_settings();
     }
@@ -760,13 +801,13 @@ pub(crate) unsafe fn close_settings() {
     if offscreen_mode() {
         let _: () = msg_send![ui.settings_win.get(), orderOut: nil()];
     } else {
-        let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
+        let attached: *mut AnyObject = msg_send![ui.win.get(), attachedSheet];
         if !attached.is_null() {
             let _: () = msg_send![ui.win.get(), endSheet: ui.settings_win.get()];
         }
     }
 }
-pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn save_settings(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let mut s = ui.cfg.settings.clone();
@@ -854,13 +895,13 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
 // Helper used above to keep the settings struct access symmetric; keeps
 // the audio-lang field lookup in one place.
 
-pub(crate) extern "C" fn sign_out(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn sign_out(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let _ = ui.ui_tx.send(UiCmd::SignOut);
     }
 }
-pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn refresh(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         // Requests tab reloads its own data; library/Home/Browse keep the
         // sort-filter behaviour (re-run an active filter, else reload the place).
@@ -908,11 +949,10 @@ pub(crate) unsafe fn load_filtered_or_place() {
 /// Empty the filter field and drop a debounced search that has not fired yet.
 pub(crate) unsafe fn clear_filter() {
     let ui = UI.get_mut().unwrap();
-    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ui.ctl.get()
-        selector: sel!(jrSearchNow:) object: nil()];
+    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ui.ctl.get(), selector: sel!(jrSearchNow:), object: nil()];
     set_text(ui.search.get(), "");
 }
-pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn go_back(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if ui.home.active || ui.seerr.active {
@@ -949,7 +989,7 @@ pub(crate) unsafe fn select_view(idx: usize) {
         let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
     }
 }
-pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn view_selected(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     crate::ui::detail::hide();
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -957,7 +997,7 @@ pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Ob
         select_view(tag as usize);
     }
 }
-pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn item_clicked(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
@@ -966,7 +1006,7 @@ pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Obj
         }
     }
 }
-pub(crate) extern "C" fn home_item_clicked(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn home_item_clicked(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
@@ -995,20 +1035,20 @@ unsafe fn activate(it: ListItem) {
         }
     }
 }
-pub(crate) extern "C" fn mark_watched(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn mark_watched(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let ro: *mut Object = msg_send![sender, representedObject];
+        let ro: *mut AnyObject = msg_send![sender, representedObject];
         let id = to_str(ro);
         if !id.is_empty() {
             let _ = ui.ui_tx.send(UiCmd::MarkPlayed { item_id: id, played: true });
         }
     }
 }
-pub(crate) extern "C" fn mark_unwatched(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn mark_unwatched(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let ro: *mut Object = msg_send![sender, representedObject];
+        let ro: *mut AnyObject = msg_send![sender, representedObject];
         let id = to_str(ro);
         if !id.is_empty() {
             let _ = ui.ui_tx.send(UiCmd::MarkPlayed { item_id: id, played: false });
@@ -1016,46 +1056,46 @@ pub(crate) extern "C" fn mark_unwatched(_t: &mut Object, _c: Sel, sender: *mut O
     }
 }
 /// Settings: open the themes folder in Finder. A no-op under the self-test.
-pub(crate) extern "C" fn open_themes_folder(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn open_themes_folder(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     if std::env::var_os("JELLYFAST_SELFTEST").is_some() {
         return;
     }
     unsafe {
         let dir = crate::ui::palettes::themes_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let u: *mut Object = msg_send![class!(NSURL), fileURLWithPath: ns(&dir.to_string_lossy())];
-        let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let _: BOOL = msg_send![ws, openURL: u];
+        let u: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: ns(&dir.to_string_lossy())];
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let _: Bool = msg_send![ws, openURL: u];
     }
 }
 
 /// Rescan the themes folder (Settings button or the App menu) without restarting.
-pub(crate) extern "C" fn reload_themes_action(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn reload_themes_action(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         crate::ui::shell::reload_themes();
     }
 }
 
-pub(crate) extern "C" fn open_in_web(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn open_in_web(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     // The self-test sets fake server URLs; never open a real browser tab for them.
     if std::env::var_os("JELLYFAST_SELFTEST").is_some() {
         return;
     }
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let ro: *mut Object = msg_send![sender, representedObject];
+        let ro: *mut AnyObject = msg_send![sender, representedObject];
         let id = to_str(ro);
         if let Some(base) = ui.cfg.server_url.clone() {
             let url = crate::jellyfin::urls::build_web_item_url(&base, &id);
-            let u: *mut Object = msg_send![class!(NSURL), URLWithString: ns(&url)];
+            let u: *mut AnyObject = msg_send![class!(NSURL), URLWithString: ns(&url)];
             if !u.is_null() {
-                let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-                let _: BOOL = msg_send![ws, openURL: u];
+                let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+                let _: Bool = msg_send![ws, openURL: u];
             }
         }
     }
 }
-pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn connect_clicked(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let url = read_field(ui.login_url.get());
@@ -1084,7 +1124,7 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
         });
     }
 }
-pub(crate) extern "C" fn sort_changed(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn sort_changed(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let index: NSInteger = msg_send![ui.sort_popup.get(), indexOfSelectedItem];
@@ -1096,29 +1136,28 @@ pub(crate) extern "C" fn sort_changed(_t: &mut Object, _c: Sel, _s: *mut Object)
         load_filtered_or_place();
     }
 }
-pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Object) {
+pub(crate) extern "C" fn text_changed(_t: *mut AnyObject, _c: Sel, note: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let obj: *mut Object = msg_send![note, object];
+        let obj: *mut AnyObject = msg_send![note, object];
         if obj == ui.seerr.search.get() && !obj.is_null() {
             crate::ui::seerr::search_changed();
         } else if obj == ui.search.get() {
             // Debounce: keep the grid as is and search 200 ms after the last keystroke.
             let ctl = ui.ctl.get();
-            let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl
-                selector: sel!(jrSearchNow:) object: nil()];
-            let _: () = msg_send![ctl, performSelector: sel!(jrSearchNow:) withObject: nil() afterDelay: 0.2f64];
+            let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl, selector: sel!(jrSearchNow:), object: nil()];
+            let _: () = msg_send![ctl, performSelector: sel!(jrSearchNow:), withObject: nil(), afterDelay: 0.2f64];
         }
     }
 }
-pub(crate) extern "C" fn search_now(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn search_now(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         load_filtered_or_place();
     }
 }
 
 // ---- App delegate callbacks --------------------------------------------
-pub(crate) extern "C" fn app_did_finish_launch(_t: &mut Object, _c: Sel, _n: *mut Object) {
+pub(crate) extern "C" fn app_did_finish_launch(_t: *mut AnyObject, _c: Sel, _n: *mut AnyObject) {
     unsafe {
         build_window_and_ui();
         // No connecting state here: a saved server URL alone is not a session. The
@@ -1134,9 +1173,9 @@ pub(crate) extern "C" fn app_did_finish_launch(_t: &mut Object, _c: Sel, _n: *mu
 // the worker (matched arm ignores it when no session exists).
 
 pub(crate) extern "C" fn app_should_terminate(
-    _t: &mut Object,
+    _t: *mut AnyObject,
     _c: Sel,
-    _app: *mut Object,
+    _app: *mut AnyObject,
 ) -> NSInteger {
     unsafe {
         // Clean shutdown: persist window frame + any final state.
@@ -1166,23 +1205,23 @@ pub(crate) extern "C" fn app_should_terminate(
 // sys` is its own platform crate.
 
 /// Legacy label helper kept while screens migrate to `theme::label`.
-pub(crate) unsafe fn make_label(text: &str, size: CGFloat, bold: bool, center: bool) -> *mut Object {
+pub(crate) unsafe fn make_label(text: &str, size: CGFloat, bold: bool, center: bool) -> *mut AnyObject {
     use crate::ui::theme::*;
     let t = TypeStyle { size, weight: if bold { Weight::Bold } else { Weight::Regular }, mono: false };
     label(text, t, C_TEXT, if center { ALIGN_CENTER } else { ALIGN_LEFT })
 }
-pub(crate) unsafe fn set_text(v: *mut Object, s: &str) {
+pub(crate) unsafe fn set_text(v: *mut AnyObject, s: &str) {
     let _: () = msg_send![v, setStringValue: ns(s)];
 }
-pub(crate) unsafe fn read_field(f: *mut Object) -> String {
+pub(crate) unsafe fn read_field(f: *mut AnyObject) -> String {
     to_str(msg_send![f, stringValue])
 }
-pub(crate) unsafe fn read_field_secure(f: *mut Object) -> String {
+pub(crate) unsafe fn read_field_secure(f: *mut AnyObject) -> String {
     read_field(f)
 }
-pub(crate) unsafe fn vev(material: i64, blending: i64) -> *mut Object {
-    let v: *mut Object = msg_send![class!(NSVisualEffectView), alloc];
-    let v: *mut Object = msg_send![v, initWithFrame: rect(0., 0., 10., 10.)];
+pub(crate) unsafe fn vev(material: i64, blending: i64) -> *mut AnyObject {
+    let v: *mut AnyObject = msg_send![class!(NSVisualEffectView), alloc];
+    let v: *mut AnyObject = msg_send![v, initWithFrame: rect(0., 0., 10., 10.)];
     let _: () = msg_send![v, setMaterial: material];
     let _: () = msg_send![v, setBlendingMode: blending];
     let _: () = msg_send![v, setState: 0i64]; // followsWindowActiveState
@@ -1198,51 +1237,50 @@ pub(crate) const MARGIN_MINY: NSUInteger = 8;
 pub(crate) const MARGIN_MAXX: NSUInteger = 4;
 pub(crate) const MARGIN_MAXY: NSUInteger = 32;
 
-pub(crate) unsafe fn text_field(placeholder: &str, secure: bool) -> *mut Object {
-    let v: *mut Object = if secure {
-        let v: *mut Object = msg_send![class!(NSSecureTextField), alloc];
-        let v: *mut Object = msg_send![v, initWithFrame: rect(0., 0., 260., 24.)];
+pub(crate) unsafe fn text_field(placeholder: &str, secure: bool) -> *mut AnyObject {
+    let v: *mut AnyObject = if secure {
+        let v: *mut AnyObject = msg_send![class!(NSSecureTextField), alloc];
+        let v: *mut AnyObject = msg_send![v, initWithFrame: rect(0., 0., 260., 24.)];
         autorel(v)
     } else {
-        let v: *mut Object = msg_send![class!(NSTextField), alloc];
-        let v: *mut Object = msg_send![v, initWithFrame: rect(0., 0., 260., 24.)];
+        let v: *mut AnyObject = msg_send![class!(NSTextField), alloc];
+        let v: *mut AnyObject = msg_send![v, initWithFrame: rect(0., 0., 260., 24.)];
         autorel(v)
     };
     let _: () = msg_send![v.cell(), setPlaceholderString: ns(placeholder)];
     v
 }
 pub(crate) trait CellOf {
-    unsafe fn cell(&self) -> *mut Object;
+    unsafe fn cell(&self) -> *mut AnyObject;
 }
-impl CellOf for *mut Object {
-    unsafe fn cell(&self) -> *mut Object {
+impl CellOf for *mut AnyObject {
+    unsafe fn cell(&self) -> *mut AnyObject {
         msg_send![*self, cell]
     }
 }
 
 pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: UnboundedSender<MainMsg>) {
     register_classes();
-    let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-    let _: BOOL = msg_send![app, setActivationPolicy: if offscreen_mode() { 1i64 } else { 0i64 }]; // regular app (accessory in headless self-test)
+    let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+    let _: Bool = msg_send![app, setActivationPolicy: if offscreen_mode() { 1i64 } else { 0i64 }]; // regular app (accessory in headless self-test)
 
-    let pump: *mut Object = {
-        let cls = class!(NSObject); // JRPump registered above; look it up:
-        let c = objc::runtime::objc_getClass(b"JRPump\0".as_ptr() as *const std::os::raw::c_char);
-        let base: *mut Object = if c.is_null() { cls as *const Class as *mut Object } else { c as *mut Object };
-        let o: *mut Object = msg_send![base, alloc];
-        let o: *mut Object = msg_send![o, init];
+    let pump: *mut AnyObject = {
+        // JRPump registered above; fall back to NSObject if the lookup somehow misses.
+        let base: &AnyClass = AnyClass::get(c"JRPump").unwrap_or_else(|| class!(NSObject));
+        let o: *mut AnyObject = msg_send![base, alloc];
+        let o: *mut AnyObject = msg_send![o, init];
         o // owned (+1), stored globally below
     };
-    let ctl_cls = objc::runtime::objc_getClass(b"JRCtl\0".as_ptr() as *const std::os::raw::c_char);
-    let ctl: *mut Object = {
-        let o: *mut Object = msg_send![ctl_cls, alloc];
-        let o: *mut Object = msg_send![o, init];
+    let ctl_cls = AnyClass::get(c"JRCtl").expect("JRCtl registered in register_classes");
+    let ctl: *mut AnyObject = {
+        let o: *mut AnyObject = msg_send![ctl_cls, alloc];
+        let o: *mut AnyObject = msg_send![o, init];
         o
     };
-    let del_cls = objc::runtime::objc_getClass(b"JRAppDelegate\0".as_ptr() as *const std::os::raw::c_char);
-    let del: *mut Object = {
-        let o: *mut Object = msg_send![del_cls, alloc];
-        let o: *mut Object = msg_send![o, init];
+    let del_cls = AnyClass::get(c"JRAppDelegate").expect("JRAppDelegate registered in register_classes");
+    let del: *mut AnyObject = {
+        let o: *mut AnyObject = msg_send![del_cls, alloc];
+        let o: *mut AnyObject = msg_send![o, init];
         o
     };
     let _: () = msg_send![app, setDelegate: del];
@@ -1398,20 +1436,17 @@ pub fn install_main_rx(rx: UnboundedReceiver<MainMsg>) {
 }
 
 // Encodings for the geometry structs passed through msg_send! (CGFloat is f64).
-unsafe impl objc::Encode for NSPoint {
-    fn encode() -> objc::Encoding {
-        unsafe { objc::Encoding::from_str("{CGPoint=dd}") }
-    }
+unsafe impl Encode for NSPoint {
+    const ENCODING: Encoding = Encoding::Struct("CGPoint", &[Encoding::Double, Encoding::Double]);
 }
-unsafe impl objc::Encode for NSSize {
-    fn encode() -> objc::Encoding {
-        unsafe { objc::Encoding::from_str("{CGSize=dd}") }
-    }
+unsafe impl Encode for NSSize {
+    const ENCODING: Encoding = Encoding::Struct("CGSize", &[Encoding::Double, Encoding::Double]);
 }
-unsafe impl objc::Encode for NSRect {
-    fn encode() -> objc::Encoding {
-        unsafe { objc::Encoding::from_str("{CGRect={CGPoint=dd}{CGSize=dd}}") }
-    }
+unsafe impl RefEncode for NSRect {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&<NSRect as Encode>::ENCODING);
+}
+unsafe impl Encode for NSRect {
+    const ENCODING: Encoding = Encoding::Struct("CGRect", &[Encoding::Struct("CGPoint", &[Encoding::Double, Encoding::Double]), Encoding::Struct("CGSize", &[Encoding::Double, Encoding::Double])]);
 }
 /// NSEdgeInsets { top, left, bottom, right }.
 #[repr(C)]
@@ -1422,15 +1457,11 @@ pub struct NSEdgeInsets {
     pub bottom: CGFloat,
     pub right: CGFloat,
 }
-unsafe impl objc::Encode for NSEdgeInsets {
-    fn encode() -> objc::Encoding {
-        unsafe { objc::Encoding::from_str("{NSEdgeInsets=dddd}") }
-    }
+unsafe impl Encode for NSEdgeInsets {
+    const ENCODING: Encoding = Encoding::Struct("NSEdgeInsets", &[Encoding::Double, Encoding::Double, Encoding::Double, Encoding::Double]);
 }
-unsafe impl objc::Encode for CMTime {
-    fn encode() -> objc::Encoding {
-        unsafe { objc::Encoding::from_str("{?=qiIq}") }
-    }
+unsafe impl Encode for CMTime {
+    const ENCODING: Encoding = Encoding::Struct("?", &[Encoding::LongLong, Encoding::Int, Encoding::UInt, Encoding::LongLong]);
 }
 /// CMTimeRange: start then duration, each a CMTime (returned by NSValue's CMTimeRangeValue).
 /// Note: this 48-byte struct comes back through plain msg_send, which is correct on arm64. An x86_64 build
@@ -1441,16 +1472,14 @@ pub struct CMTimeRange {
     pub start: CMTime,
     pub duration: CMTime,
 }
-unsafe impl objc::Encode for CMTimeRange {
-    fn encode() -> objc::Encoding {
-        unsafe { objc::Encoding::from_str("{?={?=qiIq}{?=qiIq}}") }
-    }
+unsafe impl Encode for CMTimeRange {
+    const ENCODING: Encoding = Encoding::Struct("?", &[Encoding::Struct("?", &[Encoding::LongLong, Encoding::Int, Encoding::UInt, Encoding::LongLong]), Encoding::Struct("?", &[Encoding::LongLong, Encoding::Int, Encoding::UInt, Encoding::LongLong])]);
 }
 
 // Named callbacks for the handful of "always YES" overrides (objc only accepts fn pointers).
-extern "C" fn always_yes(_t: &mut Object, _c: Sel) -> BOOL {
-    YES
+extern "C" fn always_yes(_t: *mut AnyObject, _c: Sel) -> Bool {
+    Bool::YES
 }
-extern "C" fn always_yes_obj(_t: &mut Object, _c: Sel, _o: *mut Object) -> BOOL {
-    YES
+extern "C" fn always_yes_obj(_t: *mut AnyObject, _c: Sel, _o: *mut AnyObject) -> Bool {
+    Bool::YES
 }

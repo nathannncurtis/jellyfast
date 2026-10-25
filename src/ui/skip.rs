@@ -7,6 +7,8 @@
 //! writes at the end of an episode (stopped, marked watched) and then asks for the next one.
 //! Per-playback state lives in `PlayingNow.skip`; the views live in `Ui.skip`.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::messages::{MediaKind, PlaybackStart, UiCmd};
 use crate::config::{set_skip_intros, skip_intros_for};
 use crate::jellyfin::segments::{self, NextUp, Segment, SegmentKind, UpNextWindow};
@@ -15,10 +17,6 @@ use crate::platform::appkit::*;
 use crate::ui::player::{fade, toast};
 use crate::ui::shell::is_hidden;
 use crate::ui::theme::*;
-use objc::class;
-use objc::msg_send;
-use objc::runtime::{Object, Sel, NO, YES};
-use objc::{sel, sel_impl};
 use std::time::Instant;
 
 /// The skip button stays up this long after segment entry or the last pointer movement.
@@ -89,7 +87,7 @@ impl SkipUi {
 }
 
 /// Builds the skip button and the Up Next card inside the player host, above the transport bar.
-pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
+pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
 
     // Up Next card: bottom right, just above the transport bar.
@@ -98,13 +96,13 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
     set_autoresize(card, MARGIN_MINX | MARGIN_MAXY);
     let cl = layer_of(card);
     set_corner(cl, R_CARD);
-    let _: () = msg_send![cl, setMasksToBounds: YES];
+    let _: () = msg_send![cl, setMasksToBounds: Bool::YES];
     set_hidden(card, true);
     add_sub(ph, card);
     ui.skip.card = Ptr(card);
 
-    let thumb: *mut Object = msg_send![class!(NSImageView), alloc];
-    let thumb: *mut Object = autorel(msg_send![thumb, initWithFrame: rect(SP3, (CARD_H - THUMB_H) / 2., THUMB_W, THUMB_H)]);
+    let thumb: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let thumb: *mut AnyObject = autorel(msg_send![thumb, initWithFrame: rect(SP3, (CARD_H - THUMB_H) / 2., THUMB_W, THUMB_H)]);
     let _: () = msg_send![thumb, setImageScaling: 3isize];
     set_corner(layer_of(thumb), R_THUMB);
     add_sub(card, thumb);
@@ -124,15 +122,13 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
     add_sub(card, count);
     ui.skip.count = Ptr(count);
 
-    let play: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Play Now")
-        target: ui.ctl.get() action: sel!(jrUpNextPlay:)];
+    let play: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Play Now"), target: ui.ctl.get(), action: sel!(jrUpNextPlay:)];
     let _: () = msg_send![play, setBezelStyle: 1isize];
     let _: () = msg_send![play, setKeyEquivalent: ns("\r")];
     set_frame(play, rect(TEXT_X, SP3, BTN_PLAY_W, 26.));
     add_sub(card, play);
     ui.skip.play = Ptr(play);
-    let cancel: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Cancel")
-        target: ui.ctl.get() action: sel!(jrUpNextCancel:)];
+    let cancel: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Cancel"), target: ui.ctl.get(), action: sel!(jrUpNextCancel:)];
     let _: () = msg_send![cancel, setBezelStyle: 1isize];
     set_frame(cancel, rect(TEXT_X + BTN_PLAY_W + SP2, SP3, BTN_CANCEL_W, 26.));
     add_sub(card, cancel);
@@ -144,14 +140,13 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
     set_autoresize(pill, MARGIN_MINX | MARGIN_MAXY);
     let pl = layer_of(pill);
     set_corner(pl, BUTTON_H / 2.);
-    let _: () = msg_send![pl, setMasksToBounds: YES];
+    let _: () = msg_send![pl, setMasksToBounds: Bool::YES];
     set_hidden(pill, true);
     add_sub(ph, pill);
     ui.skip.pill = Ptr(pill);
 
-    let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Skip Intro")
-        target: ui.ctl.get() action: sel!(jrSkipSegment:)];
-    let _: () = msg_send![btn, setBordered: NO];
+    let btn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Skip Intro"), target: ui.ctl.get(), action: sel!(jrSkipSegment:)];
+    let _: () = msg_send![btn, setBordered: Bool::NO];
     let img = symbol("forward.end.fill", 12., Weight::Semibold);
     if !img.is_null() {
         let _: () = msg_send![btn, setImage: img];
@@ -166,10 +161,9 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
     ui.skip.button = Ptr(btn);
 
     // Right-click menu on the button: the per-show intro setting.
-    let menu: *mut Object = autorel(msg_send![class!(NSMenu), new]);
-    let item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let item: *mut Object = autorel(msg_send![item, initWithTitle: ns("Skip Intros Automatically for This Show")
-        action: sel!(jrToggleSeriesSkip:) keyEquivalent: ns("")]);
+    let menu: *mut AnyObject = autorel(msg_send![class!(NSMenu), new]);
+    let item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
+    let item: *mut AnyObject = autorel(msg_send![item, initWithTitle: ns("Skip Intros Automatically for This Show"), action: sel!(jrToggleSeriesSkip:), keyEquivalent: ns("")]);
     let _: () = msg_send![item, setTarget: ui.ctl.get()];
     let _: () = msg_send![menu, addItem: item];
     let _: () = msg_send![btn, setMenu: menu];
@@ -213,9 +207,8 @@ unsafe fn set_timer(on: bool) {
         ui.skip.timer = Ptr(nil());
     }
     if on {
-        let t: *mut Object = msg_send![class!(NSTimer),
-            scheduledTimerWithTimeInterval: 0.25f64 target: ui.ctl.get()
-            selector: sel!(jrSkipTick:) userInfo: nil() repeats: YES];
+        let t: *mut AnyObject = msg_send![class!(NSTimer),
+            scheduledTimerWithTimeInterval: 0.25f64, target: ui.ctl.get(), selector: sel!(jrSkipTick:), userInfo: nil(), repeats: Bool::YES];
         ui.skip.timer = Ptr(t);
     }
 }
@@ -237,7 +230,7 @@ unsafe fn reset_views() {
 }
 
 /// Show or hide a view. Showing fades in; hiding removes it at once so it cannot take clicks.
-unsafe fn set_shown(v: *mut Object, on: bool) {
+unsafe fn set_shown(v: *mut AnyObject, on: bool) {
     if on {
         if is_hidden(v) {
             let _: () = msg_send![v, setAlphaValue: 0.0f64];
@@ -269,7 +262,7 @@ unsafe fn sync_series_item() {
     }
     let on: NSInteger = pn.skip.auto_skip as NSInteger;
     let _: () = msg_send![item, setState: on];
-    let enabled = if pn.skip.series_id.is_some() { YES } else { NO };
+    let enabled = if pn.skip.series_id.is_some() { Bool::YES } else { Bool::NO };
     let _: () = msg_send![item, setEnabled: enabled];
 }
 
@@ -332,7 +325,7 @@ pub(crate) unsafe fn update() {
             let btn = ui.skip.button.get();
             let _: () = msg_send![btn, setTitle: ns(label)];
             // Size from the cell's own content (icon and title), then fit the button to the pill.
-            let cell: *mut Object = msg_send![btn, cell];
+            let cell: *mut AnyObject = msg_send![btn, cell];
             let content: NSSize = msg_send![cell, cellSize];
             let w = content.w.ceil() + 2. * SP4;
             place_pill(Some(w));
@@ -456,21 +449,21 @@ pub(crate) unsafe fn advance() -> bool {
 
 // ---- actions ------------------------------------------------------------------------------
 
-pub(crate) extern "C" fn skip_tick(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn skip_tick(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { update() }
 }
 
-pub(crate) extern "C" fn skip_segment(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn skip_segment(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { skip_current() }
 }
 
-pub(crate) extern "C" fn up_next_play(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn up_next_play(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         advance();
     }
 }
 
-pub(crate) extern "C" fn up_next_cancel(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn up_next_cancel(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if let Some(pn) = ui.playing.as_mut() {
@@ -483,7 +476,7 @@ pub(crate) extern "C" fn up_next_cancel(_t: &mut Object, _c: Sel, _s: *mut Objec
 }
 
 /// The per-show "skip intros" setting, from the button's menu. Saved at once; on turns the skip happens now if inside an intro.
-pub(crate) extern "C" fn toggle_series_skip(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn toggle_series_skip(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let Some(pn) = ui.playing.as_mut() else { return };

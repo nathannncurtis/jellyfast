@@ -6,17 +6,14 @@
 //! poster grid of cards laid out for the current width. The view is built once at
 //! launch and only shown or hidden. All state lives in `Ui.seerr`.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::messages::*;
 use crate::platform::appkit::*;
 use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
 use crate::ui::home::POSTER_W;
 use crate::ui::shell::{header_layout, hide_state, set_count, sidebar_rebuild, sidebar_refresh_selection};
 use crate::ui::theme::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 use std::collections::HashMap;
 
 /// `cfg.last_view` value meaning "Requests was the last selected place".
@@ -39,9 +36,9 @@ pub struct SeerrUi {
     pub empty_title: Ptr,
     pub empty_body: Ptr,
     /// Posters in the current cards: (poster_path, art view, placeholder glyph).
-    pub thumbs: Vec<(String, *mut Object, *mut Object)>,
+    pub thumbs: Vec<(String, *mut AnyObject, *mut AnyObject)>,
     /// Decoded poster images by poster_path (owned, +1).
-    pub images: HashMap<String, *mut Object>,
+    pub images: HashMap<String, *mut AnyObject>,
     pub requests_mode: bool,
     pub results: Vec<SeerrResult>,
     pub results_loaded: bool,
@@ -50,7 +47,7 @@ pub struct SeerrUi {
     /// (media_type, tmdb_id, title) of requests sent and not yet answered.
     pub inflight: Vec<(String, u64, String)>,
     /// Card views currently inside `doc` (the superview owns them).
-    pub cards: Vec<*mut Object>,
+    pub cards: Vec<*mut AnyObject>,
     /// Width the cards were last laid out for (0 = never).
     pub laid_w: f64,
     /// Requests is the visible screen.
@@ -238,12 +235,12 @@ fn clip(s: &str, n: usize) -> String {
 
 // ---- Classes ----------------------------------------------------------------
 
-extern "C" fn yes(_t: &mut Object, _c: Sel) -> BOOL {
-    YES
+extern "C" fn yes(_t: *mut AnyObject, _c: Sel) -> Bool {
+    Bool::YES
 }
 
 /// The content-area host: re-lays out its toolbar and grid when it is resized.
-extern "C" fn host_resize(this: &mut Object, _c: Sel, old: NSSize) {
+extern "C" fn host_resize(this: *mut AnyObject, _c: Sel, old: NSSize) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), resizeSubviewsWithOldSize: old];
         layout_host();
@@ -251,7 +248,7 @@ extern "C" fn host_resize(this: &mut Object, _c: Sel, old: NSSize) {
 }
 
 /// The grid's document view: when its width changes the cards reflow (column count).
-extern "C" fn doc_set_frame(this: &mut Object, _c: Sel, s: NSSize) {
+extern "C" fn doc_set_frame(this: *mut AnyObject, _c: Sel, s: NSSize) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), setFrameSize: s];
         if let Some(ui) = UI.get() {
@@ -263,27 +260,27 @@ extern "C" fn doc_set_frame(this: &mut Object, _c: Sel, s: NSSize) {
 }
 
 pub(crate) unsafe fn register_seerr_classes() {
-    let mut d = ClassDecl::new("JRFlipView", class!(NSView)).unwrap();
-    d.add_method(sel!(isFlipped), yes as extern "C" fn(&mut Object, Sel) -> BOOL);
+    let mut d = ClassBuilder::new(c"JRFlipView", class!(NSView)).unwrap();
+    d.add_method(sel!(isFlipped), yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
     d.register();
-    let mut h = ClassDecl::new("JRRequestsHost", class!(NSView)).unwrap();
+    let mut h = ClassBuilder::new(c"JRRequestsHost", class!(NSView)).unwrap();
     h.add_method(
         sel!(resizeSubviewsWithOldSize:),
-        host_resize as extern "C" fn(&mut Object, Sel, NSSize),
+        host_resize as extern "C" fn(*mut AnyObject, Sel, NSSize),
     );
     h.register();
-    let mut g = ClassDecl::new("JRRequestsDoc", class!(NSView)).unwrap();
-    g.add_method(sel!(isFlipped), yes as extern "C" fn(&mut Object, Sel) -> BOOL);
-    g.add_method(sel!(setFrameSize:), doc_set_frame as extern "C" fn(&mut Object, Sel, NSSize));
+    let mut g = ClassBuilder::new(c"JRRequestsDoc", class!(NSView)).unwrap();
+    g.add_method(sel!(isFlipped), yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
+    g.add_method(sel!(setFrameSize:), doc_set_frame as extern "C" fn(*mut AnyObject, Sel, NSSize));
     g.register();
 }
 
-unsafe fn class_view(name: &[u8], frame: NSRect) -> *mut Object {
-    let cls = objc::runtime::objc_getClass(name.as_ptr() as *const std::os::raw::c_char);
-    let v: *mut Object = msg_send![cls as *mut Object, alloc];
+unsafe fn class_view(name: &[u8], frame: NSRect) -> *mut AnyObject {
+    let cls = AnyClass::get(std::ffi::CStr::from_bytes_with_nul(name).expect("NUL-terminated class name")).expect("class registered");
+    let v: *mut AnyObject = msg_send![cls, alloc];
     msg_send![v, initWithFrame: frame] // +1; caller autorels after add
 }
-unsafe fn flip_view(frame: NSRect) -> *mut Object {
+unsafe fn flip_view(frame: NSRect) -> *mut AnyObject {
     class_view(b"JRFlipView\0", frame)
 }
 
@@ -292,28 +289,28 @@ unsafe fn flip_view(frame: NSRect) -> *mut Object {
 const STATE_W: f64 = 360.;
 
 pub struct StateParts {
-    pub host: *mut Object,
-    pub icon: *mut Object,
-    pub title: *mut Object,
-    pub body: *mut Object,
-    pub btn: *mut Object,
+    pub host: *mut AnyObject,
+    pub icon: *mut AnyObject,
+    pub title: *mut AnyObject,
+    pub body: *mut AnyObject,
+    pub btn: *mut AnyObject,
 }
 
 /// Symbol, title, body (and optionally a button) stacked and centred in `frame`.
 unsafe fn make_state(frame: NSRect, with_btn: bool) -> StateParts {
     let ui = UI.get_mut().unwrap();
-    let host: *mut Object = msg_send![class!(NSView), alloc];
-    let host: *mut Object = msg_send![host, initWithFrame: frame];
+    let host: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let host: *mut AnyObject = msg_send![host, initWithFrame: frame];
     set_autoresize(host, RESIZE_W | RESIZE_H);
     let ih = 40. + SP3 + 28. + SP2 + 36. + if with_btn { SP4 + 28. } else { 0. };
-    let inner: *mut Object = autorel(msg_send![class!(NSView), alloc]);
-    let inner: *mut Object = msg_send![inner, initWithFrame: rect(
+    let inner: *mut AnyObject = autorel(msg_send![class!(NSView), alloc]);
+    let inner: *mut AnyObject = msg_send![inner, initWithFrame: rect(
         ((frame.size.w - STATE_W) / 2.).floor(), ((frame.size.h - ih) / 2.).floor(), STATE_W, ih)];
     set_autoresize(inner, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
     add_sub(host, inner);
     let mut y = ih - 40.;
-    let icon: *mut Object = msg_send![class!(NSImageView), alloc];
-    let icon: *mut Object = autorel(msg_send![icon, initWithFrame: rect((STATE_W - 40.) / 2., y, 40., 40.)]);
+    let icon: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let icon: *mut AnyObject = autorel(msg_send![icon, initWithFrame: rect((STATE_W - 40.) / 2., y, 40., 40.)]);
     let _: () = msg_send![icon, setContentTintColor: color(C_TEXT3)];
     add_sub(inner, icon);
     y -= SP3 + 28.;
@@ -327,8 +324,7 @@ unsafe fn make_state(frame: NSRect, with_btn: bool) -> StateParts {
     let mut btn = std::ptr::null_mut();
     if with_btn {
         y -= SP4 + 28.;
-        btn = msg_send![class!(NSButton), buttonWithTitle: ns("Open Settings…")
-            target: ui.ctl.get() action: sel!(showSettings:)];
+        btn = msg_send![class!(NSButton), buttonWithTitle: ns("Open Settings…"), target: ui.ctl.get(), action: sel!(showSettings:)];
         set_frame(btn, rect((STATE_W - 140.) / 2., y, 140., 28.));
         add_sub(inner, btn);
     }
@@ -362,7 +358,7 @@ const STATUS_H: f64 = 16.;
 // ---- Host view ----------------------------------------------------------------
 
 /// Build the Requests view inside the content area (hidden until selected).
-pub(crate) unsafe fn build_host(content_host: *mut Object, frame: NSRect) {
+pub(crate) unsafe fn build_host(content_host: *mut AnyObject, frame: NSRect) {
     let ui = UI.get_mut().unwrap();
     let host = class_view(b"JRRequestsHost\0", frame);
     set_autoresize(host, RESIZE_W | RESIZE_H);
@@ -376,33 +372,32 @@ pub(crate) unsafe fn build_host(content_host: *mut Object, frame: NSRect) {
     set_autoresize(canvas, RESIZE_W | RESIZE_H);
     add_sub(host, canvas);
 
-    let labels: *mut Object = msg_send![class!(NSMutableArray), array];
+    let labels: *mut AnyObject = msg_send![class!(NSMutableArray), array];
     for t in ["Search", "My Requests"] {
         let _: () = msg_send![labels, addObject: ns(t)];
     }
-    let tabs: *mut Object = msg_send![class!(NSSegmentedControl),
-        segmentedControlWithLabels: labels trackingMode: 0i64
-        target: ui.ctl.get() action: sel!(seerrTab:)];
+    let tabs: *mut AnyObject = msg_send![class!(NSSegmentedControl),
+        segmentedControlWithLabels: labels, trackingMode: 0i64, target: ui.ctl.get(), action: sel!(seerrTab:)];
     let _: () = msg_send![tabs, setControlSize: 3isize];
     let _: () = msg_send![tabs, setSelectedSegment: 0isize];
     add_sub(host, tabs);
 
-    let sf: *mut Object = msg_send![class!(NSSearchField), alloc];
-    let sf: *mut Object = msg_send![sf, initWithFrame: rect(0., 0., 240., FIELD_H)];
+    let sf: *mut AnyObject = msg_send![class!(NSSearchField), alloc];
+    let sf: *mut AnyObject = msg_send![sf, initWithFrame: rect(0., 0., 240., FIELD_H)];
     let _: () = msg_send![sf.cell(), setPlaceholderString: ns("Search movies and shows")];
     let _: () = msg_send![sf, setControlSize: 3isize];
     let _: () = msg_send![sf, setDelegate: ui.ctl.get()]; // controlTextDidChange: -> SeerrSearch
-    let _: () = msg_send![sf, setSendsWholeSearchString: NO];
+    let _: () = msg_send![sf, setSendsWholeSearchString: Bool::NO];
     add_sub(host, sf);
     autorel(sf);
 
     let st = label("", T_CALLOUT, C_TEXT2, ALIGN_LEFT);
     add_sub(host, st);
 
-    let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: rect(0., 0., b.size.w, b.size.h)];
-    let _: () = msg_send![sc, setHasVerticalScroller: YES];
-    let _: () = msg_send![sc, setDrawsBackground: NO];
+    let sc: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+    let sc: *mut AnyObject = msg_send![sc, initWithFrame: rect(0., 0., b.size.w, b.size.h)];
+    let _: () = msg_send![sc, setHasVerticalScroller: Bool::YES];
+    let _: () = msg_send![sc, setDrawsBackground: Bool::NO];
     let _: () = msg_send![sc, setBorderType: 0usize];
     let doc = class_view(b"JRRequestsDoc\0", rect(0., 0., b.size.w, 10.));
     set_autoresize(doc, RESIZE_W);
@@ -554,7 +549,7 @@ pub(crate) unsafe fn set_status(msg: &str, err: bool) {
 // ---- Cards ------------------------------------------------------------------
 
 /// (text colour, fill) for a pill role; fill is the role colour at 16% alpha.
-unsafe fn pill_colors(role: &str) -> (Col, *mut Object) {
+unsafe fn pill_colors(role: &str) -> (Col, *mut AnyObject) {
     let base = match role {
         "ok" => C_OK,
         "warn" => C_WARN,
@@ -565,26 +560,26 @@ unsafe fn pill_colors(role: &str) -> (Col, *mut Object) {
 }
 
 /// Rounded status pill with its caption; returns (box, width), never wider than `max_w`.
-unsafe fn make_pill(text: &str, role: &str, max_w: f64) -> (*mut Object, f64) {
+unsafe fn make_pill(text: &str, role: &str, max_w: f64) -> (*mut AnyObject, f64) {
     let (tc, fill) = pill_colors(role);
     let l = label(text, T_CAPTION_EM, tc, ALIGN_CENTER);
-    let cell: *mut Object = msg_send![l, cell];
+    let cell: *mut AnyObject = msg_send![l, cell];
     let sz: NSSize = msg_send![cell, cellSize];
     let w = (sz.w.ceil() + 2. * SP2 + 2.).min(max_w);
     let b = surface(rect(0., 0., w, PILL_H), C_FILL_SEL, PILL_H / 2.);
     let _: () = msg_send![b, setFillColor: fill];
-    let cv: *mut Object = msg_send![b, contentView];
+    let cv: *mut AnyObject = msg_send![b, contentView];
     set_frame(l, rect(SP2, 3., w - 2. * SP2, 14.));
     add_sub(cv, l);
     (b, w)
 }
 
-unsafe fn make_spinner(frame: NSRect) -> *mut Object {
-    let sp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
-    let sp: *mut Object = autorel(msg_send![sp, initWithFrame: frame]);
+unsafe fn make_spinner(frame: NSRect) -> *mut AnyObject {
+    let sp: *mut AnyObject = msg_send![class!(NSProgressIndicator), alloc];
+    let sp: *mut AnyObject = autorel(msg_send![sp, initWithFrame: frame]);
     let _: () = msg_send![sp, setStyle: 1usize]; // spinning
     let _: () = msg_send![sp, setControlSize: 1usize];
-    let _: () = msg_send![sp, setIndeterminate: YES];
+    let _: () = msg_send![sp, setIndeterminate: Bool::YES];
     let _: () = msg_send![sp, startAnimation: nil()];
     sp
 }
@@ -592,31 +587,31 @@ unsafe fn make_spinner(frame: NSRect) -> *mut Object {
 /// Height a wrapping label needs for `text` at `width`, so nothing is clipped.
 unsafe fn text_h(text: &str, t: TypeStyle, width: f64) -> f64 {
     let v = wrapping_label(text, t, C_TEXT, ALIGN_LEFT);
-    let cell: *mut Object = msg_send![v, cell];
+    let cell: *mut AnyObject = msg_send![v, cell];
     let s: NSSize = msg_send![cell, cellSizeForBounds: rect(0., 0., width, 10_000.)];
     s.h.ceil().max(1.)
 }
 
 /// Placeholder (fill + glyph) with the poster layer on top; registers the poster for later images.
-unsafe fn make_poster(card: *mut Object, spec: &RowSpec, f: NSRect) {
+unsafe fn make_poster(card: *mut AnyObject, spec: &RowSpec, f: NSRect) {
     let ui = UI.get_mut().unwrap();
     let ph = surface(f, C_FILL_SEL, R_POSTER);
     add_sub(card, ph);
     let g = 20.;
     let gf = rect(f.origin.x + (f.size.w - g) / 2., f.origin.y + (f.size.h - g) / 2., g, g);
-    let glyph: *mut Object = msg_send![class!(NSImageView), alloc];
-    let glyph: *mut Object = autorel(msg_send![glyph, initWithFrame: gf]);
+    let glyph: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let glyph: *mut AnyObject = autorel(msg_send![glyph, initWithFrame: gf]);
     let img = symbol(spec.glyph, 16., Weight::Regular);
     if !img.is_null() {
         let _: () = msg_send![glyph, setImage: img];
     }
     let _: () = msg_send![glyph, setContentTintColor: color(C_TEXT3)];
     add_sub(card, glyph);
-    let art: *mut Object = msg_send![class!(NSView), alloc];
-    let art: *mut Object = autorel(msg_send![art, initWithFrame: f]);
+    let art: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let art: *mut AnyObject = autorel(msg_send![art, initWithFrame: f]);
     let layer = layer_of(art);
     set_corner(layer, R_POSTER);
-    let _: () = msg_send![layer, setMasksToBounds: YES];
+    let _: () = msg_send![layer, setMasksToBounds: Bool::YES];
     let _: () = msg_send![layer, setContentsGravity: ns("resizeAspectFill")];
     add_sub(card, art);
     if let Some(p) = &spec.poster {
@@ -626,7 +621,7 @@ unsafe fn make_poster(card: *mut Object, spec: &RowSpec, f: NSRect) {
         }
     }
 }
-unsafe fn apply_thumb(art: *mut Object, glyph: *mut Object, img: *mut Object, animate: bool) {
+unsafe fn apply_thumb(art: *mut AnyObject, glyph: *mut AnyObject, img: *mut AnyObject, animate: bool) {
     let cg = cg_image(img);
     if cg.is_null() {
         return;
@@ -636,8 +631,8 @@ unsafe fn apply_thumb(art: *mut Object, glyph: *mut Object, img: *mut Object, an
     } else {
         tx_begin_instant();
     }
-    let layer: *mut Object = msg_send![art, layer];
-    let _: () = msg_send![layer, setContents: cg];
+    let layer: *mut AnyObject = msg_send![art, layer];
+    let _: () = msg_send![layer, setContents: cg as *mut AnyObject];
     tx_end();
     set_hidden(glyph, true);
 }
@@ -645,7 +640,7 @@ unsafe fn apply_thumb(art: *mut Object, glyph: *mut Object, img: *mut Object, an
 /// One grid card: poster, title, subtitle, then either the Request button or a status pill.
 /// `frame` is in the document's flipped coordinates; `text` is (title h, subtitle h) and
 /// `block` the tallest title+subtitle stack in the grid, so the controls share one line.
-unsafe fn make_card(frame: NSRect, spec: &RowSpec, poster_h: f64, text: (f64, f64), block: f64, requesting: bool, index: usize) -> *mut Object {
+unsafe fn make_card(frame: NSRect, spec: &RowSpec, poster_h: f64, text: (f64, f64), block: f64, requesting: bool, index: usize) -> *mut AnyObject {
     let ui = UI.get_mut().unwrap();
     let card = flip_view(frame);
     let tile_w = frame.size.w;
@@ -661,9 +656,8 @@ unsafe fn make_card(frame: NSRect, spec: &RowSpec, poster_h: f64, text: (f64, f6
 
     let cy = ty + block + SP2;
     if spec.can_request {
-        let btn: *mut Object = msg_send![class!(NSButton),
-            buttonWithTitle: ns(if requesting { "Requesting…" } else { "Request" })
-            target: ui.ctl.get() action: sel!(seerrRequest:)];
+        let btn: *mut AnyObject = msg_send![class!(NSButton),
+            buttonWithTitle: ns(if requesting { "Requesting…" } else { "Request" }), target: ui.ctl.get(), action: sel!(seerrRequest:)];
         let _: () = msg_send![btn, setBezelStyle: 1isize];
         let _: () = msg_send![btn, setControlSize: 1isize];
         let plus = symbol("plus", 11., Weight::Medium);
@@ -671,7 +665,7 @@ unsafe fn make_card(frame: NSRect, spec: &RowSpec, poster_h: f64, text: (f64, f6
             let _: () = msg_send![btn, setImage: plus];
             let _: () = msg_send![btn, setImagePosition: 7isize]; // leading
         }
-        let _: () = msg_send![btn, setEnabled: (!requesting) as BOOL];
+        let _: () = msg_send![btn, setEnabled: Bool::new(!requesting)];
         set_frame(btn, rect(0., cy, BTN_W, CONTROL_H));
         add_sub(card, btn);
         if requesting {
@@ -699,7 +693,7 @@ pub(crate) unsafe fn rebuild() {
         let _: () = msg_send![c, removeFromSuperview];
     }
     let doc = ui.seerr.doc.get();
-    let clip: *mut Object = msg_send![ui.seerr.scroll.get(), contentView];
+    let clip: *mut AnyObject = msg_send![ui.seerr.scroll.get(), contentView];
     let clip_h = bounds_of(clip).size.h;
     let width = bounds_of(clip).size.w.max(200.0);
     ui.seerr.laid_w = width;
@@ -782,13 +776,13 @@ pub(crate) fn on_poster(path: String, bytes: &[u8]) {
             Some(u) => u,
             None => return,
         };
-        let data: *mut Object = msg_send![class!(NSData),
-            dataWithBytes: bytes.as_ptr() length: bytes.len() as NSUInteger];
+        let data: *mut AnyObject = msg_send![class!(NSData),
+            dataWithBytes: bytes.as_ptr() as *const std::ffi::c_void, length: bytes.len() as NSUInteger];
         if data.is_null() {
             return;
         }
-        let img: *mut Object = msg_send![class!(NSImage), alloc];
-        let img: *mut Object = msg_send![img, initWithData: data];
+        let img: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let img: *mut AnyObject = msg_send![img, initWithData: data];
         if img.is_null() {
             return; // undecodable: the placeholder stays
         }
@@ -811,31 +805,31 @@ pub(crate) fn on_poster(path: String, bytes: &[u8]) {
 pub(crate) unsafe fn thumb_has_image(path: &str) -> Option<bool> {
     let ui = UI.get().unwrap();
     let (_, art, _) = ui.seerr.thumbs.iter().find(|(p, _, _)| p == path)?;
-    let layer: *mut Object = msg_send![*art, layer];
-    let c: *mut Object = msg_send![layer, contents];
+    let layer: *mut AnyObject = msg_send![*art, layer];
+    let c: *mut AnyObject = msg_send![layer, contents];
     Some(!c.is_null())
 }
 
 // ---- Actions ----------------------------------------------------------------
 
 /// Sidebar "Requests" row.
-pub(crate) extern "C" fn requests_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn requests_selected(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { enter() }
 }
 
 /// Menu item and shortcut (⌥⌘K): show Requests on the search tab, focus the field.
-pub(crate) extern "C" fn open_seerr(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn open_seerr(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         enter();
         select_mode(false);
         let ui = UI.get_mut().unwrap();
         if is_configured(&ui.cfg.settings) {
-            let _: BOOL = msg_send![ui.win.get(), makeFirstResponder: ui.seerr.search.get()];
+            let _: Bool = msg_send![ui.win.get(), makeFirstResponder: ui.seerr.search.get()];
         }
     }
 }
 
-pub(crate) extern "C" fn seerr_tab(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn seerr_tab(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let seg: NSInteger = msg_send![sender, selectedSegment];
         select_mode(seg == 1);
@@ -897,7 +891,7 @@ pub(crate) unsafe fn search_changed() {
     rebuild();
 }
 
-pub(crate) extern "C" fn seerr_request(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn seerr_request(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
@@ -910,9 +904,9 @@ pub(crate) extern "C" fn seerr_request(_t: &mut Object, _c: Sel, sender: *mut Ob
         }
         ui.seerr.inflight.push((r.media_type.clone(), r.tmdb_id, r.title.clone()));
         // Update the clicked button in place (never remove a control from inside its own action).
-        let _: () = msg_send![sender, setEnabled: NO];
+        let _: () = msg_send![sender, setEnabled: Bool::NO];
         let _: () = msg_send![sender, setTitle: ns("Requesting…")];
-        let card: *mut Object = msg_send![sender, superview];
+        let card: *mut AnyObject = msg_send![sender, superview];
         let bf = frame_of(sender);
         if !card.is_null() {
             let sp = make_spinner(rect(bf.origin.x + bf.size.w + SP2, bf.origin.y + (bf.size.h - SPIN) / 2., SPIN, SPIN));
@@ -996,7 +990,7 @@ pub(crate) unsafe fn apply_mode() {
     }
 }
 
-pub(crate) extern "C" fn seerr_mode_changed(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn seerr_mode_changed(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { apply_mode() }
 }
 
