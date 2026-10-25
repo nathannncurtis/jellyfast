@@ -33,7 +33,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     let _: () = msg_send![win, setTitle: ns("Jellyfin")];
     let _: () = msg_send![win, setTitlebarAppearsTransparent: YES];
     let _: () = msg_send![win, setReleasedWhenClosed: NO];
-    let _: () = msg_send![win, setTabbingMode: 1i64]; // disallowed
+    let _: () = msg_send![win, setTabbingMode: 2i64]; // disallowed
     let _: () = msg_send![win, setMinSize: size(960., 600.)];
     let _: () = msg_send![win, setOpaque: NO];
     let clear: *mut Object = msg_send![class!(NSColor), clearColor];
@@ -85,9 +85,10 @@ pub(crate) unsafe fn build_window_and_ui() {
     let sf: *mut Object = msg_send![sf, initWithFrame: rect(0., 0., 216., 28.)];
     let _: () = msg_send![sf.cell(), setPlaceholderString: ns("Search libraries")];
     let _: () = msg_send![sf, setTarget: ui.ctl.get()];
-    let _: () = msg_send![sf, setAction: sel!(sortChanged:)]; // enter = search too
+    let _: () = msg_send![sf, setDelegate: ui.ctl.get()]; // controlTextDidChange: -> Search
     let _: () = msg_send![sf, setSendsWholeSearchString: NO];
     add_arranged(stack, sf, 0.0, 4.0);
+    autorel(sf);
     ui.search = Ptr(sf);
 
     // Libraries get injected by sidebar_rebuild(); spacer + buttons below.
@@ -134,7 +135,9 @@ pub(crate) unsafe fn build_window_and_ui() {
     let grid_cls = *GRID_CLASS.get().unwrap();
     let grid: *mut Object = msg_send![grid_cls, alloc];
     let grid: *mut Object = msg_send![grid, initWithFrame: rect(0., 0., pb.size.w - 256. - 28., 10.)];
-    let data = Box::into_raw(Box::new(GridData { cells: vec![] }));
+    // One GridData box, owned by ui.grid_data and also referenced by the grid's ivar.
+    ui.grid_data = Some(Box::new(GridData { cells: vec![] }));
+    let data: *mut GridData = &mut **ui.grid_data.as_mut().unwrap();
     (*grid).set_ivar::<*mut c_void>("jrData", data as *mut c_void);
     let _: *mut Object = msg_send![sc, setDocumentView: grid];
     autorel(grid);
@@ -183,7 +186,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     // about:blank won't play; we replace the item on every real playback.
     ui.player = Ptr::retained(player);
     let _: () = msg_send![avv, setPlayer: player];
-    let _: () = msg_send![player, setVolume: ui.cfg.volume.clamp(0.0, 1.0)];
+    let _: () = msg_send![player, setVolume: ui.cfg.volume.clamp(0.0, 1.0) as f32];
 
     let bar = vev(MAT_HUD, BLEND_WITHIN);
     let _: () = msg_send![bar, setAlphaValue: 0.92f64];
@@ -365,10 +368,10 @@ pub(crate) unsafe fn build_menus() {
     const CTRL_CMD: NSUInteger = (1 << 18) | (1 << 20);
     add(ctl_menu, "Play / Pause", sel!(playPause:), " ", 0usize, 0);
     add(ctl_menu, "Stop", sel!(stopPlayback:), ".", CMD, 0);
-    add(ctl_menu, "Back 10s", sel!(seekBack:), "\u{2190}", CMD, 0);
-    add(ctl_menu, "Forward 10s", sel!(seekFwd:), "\u{2192}", CMD, 0);
-    add(ctl_menu, "Volume Up", sel!(volUp:), "\u{2191}", CMD, 0);
-    add(ctl_menu, "Volume Down", sel!(volDown:), "\u{2193}", CMD, 0);
+    add(ctl_menu, "Back 10s", sel!(seekBack:), "\u{F702}", CMD, 0);
+    add(ctl_menu, "Forward 10s", sel!(seekFwd:), "\u{F703}", CMD, 0);
+    add(ctl_menu, "Volume Up", sel!(volUp:), "\u{F700}", CMD, 0);
+    add(ctl_menu, "Volume Down", sel!(volDown:), "\u{F701}", CMD, 0);
     add(ctl_menu, "Mute", sel!(mute:), "m", ALT, 0);
     add(ctl_menu, "Next Subtitle Track", sel!(subCycle:), "s", ALT, 0);
     add(ctl_menu, "Next Audio Track", sel!(audioCycle:), "a", ALT, 0);
@@ -402,7 +405,7 @@ pub(crate) unsafe fn build_menus() {
 }
 
 pub(crate) unsafe fn separator() -> *mut Object {
-    autorel(msg_send![class!(NSMenuItem), separatorItem])
+    msg_send![class!(NSMenuItem), separatorItem]
 }
 
 // ---- Sidebar ------------------------------------------------------------
@@ -418,6 +421,12 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
     let user_l = make_label(&format!("Signed in as {}", user), 11.0, false, false);
     let _: () = msg_send![user_l, setTextColor: color_named("secondary")];
     add_arranged(ui.side_stack.get(), user_l, 0.0, 2.0);
+    ui.rows.push((user_l, String::new())); // removed with the rows on the next rebuild
+    // Live TV needs a views entry so the button's tag resolves in viewSelected:.
+    if has_live_tv && !views.iter().any(|v| v.2.as_deref() == Some("livetv")) {
+        ui.views.push(("livetv".into(), "Live TV".into(), Some("livetv".into())));
+    }
+    let views: Vec<(String, String, Option<String>)> = ui.views.clone();
 
     for (i, (id, name, ct)) in views.iter().enumerate() {
         let symbol = match ct.as_deref() {
@@ -438,21 +447,6 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
         }
         add_arranged(ui.side_stack.get(), btn, 0.0, 0.0);
         ui.rows.push((btn, id.clone()));
-    }
-    if has_live_tv {
-        // Live TV is exposed as a pseudo-view handled by the worker.
-        let btn: *mut Object = msg_send![class!(NSButton),
-            buttonWithTitle: ns("Live TV") target: ui.ctl.get() action: sel!(viewSelected:)];
-        let _: () = msg_send![btn, setBordered: NO];
-        let img = symbol_image("antenna.radiowaves.left.and.right", 13.0);
-        if !img.is_null() {
-            let _: () = msg_send![btn, setImage: img];
-            let _: () = msg_send![btn, setImagePosition: 2i64];
-        }
-        let idx = ui.views.len().saturating_sub(1);
-        let _: () = msg_send![btn, setTag: idx as NSInteger];
-        add_arranged(ui.side_stack.get(), btn, 0.0, 0.0);
-        ui.rows.push((btn, "livetv".into()));
     }
     let _ = ui_tx;
 }
