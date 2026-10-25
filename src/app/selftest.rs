@@ -534,7 +534,11 @@ fn shot(tag: &str, idx: usize, win: *mut Object) {
     unsafe {
         let appearance = std::env::var("JELLYFAST_APPEARANCE").unwrap_or_else(|_| "system".into());
         let clean: String = tag.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
-        let path = format!("{}/{}-{}-w{}.png", dir, appearance, clean, idx);
+        // Name the file after the window too: the Settings sheet is a separate window, so
+        // "settings-sheet-w1" reads as the Settings window and "-w0" never gets mistaken for it.
+        let title = to_str(msg_send![win, title]);
+        let wclean: String = title.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+        let path = format!("{}/{}-{}-w{}-{}.png", dir, appearance, clean, idx, wclean);
         // Render the view tree straight to a bitmap: works for off-screen windows, unlike screencapture.
         // The frame view (contentView's superview) includes the titlebar and traffic lights.
         let content: *mut Object = msg_send![win, contentView];
@@ -1826,6 +1830,8 @@ fn s_layout_settings() {
         let ui = UI.get().unwrap();
         let idx: NSInteger = msg_send![ui.s_layout.get(), indexOfSelectedItem];
         state_check("settings: shows one big library", idx == 1);
+        audit_both("settings layout unified");
+        let ui = UI.get().unwrap();
         let _: () = msg_send![ui.s_layout.get(), selectItemAtIndex: 0isize];
         act(sel!(saveSettings:), nil());
         let ui = UI.get().unwrap();
@@ -1900,7 +1906,8 @@ fn s_audit_player() {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.show_stats = true;
         crate::ui::player::apply_info_visibility();
-        crate::ui::player::toast(&"Can't reach your server. Press ⌘R to retry. ".repeat(4), Some("wifi.exclamationmark"), true);
+        // A long, neutral toast: the wrap and truncation check must not put the error banner over the player.
+        crate::ui::player::toast(&format!("Subtitles: {}", LONG.repeat(2)), Some("captions.bubble"), false);
     }
     audit_both("player");
     unsafe {

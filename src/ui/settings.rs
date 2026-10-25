@@ -30,6 +30,7 @@ pub(crate) unsafe fn build_settings_window() {
     let _: () = msg_send![w, setTitle: ns("Settings")];
     let _: () = msg_send![w, setReleasedWhenClosed: NO];
     ui.settings_win = Ptr::retained(w);
+    release_obj(w); // Ptr::retained took its own +1; drop the alloc/init +1 (same as seerr.rs)
     let c: *mut Object = msg_send![w, contentView];
 
     // Two-column form laid out top-down from a running `top`; frames are applied once the
