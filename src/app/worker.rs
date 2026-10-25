@@ -366,8 +366,12 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             }
             UiCmd::LoadHome => {
                 if let Some(c) = &client {
-                    let rows = crate::app::home::load_home(c).await;
-                    let _ = main_tx.send(MainMsg::HomeLoaded(rows));
+                    // Spawned so a slow Home load never blocks later commands.
+                    let (c, tx) = (c.clone(), main_tx.clone());
+                    tokio::spawn(async move {
+                        let rows = crate::app::home::load_home(&c).await;
+                        let _ = tx.send(MainMsg::HomeLoaded(rows));
+                    });
                 }
             }
             UiCmd::SaveSettings { settings, reconnect } => {
@@ -788,6 +792,8 @@ mod tests {
         not_jellyfin: bool,
         /// Home endpoints answering 500: "views", "resume", "nextup", "latest", "recs".
         home_fail: Vec<String>,
+        /// Delay (ms) before answering the Resume endpoint.
+        resume_delay_ms: u64,
     }
 
     struct Mock {
@@ -892,6 +898,10 @@ mod tests {
                         .collect();
                     let req = Req { method, path: pct_decode(path), query, headers, body };
                     log.lock().unwrap().push(req.clone());
+                    let delay = cfg.lock().unwrap().resume_delay_ms;
+                    if delay > 0 && req.path.ends_with("/Items/Resume") {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
                     let resp = route(&req, &cfg.lock().unwrap());
                     let reason = if resp.status < 300 { "OK" } else { "ERR" };
                     let head = format!(
@@ -1459,6 +1469,19 @@ mod tests {
             ["views", "resume", "nextup", "latest", "recs"].iter().map(|s| s.to_string()).collect();
         h.send(UiCmd::LoadHome);
         assert!(home_of(h.next_nonposter().await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_home_does_not_block_later_commands() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().resume_delay_ms = 1500;
+        h.send(UiCmd::LoadHome);
+        h.send(UiCmd::LoadView { view_id: "v".into(), name: "L".into(), collection_type: Some("movies".into()) });
+        // The view answer must arrive first, while Home is still pending.
+        let (title, _, _) = items_of(h.next_nonposter().await);
+        assert_eq!(title, "L");
+        let rows = home_of(h.next_nonposter().await);
+        assert!(!rows.is_empty());
     }
 
     #[tokio::test]
