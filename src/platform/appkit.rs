@@ -579,6 +579,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(jrSkipSegment:), crate::ui::skip::skip_segment as Extern0),
             (sel!(jrUpNextPlay:), crate::ui::skip::up_next_play as Extern0),
             (sel!(jrUpNextCancel:), crate::ui::skip::up_next_cancel as Extern0),
+            (sel!(jrSkipHideDone:), crate::ui::skip::skip_hide_done as Extern0),
             (sel!(jrToggleSeriesSkip:), crate::ui::skip::toggle_series_skip as Extern0),
             (sel!(showCastMenu:), crate::ui::cast::show_menu as Extern0),
             (sel!(castPick:), crate::ui::cast::pick as Extern0),
@@ -604,6 +605,7 @@ pub(crate) unsafe fn register_classes() {
     crate::ui::detail::register_detail_classes();
     crate::ui::player::register_player_classes();
     crate::ui::playerbar::register_playerbar_classes();
+    crate::ui::skip::register_skip_classes();
     crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
     {
