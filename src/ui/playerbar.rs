@@ -61,6 +61,9 @@ pub struct PlayerBar {
     mute_icon: &'static str,
     /// Items in the last menu opened. Menus are not shown in self-test mode, so tests read this.
     pub last_menu_items: usize,
+    /// Presses seen by the PiP / full screen actions while off-screen (self-test only).
+    pub pip_presses: usize,
+    pub full_presses: usize,
 }
 
 impl PlayerBar {
@@ -91,6 +94,8 @@ impl PlayerBar {
             shows_pause: true,
             mute_icon: "",
             last_menu_items: 0,
+            pip_presses: 0,
+            full_presses: 0,
         }
     }
 }
@@ -586,10 +591,11 @@ pub(crate) extern "C" fn show_speed_menu(_t: &mut Object, _c: Sel, sender: *mut 
 
 // ---- Picture in Picture ------------------------------------------------------------------------------
 
-/// Toggles Picture in Picture on the AVPlayerLayer under AVPlayerView. Not used in self-test mode.
+/// Toggles Picture in Picture on the AVPlayerLayer under AVPlayerView. Off-screen (self-test) it only counts the press.
 pub(crate) extern "C" fn toggle_pip(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         if offscreen_mode() {
+            UI.get_mut().unwrap().pbar.pip_presses += 1;
             return;
         }
         let ui = UI.get_mut().unwrap();

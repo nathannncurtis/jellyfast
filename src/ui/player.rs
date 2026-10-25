@@ -195,6 +195,21 @@ unsafe fn fade_transport(to: f64, d: f64) {
         fade(ui.pbar.bar.get(), to, d);
     }
 }
+/// Self-test hook: pretends the pointer last moved `secs` ago.
+pub(crate) unsafe fn set_idle_age(secs: f64) {
+    let ui = UI.get_mut().unwrap();
+    ui.last_mouse = std::time::Instant::now().checked_sub(std::time::Duration::from_secs_f64(secs));
+}
+/// Self-test hook: shows both bars at once, with no fade, and restarts the idle clock.
+pub(crate) unsafe fn show_bars_instant() {
+    let ui = UI.get_mut().unwrap();
+    ui.last_mouse = Some(std::time::Instant::now());
+    ui.bar_shown = true;
+    let _: () = msg_send![ui.top_bar.get(), setAlphaValue: 1.0f64];
+    if !ui.pbar.bar.get().is_null() {
+        let _: () = msg_send![ui.pbar.bar.get(), setAlphaValue: 1.0f64];
+    }
+}
 pub(crate) unsafe fn hide_bars_if_idle() {
     let ui = UI.get_mut().unwrap();
     let paused = ui.playing.as_ref().map(|p| p.paused).unwrap_or(true);

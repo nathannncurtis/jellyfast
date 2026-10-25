@@ -614,6 +614,10 @@ pub(crate) unsafe fn update_chip() {
 pub(crate) extern "C" fn fullscreen(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if offscreen_mode() {
+            ui.pbar.full_presses += 1;
+            return;
+        }
         let _: () = msg_send![ui.win.get(), toggleFullScreen: nil()];
     }
 }
@@ -1215,6 +1219,8 @@ unsafe impl objc::Encode for CMTime {
     }
 }
 /// CMTimeRange: start then duration, each a CMTime (returned by NSValue's CMTimeRangeValue).
+/// Note: this 48-byte struct comes back through plain msg_send, which is correct on arm64. An x86_64 build
+/// would need objc_msgSend_stret for the large-struct return.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CMTimeRange {

@@ -154,7 +154,7 @@ fn steps() -> Vec<Step> {
         ("playback: chrome", s_play_chrome, 400),
         ("player bar: layout + audit", s_player_bar, 100),
         ("player bar: buttons, menus, hover", s_player_bar_buttons, 300),
-        ("player bar: auto-hide arm (4 s idle)", s_pb_hide_arm, 4000),
+        ("player bar: auto-hide arm", s_pb_hide_arm, 600),
         ("player bar: auto-hide check", s_pb_hide_check, 50),
         ("playback: controls", s_play_controls, 300),
         ("playback: subtitle/audio cycle", s_play_cycle, 2300),
@@ -1141,6 +1141,7 @@ fn s_audit_player() {
 }
 fn s_player_bar() {
     unsafe {
+        crate::ui::player::show_bars_instant();
         let ui = UI.get_mut().unwrap();
         let bar = ui.pbar.bar.get();
         state_check("player bar built", !bar.is_null());
@@ -1159,6 +1160,7 @@ fn s_player_bar() {
 fn s_player_bar_buttons() {
     use crate::ui::playerbar as pb;
     unsafe {
+        crate::ui::player::show_bars_instant();
         let (play, back, fwd, mute, subs, audio, speed, pip, full) = {
             let p = &UI.get().unwrap().pbar;
             (p.play, p.back, p.fwd, p.mute, p.subs, p.audio, p.speed, p.pip, p.full)
@@ -1178,6 +1180,11 @@ fn s_player_bar_buttons() {
             let a: objc::runtime::Sel = msg_send![b.get(), action];
             state_check(&format!("button {} wired", name), a == sel);
         }
+        // PiP and full screen are fired too (off-screen they only count the press).
+        act(sel!(togglePiP:), pip.get());
+        state_check("pip button fires its action", UI.get().unwrap().pbar.pip_presses == 1);
+        act(sel!(fullscreen:), full.get());
+        state_check("full screen button fires its action", UI.get().unwrap().pbar.full_presses == 1);
         // Play/pause: one press flips the rate, the next flips it back.
         let r0: f32 = msg_send![UI.get().unwrap().player.get(), rate];
         act(sel!(playPause:), play.get());
@@ -1234,13 +1241,19 @@ fn s_player_bar_buttons() {
         act(sel!(playPause:), play.get());
     }
 }
-/// Starts the idle clock with the video playing from the start; the next step waits past the timeout.
+/// Deterministic idle test: the idle age is set directly instead of waiting on the wall clock.
 fn s_pb_hide_arm() {
     unsafe {
-        let ui = UI.get_mut().unwrap();
         let _ = pb_seek_start();
-        show_bars_now();
-        state_check("auto-hide: bar shown on activity", ui.bar_shown);
+        crate::ui::player::show_bars_instant();
+        state_check("auto-hide: bar shown on activity", UI.get().unwrap().bar_shown);
+        // Just under the timeout: still shown.
+        crate::ui::player::set_idle_age(2.0);
+        crate::ui::player::hide_bars_if_idle();
+        state_check("auto-hide: still shown before 2.5 s", UI.get().unwrap().bar_shown);
+        // Past the timeout while playing: hides (the fade finishes during the next delay).
+        crate::ui::player::set_idle_age(2.6);
+        crate::ui::player::hide_bars_if_idle();
     }
 }
 unsafe fn pb_seek_start() -> bool {
