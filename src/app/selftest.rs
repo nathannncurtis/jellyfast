@@ -56,6 +56,13 @@ pub fn start() {
         let (tx, rx) = unbounded_channel::<UiCmd>();
         ui.ui_tx = tx;
         *CMD_RX.lock().unwrap() = Some(rx);
+        // Launch state: no library chrome, no spinner, branded window.
+        let h: BOOL = msg_send![ui.content_host.get(), isHidden];
+        state_check("launch: content_host hidden", h == YES);
+        let h: BOOL = msg_send![ui.spinner.get(), isHidden];
+        state_check("launch: spinner hidden", h == YES);
+        let t: *mut Object = msg_send![ui.win.get(), title];
+        state_check("window title is Jellyfast", to_str(t) == "Jellyfast");
     }
     next(0);
 }
@@ -274,6 +281,9 @@ fn s_connected() {
             let h: BOOL = msg_send![ui.login_card.get(), isHidden];
             h == YES
         });
+        state_check("auto-selected first library", ui.mode_stack.len() == 1 && ui.mode_stack[0].0 == "v1");
+        state_check("selected_view set", ui.selected_view == Some(0));
+        state_check("auto-select sent LoadView", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == "v1")));
     }
 }
 fn s_worker_path() {
@@ -546,6 +556,15 @@ fn s_signed_out() {
         }
     }
     handle_main(MainMsg::SignedOut);
+    unsafe {
+        let ui = UI.get().unwrap();
+        let c: *mut Object = msg_send![ui.login_err.get(), textColor];
+        let sec: *mut Object = msg_send![class!(NSColor), secondaryLabelColor];
+        let eq: BOOL = msg_send![c, isEqual: sec];
+        state_check("signed-out message is neutral (secondary colour)", eq == YES);
+        let t: *mut Object = msg_send![ui.win.get(), title];
+        state_check("window title still Jellyfast after playback", to_str(t) == "Jellyfast");
+    }
 }
 fn s_quit_prep() {
     unsafe {

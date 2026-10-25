@@ -30,7 +30,8 @@ pub(crate) unsafe fn build_window_and_ui() {
     let win: *mut Object = msg_send![class!(NSWindow), alloc];
     let win: *mut Object = msg_send![win,
         initWithContentRect: frame styleMask: style backing: 2usize defer: NO];
-    let _: () = msg_send![win, setTitle: ns("Jellyfin")];
+    let _: () = msg_send![win, setTitle: ns("Jellyfast")];
+    let _: () = msg_send![win, setTitleVisibility: 1i64]; // hidden; the title still names the window in menus
     let _: () = msg_send![win, setTitlebarAppearsTransparent: YES];
     let _: () = msg_send![win, setReleasedWhenClosed: NO];
     let _: () = msg_send![win, setTabbingMode: 2i64]; // disallowed
@@ -153,7 +154,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(content_host, sp);
     autorel(sp);
     ui.spinner = Ptr(sp);
-    let _: () = msg_send![sp, startAnimation: nil()];
+    set_hidden(sp, true);
 
     let st = make_label("", 13.0, false, true);
     set_frame(st, rect(260., pb.size.h / 2. - 30., pb.size.w - 280., 20.));
@@ -266,9 +267,8 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(card, btn);
     ui.login_btn = Ptr(btn);
 
-    let err = make_label("", 12.0, false, false);
+    let err = crate::ui::theme::wrapping_label("", crate::ui::theme::T_CALLOUT, crate::ui::theme::C_TEXT2, crate::ui::theme::ALIGN_LEFT);
     set_frame(err, rect(24., 20., card_w - 48., 44.));
-    let _: () = msg_send![err, setTextColor: color_named("red")];
     add_sub(card, err);
     ui.login_err = Ptr(err);
 
@@ -297,6 +297,9 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.timer = Ptr(timer);
 
     apply_theme();
+    // Launch state: only the login card (the library chrome is hidden until a
+    // session exists); `app_did_finish_launch` turns it into a connecting state.
+    show_login_or_library(false);
 }
 
 pub(crate) unsafe fn add_arranged(stack: *mut Object, v: *mut Object, _top: CGFloat, _pad: CGFloat) {
@@ -331,20 +334,20 @@ pub(crate) unsafe fn build_menus() {
     // App menu
     let app_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
     let app_item: *mut Object = msg_send![app_item,
-        initWithTitle: ns("JellyfinMac") action: nil() keyEquivalent: ns("")];
+        initWithTitle: ns("Jellyfast") action: nil() keyEquivalent: ns("")];
     let app_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let app_menu: *mut Object = msg_send![app_menu, initWithTitle: ns("JellyfinMac")];
+    let app_menu: *mut Object = msg_send![app_menu, initWithTitle: ns("Jellyfast")];
     let _: () = msg_send![app_item, setSubmenu: app_menu];
     let _: () = msg_send![main_menu, addItem: app_item];
     autorel(app_item);
-    let about: *mut Object = menu_item("About JellyfinMac", sel!(orderFrontStandardAboutPanel:), "");
+    let about: *mut Object = menu_item("About Jellyfast", sel!(orderFrontStandardAboutPanel:), "");
     let _: () = msg_send![app_menu, addItem: about];
     let _: () = msg_send![app_menu, addItem: separator()];
     let settings_i: *mut Object = menu_item("Settings…", sel!(showSettings:), ",");
     let _: () = msg_send![settings_i, setTarget: ui.ctl.get()];
     let _: () = msg_send![app_menu, addItem: settings_i];
     let _: () = msg_send![app_menu, addItem: separator()];
-    let quit: *mut Object = menu_item("Quit JellyfinMac", sel!(terminate:), "q");
+    let quit: *mut Object = menu_item("Quit Jellyfast", sel!(terminate:), "q");
     let _: () = msg_send![app_menu, addItem: quit];
 
     // Controls menu (playback is fully operable from the keyboard here).
@@ -455,6 +458,8 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
 pub fn show_login_or_library(connected: bool) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        let content: *mut Object = msg_send![ui.win.get(), contentView];
+        crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
         set_hidden(ui.content_host.get(), !connected);
         set_hidden(ui.login_card.get(), connected);
         if connected {
@@ -466,12 +471,43 @@ pub fn show_login_or_library(connected: bool) {
     }
 }
 
-pub fn login_error(msg: &str) {
+/// Neutral progress/info text on the login card (secondary colour).
+pub fn login_status(msg: &str) {
+    use crate::ui::theme::*;
     unsafe {
         let ui = UI.get_mut().unwrap();
         set_text(ui.login_err.get(), msg);
+        set_label_color(ui.login_err.get(), C_TEXT2);
+    }
+}
+
+/// Failure text on the login card (danger colour); re-enables Connect.
+pub fn login_error(msg: &str) {
+    use crate::ui::theme::*;
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        set_text(ui.login_err.get(), msg);
+        set_label_color(ui.login_err.get(), C_DANGER);
         let _: () = msg_send![ui.login_btn.get(), setEnabled: YES];
         set_text(ui.login_btn.get(), "Connect");
-        set_hidden(ui.spinner.get(), true);
+        set_busy(false);
+    }
+}
+
+/// "http://192.168.1.10:8096/x" -> "192.168.1.10:8096" (display only).
+pub fn host_of(url: &str) -> String {
+    let t = url.trim();
+    let t = t.split("://").nth(1).unwrap_or(t);
+    t.split('/').next().unwrap_or(t).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_of;
+    #[test]
+    fn host_of_strips_scheme_and_path() {
+        assert_eq!(host_of("http://192.168.1.10:8096/web"), "192.168.1.10:8096");
+        assert_eq!(host_of(" https://j.example.com "), "j.example.com");
+        assert_eq!(host_of("jellyfin.local:8096"), "jellyfin.local:8096");
     }
 }

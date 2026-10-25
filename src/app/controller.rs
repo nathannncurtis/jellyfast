@@ -2,6 +2,7 @@
 use crate::*;
 use crate::platform::appkit::*;
 use crate::platform::avkit::*;
+use crate::app::messages::UiCmd;
 use crate::ui::shell::*;
 use crate::ui::library::*;
 use crate::ui::settings::*;
@@ -35,6 +36,19 @@ pub(crate) fn handle_main(msg: MainMsg) {
                 ui.views = views.clone();
                 sidebar_rebuild(user_name, &views, has_live_tv);
                 show_login_or_library(true);
+                // Land on the last-used library, or the first one.
+                let idx = ui
+                    .cfg
+                    .last_view
+                    .as_ref()
+                    .and_then(|id| ui.views.iter().position(|v| &v.0 == id))
+                    .unwrap_or(0);
+                if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
+                    ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
+                    ui.selected_view = Some(idx);
+                    set_busy(true);
+                    let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+                }
             }
         }
         MainMsg::ConnectError(e) => unsafe {
@@ -47,7 +61,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
             ui.cur_title = title.clone();
             set_text(ui.header_title.get(), &title);
             let _: BOOL = msg_send![ui.back_btn.get(), setHidden: (!can_go_back) as BOOL];
-            set_hidden(ui.spinner.get(), true);
+            set_busy(false);
             set_hidden(ui.status_label.get(), !items.is_empty());
             if items.is_empty() {
                 set_text(ui.status_label.get(), "Nothing here.");
@@ -62,7 +76,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
         },
         MainMsg::PlaybackError(e) => unsafe {
             set_chip(&format!("⚠︎ {}", e), true);
-            set_hidden(UI.get_mut().unwrap().spinner.get(), true);
+            set_busy(false);
         },
         MainMsg::ServerUp => unsafe {
             retry_playback();
@@ -81,7 +95,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
         },
         MainMsg::SignedOut => unsafe {
             show_login_or_library(false);
-            set_text(UI.get_mut().unwrap().login_err.get(), "Signed out.");
+            login_status("You've signed out.");
         },
         MainMsg::SettingsSnapshot(cfg) => unsafe {
             settings_fill(&cfg);

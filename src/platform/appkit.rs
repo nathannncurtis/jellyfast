@@ -269,6 +269,7 @@ pub struct Ui {
     pub sel_sub: usize,
     pub sel_audio: usize,
     pub mode_stack: Vec<(String, String, Option<String>)>, // for back nav
+    pub selected_view: Option<usize>,
     pub cur_title: String,
 }
 unsafe impl Send for Ui {}
@@ -637,7 +638,10 @@ pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Ob
         let tag: NSInteger = msg_send![sender, tag];
         if let Some((id, name, ct)) = ui.views.get(tag as usize).cloned() {
             ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
-            set_hidden(ui.spinner.get(), false);
+            ui.selected_view = Some(tag as usize);
+            ui.cfg.last_view = Some(id.clone());
+            crate::config::save_config(&ui.cfg);
+            set_busy(true);
             set_hidden(ui.status_label.get(), true);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
         }
@@ -651,7 +655,7 @@ pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Obj
             Some(i) => i.clone(),
             None => return,
         };
-        set_hidden(ui.spinner.get(), false);
+        set_busy(true);
         match it.item_type.as_str() {
             "Series" => {
                 let _ = ui.ui_tx.send(UiCmd::Episodes { series_id: it.id.clone(), series_name: it.name.clone() });
@@ -700,17 +704,18 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
         let user = read_field(ui.login_user.get());
         let pass = read_field_secure(ui.login_pass.get());
         let key = read_field_secure(ui.login_key.get());
-        login_error(""); // clear
+        login_status(""); // clear
         if url.is_empty() {
-            login_error("Enter your server address (e.g. http://192.168.1.10:8096).");
+            login_error("Enter your server's address, like jellyfin.local:8096.");
             return;
         }
         if user.is_empty() && key.is_empty() {
-            login_error("Enter a username + password, or an API key.");
+            login_error("Enter your username and password, or use an API key.");
             return;
         }
         let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
         set_text(ui.login_btn.get(), "Connecting…");
+        login_status(&format!("Connecting to {}…", host_of(&url)));
         let _ = ui.ui_tx.send(UiCmd::Connect {
             url,
             username: user,
@@ -753,8 +758,10 @@ pub(crate) extern "C" fn app_did_finish_launch(_t: &mut Object, _c: Sel, _n: *mu
         let ui = UI.get_mut().unwrap();
         // If a server + token are stored, the worker is already auto-connecting;
         // reflect that state in the login card.
-        if ui.cfg.server_url.is_some() {
-            set_text(ui.login_err.get(), "Connecting to your server…");
+        if let Some(u) = ui.cfg.server_url.clone() {
+            login_status(&format!("Connecting to {}…", host_of(&u)));
+            let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
+            set_text(ui.login_btn.get(), "Connecting…");
         }
         crate::app::controller::drain_main(); // anything queued before launch
         if crate::app::selftest::enabled() {
@@ -942,6 +949,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         sel_sub: 0,
         sel_audio: 0,
         mode_stack: vec![],
+        selected_view: None,
         cur_title: String::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
@@ -963,6 +971,11 @@ pub fn set_busy(b: bool) {
             None => return,
         };
         set_hidden(ui.spinner.get(), !b);
+        if b {
+            let _: () = msg_send![ui.spinner.get(), startAnimation: nil()];
+        } else {
+            let _: () = msg_send![ui.spinner.get(), stopAnimation: nil()];
+        }
     }
 }
 

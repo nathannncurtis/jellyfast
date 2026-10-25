@@ -249,8 +249,7 @@ pub fn stop_playback_ui() {
         ui.playing = None;
         set_hidden(ui.player_host.get(), true);
         set_hidden(ui.content_host.get(), false);
-        let _: () = msg_send![ui.win.get(), setTitle: ns("Jellyfin")];
-        let _: () = msg_send![ui.win.get(), setTitleVisibility: 0i64];
+        let _: () = msg_send![ui.win.get(), setTitle: ns("Jellyfast")];
         let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
     }
 }
