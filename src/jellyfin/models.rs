@@ -211,3 +211,16 @@ pub struct MediaStream {
     #[serde(rename = "DisplayTitle", default)]
     pub display_title: Option<String>,
 }
+
+/// One entry of GET /Movies/Recommendations: a titled group of suggestions.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RecommendationDto {
+    #[serde(rename = "Items", default)]
+    pub items: Vec<ListItem>,
+    /// e.g. "SimilarToRecentlyPlayed", "HasActorFromRecentlyPlayed".
+    #[serde(rename = "RecommendationType", default)]
+    pub recommendation_type: Option<String>,
+    /// The item or person the group was derived from.
+    #[serde(rename = "BaselineItemName", default)]
+    pub baseline_name: Option<String>,
+}

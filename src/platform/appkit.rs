@@ -360,6 +360,8 @@ pub struct Ui {
     pub selected_view: Option<usize>,
     pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
+    /// Home screen rows from the latest `MainMsg::HomeLoaded`.
+    pub home_rows: Vec<crate::app::messages::HomeRow>,
     pub now: crate::ui::nowbar::NowBar,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
@@ -1132,6 +1134,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         selected_view: None,
         side_dyn: vec![],
         cur_title: String::new(),
+        home_rows: Vec::new(),
         now: crate::ui::nowbar::NowBar::new(),
         tint_cache: HashMap::new(),
     };

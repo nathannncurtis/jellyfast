@@ -50,12 +50,16 @@ pub(crate) fn handle_main(msg: MainMsg) {
                     begin_load(true);
                     let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
                 }
+                let _ = ui.ui_tx.send(UiCmd::LoadHome);
             }
         }
         MainMsg::ConnectError(e) => unsafe {
             login_error(&e);
             show_login_or_library(false);
         },
+        MainMsg::HomeLoaded(home) => {
+            UI.get_mut().unwrap().home_rows = home.rows;
+        }
         MainMsg::ItemsLoaded { title, items, can_go_back } => unsafe {
             let ui = UI.get_mut().unwrap();
             ui.items = items.clone();

@@ -54,6 +54,9 @@ pub enum UiCmd {
         item_id: String,
         played: bool,
     },
+    /// Fetch the Home screen rows (continue watching, next up, recently added,
+    /// recommendations). Answered with `MainMsg::HomeLoaded`.
+    LoadHome,
     SaveSettings {
         settings: Settings,
         reconnect: bool,
@@ -94,6 +97,8 @@ pub enum MainMsg {
         has_live_tv: bool,
     },
     ConnectError(String),
+    /// Home screen rows, in display order. Empty rows are never included.
+    HomeLoaded(HomeRows),
     ItemsLoaded {
         title: String,
         items: Vec<ListItem>,
@@ -126,6 +131,28 @@ pub enum MainMsg {
         ok: bool,
         message: String,
     },
+}
+
+/// What a Home row shows; the UI picks its layout and "see all" target from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeRowKind {
+    ContinueWatching,
+    NextUp,
+    /// One library's newest items; the title names the library.
+    RecentlyAdded,
+    Recommended,
+}
+
+#[derive(Debug, Clone)]
+pub struct HomeRow {
+    pub title: String,
+    pub kind: HomeRowKind,
+    pub items: Vec<ListItem>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HomeRows {
+    pub rows: Vec<HomeRow>,
 }
 
 #[derive(Debug, Clone)]

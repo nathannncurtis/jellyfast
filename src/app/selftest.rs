@@ -104,6 +104,7 @@ fn steps() -> Vec<Step> {
         ("items: movies", s_items_movies, 100),
         ("worker->UI path (WORKER_TX)", s_worker_path, 400),
         ("worker->UI path check", s_worker_check, 50),
+        ("home rows stored", s_home_rows, 50),
         ("audit: sidebar (long names)", s_audit_sidebar, 150),
         ("posters (png, jpeg, garbage)", s_posters, 100),
         ("audit: grid (long titles)", s_audit_grid, 200),
@@ -638,7 +639,9 @@ fn s_connected() {
         state_check("window is opaque", { let o: BOOL = msg_send![ui.win.get(), isOpaque]; o == YES });
         state_check("library canvas draws background", { let o: BOOL = msg_send![ui.lib_scroll.get(), drawsBackground]; o == YES });
         state_check("login backdrop hidden once connected", { let o: BOOL = msg_send![ui.bgfx.get(), isHidden]; o == YES });
-        state_check("auto-select sent LoadView", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == "v1")));
+        let cmds = take_cmds();
+        state_check("auto-select sent LoadView", cmds.iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == "v1")));
+        state_check("connect sent LoadHome", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
     }
 }
 fn s_worker_path() {
@@ -651,6 +654,24 @@ fn s_worker_check() {
         state_check("worker msg delivered", ui.cur_title == "ViaWorker" && ui.items.len() == 3);
     }
     send_items("Movies", items_of("Movie", 12), false);
+}
+fn s_home_rows() {
+    handle_main(MainMsg::HomeLoaded(HomeRows {
+        rows: vec![
+            HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: items_of("Movie", 2) },
+            HomeRow { title: "Recently Added in Movies".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 3) },
+        ],
+    }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check(
+            "home rows stored in order",
+            ui.home_rows.len() == 2
+                && ui.home_rows[0].title == "Continue Watching"
+                && ui.home_rows[0].items.len() == 2
+                && ui.home_rows[1].kind == HomeRowKind::RecentlyAdded,
+        );
+    }
 }
 fn s_items_movies() {
     send_items("Movies", items_of("Movie", 12), false);
