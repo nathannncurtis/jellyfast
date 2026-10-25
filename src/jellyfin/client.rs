@@ -278,7 +278,8 @@ impl JellyfinClient {
         Ok(v.items)
     }
 
-    pub async fn report_start(&self, item_id: &str, ticks: i64) {
+    /// `play_method` is Jellyfin's PlayMethod: "DirectPlay", "DirectStream" or "Transcode".
+    pub async fn report_start(&self, item_id: &str, ticks: i64, play_method: &str) {
         let _ = self
             .http
             .post(format!("{}/Sessions/Playing", self.base))
@@ -286,7 +287,7 @@ impl JellyfinClient {
             .header("X-Emby-Token", &self.token)
             .json(&serde_json::json!({
                 "ItemId": item_id, "PositionTicks": ticks, "IsPaused": false,
-                "PlayMethod": "DirectPlay"
+                "PlayMethod": play_method
             }))
             .send()
             .await;
@@ -1068,7 +1069,7 @@ mod tests {
     #[tokio::test]
     async fn report_start_posts_playing_body() {
         let m = serve(|_| status_only(204)).await;
-        client(&m.base).report_start("item-7", 123_000).await;
+        client(&m.base).report_start("item-7", 123_000, "DirectPlay").await;
         let r = m.last();
         assert_eq!(r.method, "POST");
         assert_eq!(r.path, "/Sessions/Playing");
@@ -1108,7 +1109,7 @@ mod tests {
     async fn report_methods_swallow_connection_errors() {
         // Fire-and-forget: must return without panicking or erroring.
         let c = client(&refused_base());
-        c.report_start("i", 1).await;
+        c.report_start("i", 1, "DirectPlay").await;
         c.report_progress("i", 1, false).await;
         c.report_stopped("i", 1).await;
     }
@@ -1117,7 +1118,7 @@ mod tests {
     async fn report_methods_do_not_fail_on_server_error() {
         let m = serve(|_| status_only(500)).await;
         let c = client(&m.base);
-        c.report_start("i", 1).await;
+        c.report_start("i", 1, "DirectPlay").await;
         c.report_progress("i", 1, false).await;
         c.report_stopped("i", 1).await;
         assert_eq!(m.count(), 3);

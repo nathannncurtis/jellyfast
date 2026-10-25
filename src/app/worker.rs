@@ -217,7 +217,11 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                     &cfg.settings.subtitle_lang,
                                 ),
                             };
-                            c.report_start(&full.id, crate::jellyfin::urls::ticks_from_secs(resume_secs))
+                            let play_method = match method {
+                                crate::transcode::decision::PlaybackMethod::DirectPlay => "DirectPlay",
+                                crate::transcode::decision::PlaybackMethod::ServerHls => "Transcode",
+                            };
+                            c.report_start(&full.id, crate::jellyfin::urls::ticks_from_secs(resume_secs), play_method)
                                 .await;
                             let mut hist = crate::config::load_history();
                             hist = crate::config::push_history(
@@ -249,7 +253,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             UiCmd::PlayChannel { channel_id, name } => {
                 if let Some(c) = &client {
                     let url = crate::jellyfin::urls::build_livetv_url(&c.base, &channel_id, &c.token);
-                    c.report_start(&channel_id, 0).await;
+                    c.report_start(&channel_id, 0, "DirectStream").await;
                     let _ = main_tx.send(MainMsg::PlaybackReady(PlaybackStart {
                         url,
                         item_id: channel_id,
@@ -733,7 +737,7 @@ mod tests {
             }
             ("GET", ["Items", _, "Images", "Primary"]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
             ("POST", ["Sessions", "Playing", ..]) => status(204),
-            ("POST", ["Users", _, "Items", id, "PlayedItems"]) | ("DELETE", ["Users", _, "Items", id, "PlayedItems"]) => {
+            ("POST", ["Users", _, "PlayedItems", id]) | ("DELETE", ["Users", _, "PlayedItems", id]) => {
                 if *id == "boom" {
                     status(500)
                 } else {
@@ -1198,6 +1202,7 @@ mod tests {
         let b: serde_json::Value = serde_json::from_str(&st[0].body).unwrap();
         assert_eq!(b["ItemId"], "direct");
         assert_eq!(b["PositionTicks"], 0);
+        assert_eq!(b["PlayMethod"], "DirectPlay");
         let hist = crate::config::load_history();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].item_id, "direct");
@@ -1218,6 +1223,11 @@ mod tests {
         let p = playback(h.next().await);
         assert_eq!(p.method, PlaybackMethod::ServerHls);
         assert!(p.url.contains("/Videos/nosrc/master.m3u8?MediaSourceId=nosrc"), "{}", p.url);
+        // Every HLS start is reported to the server as a transcode.
+        for st in m.find("POST", "/Sessions/Playing") {
+            let b: serde_json::Value = serde_json::from_str(&st.body).unwrap();
+            assert_eq!(b["PlayMethod"], "Transcode");
+        }
     }
 
     #[tokio::test]
@@ -1311,9 +1321,9 @@ mod tests {
         let stop = m.find("POST", "/Sessions/Playing/Stopped");
         assert_eq!(stop.len(), 1);
         assert_eq!(serde_json::from_str::<serde_json::Value>(&stop[0].body).unwrap()["PositionTicks"], 900);
-        assert_eq!(m.find("POST", "/Users/u1/Items/i1/PlayedItems").len(), 1);
-        assert_eq!(m.find("DELETE", "/Users/u1/Items/i1/PlayedItems").len(), 1);
-        assert_eq!(m.find("POST", "/Users/u1/Items/boom/PlayedItems").len(), 1);
+        assert_eq!(m.find("POST", "/Users/u1/PlayedItems/i1").len(), 1);
+        assert_eq!(m.find("DELETE", "/Users/u1/PlayedItems/i1").len(), 1);
+        assert_eq!(m.find("POST", "/Users/u1/PlayedItems/boom").len(), 1);
     }
 
     // ------------------------------------------------- settings / sign-out
