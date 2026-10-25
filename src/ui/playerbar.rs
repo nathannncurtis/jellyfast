@@ -13,11 +13,16 @@ use objc::msg_send;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 use objc::{sel, sel_impl};
 use std::os::raw::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 static BAR_CLASS: OnceLock<&'static Class> = OnceLock::new();
 static SCRUB_CLASS: OnceLock<&'static Class> = OnceLock::new();
 static PIP_CLASS: OnceLock<&'static Class> = OnceLock::new();
+/// Set when the app itself asks AVKit to stop PiP, so the resulting stop callback is not read as the user closing it.
+static PIP_APP_STOP: AtomicBool = AtomicBool::new(false);
+/// Set when the user presses PiP's restore button, which ends PiP without stopping playback.
+static PIP_RESTORING: AtomicBool = AtomicBool::new(false);
 
 /// Secondary button hit size, and the larger play/pause target.
 const BTN: f64 = 40.;
@@ -684,6 +689,7 @@ unsafe fn release_pip_controller() {
     }
     let active: BOOL = msg_send![c, isPictureInPictureActive];
     if active == YES {
+        PIP_APP_STOP.store(true, Ordering::SeqCst);
         let _: () = msg_send![c, stopPictureInPicture];
     }
     for kp in ["pictureInPicturePossible", "pictureInPictureActive"] {
@@ -754,6 +760,7 @@ pub(crate) unsafe fn pip_stop() {
         None => return,
     };
     if !c.is_null() && pip_active() {
+        PIP_APP_STOP.store(true, Ordering::SeqCst);
         let _: () = msg_send![c, stopPictureInPicture];
     }
     refresh_pip_button();
@@ -771,6 +778,7 @@ pub(crate) extern "C" fn toggle_pip(_t: &mut Object, _c: Sel, _s: *mut Object) {
             return;
         }
         if pip_active() {
+            PIP_APP_STOP.store(true, Ordering::SeqCst);
             let _: () = msg_send![c, stopPictureInPicture];
         } else if pip_available() {
             let _: () = msg_send![c, startPictureInPicture];
@@ -806,6 +814,7 @@ extern "C" fn pip_restore(_t: &mut Object, _c: Sel, _ctl: *mut Object, done: *mu
         let _: () = msg_send![ui.app.get(), activateIgnoringOtherApps: YES];
         let _: () = msg_send![w, makeKeyAndOrderFront: nil()];
         crate::ui::player::show_bars();
+        PIP_RESTORING.store(true, Ordering::SeqCst);
         if !done.is_null() {
             call_block_bool(done, YES);
         }
@@ -816,21 +825,29 @@ extern "C" fn pip_started(_t: &mut Object, _c: Sel, _ctl: *mut Object) {
     unsafe { refresh_pip_button() }
 }
 
-/// PiP ended. If the main window is closed (not just minimised or the app hidden), nothing is left to show,
-/// so the app quits as it would after closing its last window.
+/// PiP ended. Three ways it can end: the app stopped it (nothing more to do), the restore button was pressed
+/// (the player window is back, playback goes on), or PiP's close button was pressed. The last one stops
+/// playback, as Apple's TV app does. The app keeps running either way, even with no window open.
 extern "C" fn pip_stopped(_t: &mut Object, _c: Sel, _ctl: *mut Object) {
     unsafe {
         refresh_pip_button();
-        let ui = match UI.get() {
+        let app_stop = PIP_APP_STOP.swap(false, Ordering::SeqCst);
+        let restoring = PIP_RESTORING.swap(false, Ordering::SeqCst);
+        if app_stop || restoring {
+            return;
+        }
+        let ui = match UI.get_mut() {
             Some(u) => u,
             None => return,
         };
-        let w = ui.win.get();
-        let vis: BOOL = msg_send![w, isVisible];
-        let mini: BOOL = msg_send![w, isMiniaturized];
-        let hidden: BOOL = msg_send![ui.app.get(), isHidden];
-        if vis == NO && mini == NO && hidden == NO {
-            let _: () = msg_send![ui.app.get(), terminate: nil()];
+        if ui.playing.is_some() {
+            if let Some(pn) = ui.playing.as_ref() {
+                let _ = ui.ui_tx.send(crate::app::messages::UiCmd::Stopped {
+                    item_id: pn.item_id.clone(),
+                    ticks: crate::jellyfin::urls::ticks_from_secs(pn.last_secs),
+                });
+            }
+            crate::platform::avkit::stop_playback_ui();
         }
     }
 }
