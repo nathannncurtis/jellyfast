@@ -81,6 +81,8 @@ extern "C" {}
 extern "C" {}
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {}
+#[link(name = "QuartzCore", kind = "framework")]
+extern "C" {}
 
 // ---- Tiny pointer RAII for process-lifetime globals --------------------
 #[derive(Clone, Copy)]
@@ -155,44 +157,23 @@ pub(crate) unsafe fn layer_of(v: *mut Object) -> *mut Object {
     msg_send![v, layer]
 }
 pub(crate) unsafe fn color_named(name: &str) -> *mut Object {
-    let c: *mut Object = msg_send![class!(NSColor), performSelector: sel!(
-        labelColor
-    )];
+    use crate::ui::theme::*;
     match name {
-        "secondary" => {
-            let c: *mut Object = msg_send![class!(NSColor), secondaryLabelColor];
-            c
-        }
-        "accent" => {
-            let c: *mut Object = msg_send![class!(NSColor), controlAccentColor];
-            c
-        }
-        "red" => {
-            let c: *mut Object = msg_send![class!(NSColor), systemRedColor];
-            c
-        }
-        "white" => {
-            let c: *mut Object = msg_send![class!(NSColor), whiteColor];
-            c
-        }
-        _ => c,
+        "label" => color(C_TEXT),
+        "secondary" => color(C_TEXT2),
+        "tertiary" => color(C_TEXT3),
+        "accent" => color(C_ACCENT),
+        "red" => color(C_DANGER),
+        "white" => color(C_ON_MEDIA),
+        _ => color(C_TEXT),
     }
 }
 pub(crate) unsafe fn symbol_image(name: &str, point_size: CGFloat) -> *mut Object {
-    let img: *mut Object =
-        msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name) accessibilityDescription: nil()];
-    if img.is_null() || point_size <= 0.0 {
-        return img;
+    use crate::ui::theme::*;
+    if point_size <= 0.0 {
+        return msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name) accessibilityDescription: nil()];
     }
-    // Resize via symbol configuration (SF Symbols scale cleanly).
-    let cfg: *mut Object = msg_send![class!(NSImageSymbolConfiguration),
-        configurationWithPointSize: point_size weight: 0.0f64];
-    let scaled: *mut Object = msg_send![img, imageWithSymbolConfiguration: cfg];
-    if scaled.is_null() {
-        img
-    } else {
-        scaled // imageWithSymbolConfiguration: returns an autoreleased object
-    }
+    symbol(name, point_size, Weight::Regular)
 }
 
 // ---- Global UI state (main thread only) --------------------------------
@@ -817,20 +798,11 @@ pub(crate) extern "C" fn app_should_terminate(
 // All of these become safe functions taking typed view handles once `mod
 // sys` is its own platform crate.
 
+/// Legacy label helper kept while screens migrate to `theme::label`.
 pub(crate) unsafe fn make_label(text: &str, size: CGFloat, bold: bool, center: bool) -> *mut Object {
-    let v: *mut Object = if bold {
-        msg_send![class!(NSTextField), labelWithString: ns(text)]
-    } else {
-        msg_send![class!(NSTextField), labelWithString: ns(text)]
-    };
-    let font: *mut Object = if bold {
-        msg_send![class!(NSFont), boldSystemFontOfSize: size]
-    } else {
-        msg_send![class!(NSFont), systemFontOfSize: size]
-    };
-    let _: () = msg_send![v, setFont: font];
-    let _: () = msg_send![v, setAlignment: if center { 2usize } else { 0usize }];
-    v // labelWithString: already returned an autoreleased object
+    use crate::ui::theme::*;
+    let t = TypeStyle { size, weight: if bold { Weight::Bold } else { Weight::Regular }, mono: false };
+    label(text, t, C_TEXT, if center { ALIGN_CENTER } else { ALIGN_LEFT })
 }
 pub(crate) unsafe fn set_text(v: *mut Object, s: &str) {
     let _: () = msg_send![v, setStringValue: ns(s)];

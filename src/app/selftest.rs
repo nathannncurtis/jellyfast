@@ -353,6 +353,8 @@ fn s_items_empty() {
         let ui = UI.get().unwrap();
         let h: BOOL = msg_send![ui.status_label.get(), isHidden];
         state_check("status label visible", h == NO);
+        let al: isize = msg_send![ui.status_label.get(), alignment];
+        state_check("status label centred (arm64-safe ALIGN_CENTER)", al as usize == crate::ui::theme::ALIGN_CENTER);
     }
 }
 fn s_items_many() {

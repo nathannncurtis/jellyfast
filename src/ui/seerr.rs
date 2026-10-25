@@ -320,7 +320,7 @@ unsafe fn make_row(i: usize, spec: &RowSpec, width: f64, requesting: bool) -> *m
     add_sub(row, sub);
 
     let badge = make_label(&spec.badge, 12.0, false, false);
-    let _: () = msg_send![badge, setAlignment: 1usize]; // right
+    let _: () = msg_send![badge, setAlignment: crate::ui::theme::ALIGN_RIGHT as isize]; // right
     let _: () = msg_send![badge, setTextColor: badge_color(spec.badge_color)];
     let _: () = msg_send![badge.cell(), setLineBreakMode: 4usize];
     set_frame(badge, rect(width - right_pad - btn_w - badge_w - if btn_w > 0. { 8. } else { 0. }, 22., badge_w, 16.));
