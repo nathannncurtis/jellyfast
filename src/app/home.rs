@@ -55,40 +55,51 @@ pub(crate) fn recommendation_title(r: &RecommendationDto) -> String {
 
 /// Fetch all Home rows in display order: Continue Watching, Next Up, one
 /// Recently Added row per movie/show library, then recommendations.
+///
+/// Every endpoint is in flight at once. The per-library Latest requests need
+/// the library list from `views`, so they are spawned as soon as `views`
+/// resolves, from their own task, instead of after the other rows are awaited.
 pub(crate) async fn load_home(c: &JellyfinClient) -> HomeRows {
-    let (c1, c2, c3, c4) = (c.clone(), c.clone(), c.clone(), c.clone());
+    let (c1, c2, c3, c4, c5) = (c.clone(), c.clone(), c.clone(), c.clone(), c.clone());
     let resume = tokio::spawn(async move { c1.resume_items(ROW_LIMIT).await });
     let next = tokio::spawn(async move { c2.next_up(ROW_LIMIT).await });
     let recs = tokio::spawn(async move { c3.recommendations(ROW_LIMIT).await });
     let views = tokio::spawn(async move { c4.views().await });
+    let latest = tokio::spawn(async move {
+        let libs: Vec<View> = settle(views, "views")
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(is_video_library)
+            .collect();
+        libs.into_iter()
+            .map(|lib| {
+                let c = c5.clone();
+                let id = lib.id.clone();
+                (lib, tokio::spawn(async move { c.latest_items(&id, ROW_LIMIT).await }))
+            })
+            .collect::<Vec<_>>()
+    });
+
+    let resume = settle(resume, "resume").await;
+    let next = settle(next, "next up").await;
+    let recs = settle(recs, "recommendations").await;
+    let latest = match latest.await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("home: latest task failed: {}", e);
+            Vec::new()
+        }
+    };
 
     let mut rows = Vec::new();
-    let resume = settle(resume, "resume").await;
     rows.extend(row("Continue Watching".into(), HomeRowKind::ContinueWatching, resume));
-    let next = settle(next, "next up").await;
     rows.extend(row("Next Up".into(), HomeRowKind::NextUp, next));
-
-    // Latest per library: start every request before awaiting any of them.
-    let libs: Vec<View> = settle(views, "views")
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(is_video_library)
-        .collect();
-    let latest: Vec<(View, tokio::task::JoinHandle<Result<Vec<ListItem>, JFError>>)> = libs
-        .into_iter()
-        .map(|lib| {
-            let c = c.clone();
-            let id = lib.id.clone();
-            (lib, tokio::spawn(async move { c.latest_items(&id, ROW_LIMIT).await }))
-        })
-        .collect();
     for (lib, h) in latest {
         let items = settle(h, "latest").await;
         rows.extend(row(format!("Recently Added in {}", lib.name), HomeRowKind::RecentlyAdded, items));
     }
-
-    if let Some(groups) = settle(recs, "recommendations").await {
+    if let Some(groups) = recs {
         for g in groups {
             let title = recommendation_title(&g);
             rows.extend(row(title, HomeRowKind::Recommended, Some(g.items)));
