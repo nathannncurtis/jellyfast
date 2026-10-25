@@ -92,7 +92,7 @@ pub(crate) unsafe fn build_settings_window() {
     section(&mut place, &mut top, "Browsing", false);
     let lay = popup(&["Separate libraries", "One big library"]);
     row(&mut place, &mut top, "Sidebar", lay, 26., 200.);
-    help(&mut place, &mut top, "One big library shows Home, Browse and Search, with movies and shows mixed. Requests shows once Seerr is set up.");
+    help(&mut place, &mut top, "One big library shows Home with Movies and TV Shows tabs, Browse, Search and Requests. Requests shows once Seerr is set up.");
     ui.s_layout = Ptr(lay);
 
     section(&mut place, &mut top, "Playback", false);

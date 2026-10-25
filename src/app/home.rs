@@ -1,12 +1,18 @@
 //! Data for the Home screen: fetches every row concurrently and tolerates
 //! partial failures (a failed endpoint just drops its rows).
 
+use crate::app::libraries::visible_views;
 use crate::app::messages::{HomeRow, HomeRowKind, HomeRows};
+use crate::config::HomeSection;
 use crate::jellyfin::client::{JFError, JellyfinClient};
-use crate::jellyfin::models::{ListItem, RecommendationDto, View};
+use crate::jellyfin::models::{ItemQuery, ListItem, RecommendationDto, View};
+use std::future::Future;
+use tokio::task::JoinHandle;
 
 /// Items requested per row.
 const ROW_LIMIT: u32 = 16;
+/// Upper bound for a full library grid (Movies / TV Shows tabs).
+const GRID_LIMIT: u32 = 10_000;
 
 /// Only movie and show libraries get a "Recently Added" row.
 fn is_video_library(v: &View) -> bool {
@@ -105,7 +111,229 @@ pub(crate) async fn load_home(c: &JellyfinClient) -> HomeRows {
             rows.extend(row(title, HomeRowKind::Recommended, Some(g.items)));
         }
     }
-    HomeRows { rows }
+    HomeRows { section: HomeSection::Home, rows, grid: Vec::new() }
+}
+
+/// Movie and show libraries the user has not hidden, as view ids in sidebar order.
+#[derive(Default)]
+struct VideoLibs {
+    movies: Vec<String>,
+    shows: Vec<String>,
+}
+
+/// Resolve the visible movie and show libraries. A failed views request leaves
+/// both lists empty, so the one-big-library tabs show their empty state.
+async fn video_libs(c: &JellyfinClient, order: &[String], hidden: &[String]) -> VideoLibs {
+    let views = match c.views().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("home: views failed: {}", e);
+            Vec::new()
+        }
+    };
+    let all: Vec<(String, String, Option<String>)> =
+        views.into_iter().map(|v| (v.id, v.name, v.collection_type)).collect();
+    let mut libs = VideoLibs::default();
+    for (id, _, kind) in visible_views(&all, order, hidden) {
+        match kind.as_deref() {
+            Some("movies") => libs.movies.push(id),
+            Some("tvshows") => libs.shows.push(id),
+            _ => {}
+        }
+    }
+    libs
+}
+
+/// Start one request per library id; the answers are gathered by `gather`.
+fn fan_out<T, F, Fut>(c: &JellyfinClient, ids: &[String], f: F) -> Vec<JoinHandle<Result<Vec<T>, JFError>>>
+where
+    T: Send + 'static,
+    F: Fn(JellyfinClient, String) -> Fut,
+    Fut: Future<Output = Result<Vec<T>, JFError>> + Send + 'static,
+{
+    ids.iter().map(|id| tokio::spawn(f(c.clone(), id.clone()))).collect()
+}
+
+/// Join per-library answers into one list; a failed library contributes nothing.
+async fn gather<T>(handles: Vec<JoinHandle<Result<Vec<T>, JFError>>>, what: &str) -> Vec<T> {
+    let mut out = Vec::new();
+    for h in handles {
+        if let Some(v) = settle(h, what).await {
+            out.extend(v);
+        }
+    }
+    out
+}
+
+/// Await a spawned loader. A panicked task counts as an empty answer.
+async fn joined<T: Default>(h: JoinHandle<T>, what: &str) -> T {
+    match h.await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("home: {} task failed: {}", what, e);
+            T::default()
+        }
+    }
+}
+
+/// Most recently played first. Items never played sort last.
+fn played_at(it: &ListItem) -> &str {
+    it.user_data.as_ref().and_then(|u| u.last_played_date.as_deref()).unwrap_or("")
+}
+
+/// Continue Watching over the given libraries, newest play first.
+async fn resume_across(c: JellyfinClient, ids: Vec<String>) -> Vec<ListItem> {
+    let mut items = gather(
+        fan_out(&c, &ids, |c, id| async move { c.resume_items_in(Some(&id), ROW_LIMIT).await }),
+        "resume",
+    )
+    .await;
+    items.sort_by(|a, b| played_at(b).cmp(played_at(a)));
+    items.truncate(ROW_LIMIT as usize);
+    items
+}
+
+/// Next Up over the given show libraries.
+async fn next_up_across(c: JellyfinClient, ids: Vec<String>) -> Vec<ListItem> {
+    let mut items = gather(
+        fan_out(&c, &ids, |c, id| async move { c.next_up_in(Some(&id), ROW_LIMIT).await }),
+        "next up",
+    )
+    .await;
+    items.truncate(ROW_LIMIT as usize);
+    items
+}
+
+/// Recently added over the given libraries, newest first.
+async fn latest_across(c: JellyfinClient, ids: Vec<String>) -> Vec<ListItem> {
+    let mut items = gather(
+        fan_out(&c, &ids, |c, id| async move { c.latest_items(&id, ROW_LIMIT).await }),
+        "latest",
+    )
+    .await;
+    items.sort_by(|a, b| b.date_created.cmp(&a.date_created));
+    items.truncate(ROW_LIMIT as usize);
+    items
+}
+
+/// Recommendations over the given movie libraries. The same group (say, "Because
+/// you watched X") can come back from several libraries, so groups merge by title.
+async fn recommendations_across(c: JellyfinClient, ids: Vec<String>) -> Vec<HomeRow> {
+    let groups: Vec<RecommendationDto> = gather(
+        fan_out(&c, &ids, |c, id| async move { c.recommendations_in(Some(&id), ROW_LIMIT).await }),
+        "recommendations",
+    )
+    .await;
+    let mut merged: Vec<(String, Vec<ListItem>)> = Vec::new();
+    for g in groups {
+        let title = recommendation_title(&g);
+        match merged.iter_mut().find(|(t, _)| *t == title) {
+            Some((_, items)) => {
+                for it in g.items {
+                    if !items.iter().any(|x| x.id == it.id) {
+                        items.push(it);
+                    }
+                }
+            }
+            None => merged.push((title, g.items)),
+        }
+    }
+    merged
+        .into_iter()
+        .filter_map(|(title, mut items)| {
+            items.truncate(ROW_LIMIT as usize);
+            row(title, HomeRowKind::Recommended, Some(items))
+        })
+        .collect()
+}
+
+/// Every item of one type (`Movie` or `Series`) across the given libraries, by name.
+async fn grid_across(c: JellyfinClient, ids: Vec<String>, item_type: &'static str) -> Vec<ListItem> {
+    let mut items = gather(
+        fan_out(&c, &ids, move |c, id| async move {
+            let q = ItemQuery {
+                parent_id: Some(id),
+                types: Some(item_type.to_string()),
+                sort_by: "SortName".into(),
+                limit: GRID_LIMIT,
+                ..Default::default()
+            };
+            c.items(&q).await
+        }),
+        "grid",
+    )
+    .await;
+    items.sort_by_key(|it| it.name.to_lowercase());
+    items
+}
+
+/// Home in the one-big-library layout: Continue Watching, Next Up, Recently Added
+/// Movies, Recently Added TV, then recommendations. Only visible libraries count.
+pub(crate) async fn load_unified_home(c: &JellyfinClient, order: &[String], hidden: &[String]) -> HomeRows {
+    let libs = video_libs(c, order, hidden).await;
+    let all: Vec<String> = libs.movies.iter().chain(libs.shows.iter()).cloned().collect();
+    // Each loader runs as its own task, so all of them are in flight at once.
+    let resume = tokio::spawn(resume_across(c.clone(), all));
+    let next = tokio::spawn(next_up_across(c.clone(), libs.shows.clone()));
+    let added_movies = tokio::spawn(latest_across(c.clone(), libs.movies.clone()));
+    let added_tv = tokio::spawn(latest_across(c.clone(), libs.shows.clone()));
+    let recs = tokio::spawn(recommendations_across(c.clone(), libs.movies.clone()));
+    let resume = joined(resume, "resume").await;
+    let next = joined(next, "next up").await;
+    let added_movies = joined(added_movies, "latest movies").await;
+    let added_tv = joined(added_tv, "latest tv").await;
+    let recs = joined(recs, "recommendations").await;
+    let mut rows = Vec::new();
+    rows.extend(row("Continue Watching".into(), HomeRowKind::ContinueWatching, Some(resume)));
+    rows.extend(row("Next Up".into(), HomeRowKind::NextUp, Some(next)));
+    rows.extend(row("Recently Added Movies".into(), HomeRowKind::RecentlyAdded, Some(added_movies)));
+    rows.extend(row("Recently Added TV".into(), HomeRowKind::RecentlyAdded, Some(added_tv)));
+    rows.extend(recs);
+    HomeRows { section: HomeSection::Home, rows, grid: Vec::new() }
+}
+
+/// One tab of the one-big-library Home. Movies: Continue Watching, Recently Added,
+/// recommendations, then every movie. TV Shows: Next Up, Recently Added, every series.
+pub(crate) async fn load_section(
+    c: &JellyfinClient,
+    section: HomeSection,
+    order: &[String],
+    hidden: &[String],
+) -> HomeRows {
+    if section == HomeSection::Home {
+        return load_unified_home(c, order, hidden).await;
+    }
+    let libs = video_libs(c, order, hidden).await;
+    match section {
+        HomeSection::Home => unreachable!("handled above"),
+        HomeSection::Movies => {
+            let resume = tokio::spawn(resume_across(c.clone(), libs.movies.clone()));
+            let added = tokio::spawn(latest_across(c.clone(), libs.movies.clone()));
+            let recs = tokio::spawn(recommendations_across(c.clone(), libs.movies.clone()));
+            let grid = tokio::spawn(grid_across(c.clone(), libs.movies.clone(), "Movie"));
+            let resume = joined(resume, "resume").await;
+            let added = joined(added, "latest movies").await;
+            let recs = joined(recs, "recommendations").await;
+            let grid = joined(grid, "movie grid").await;
+            let mut rows = Vec::new();
+            rows.extend(row("Continue Watching".into(), HomeRowKind::ContinueWatching, Some(resume)));
+            rows.extend(row("Recently Added".into(), HomeRowKind::RecentlyAdded, Some(added)));
+            rows.extend(recs);
+            HomeRows { section, rows, grid }
+        }
+        HomeSection::TvShows => {
+            let next = tokio::spawn(next_up_across(c.clone(), libs.shows.clone()));
+            let added = tokio::spawn(latest_across(c.clone(), libs.shows.clone()));
+            let grid = tokio::spawn(grid_across(c.clone(), libs.shows.clone(), "Series"));
+            let next = joined(next, "next up").await;
+            let added = joined(added, "latest tv").await;
+            let grid = joined(grid, "series grid").await;
+            let mut rows = Vec::new();
+            rows.extend(row("Next Up".into(), HomeRowKind::NextUp, Some(next)));
+            rows.extend(row("Recently Added".into(), HomeRowKind::RecentlyAdded, Some(added)));
+            HomeRows { section, rows, grid }
+        }
+    }
 }
 
 #[cfg(test)]

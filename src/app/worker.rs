@@ -449,14 +449,31 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             }
             UiCmd::LoadHome => {
                 if let Some(c) = &client {
+                    // One big library: Home mixes everything but splits the recent rows by type.
+                    let unified = cfg.layout_mode == Some(crate::config::LayoutMode::Unified);
+                    let (order, hidden) = (cfg.library_order.clone(), cfg.hidden_libraries.clone());
                     // Spawned so a slow Home load never blocks later commands.
                     let (c, tx) = (c.clone(), main_tx.clone());
                     let (dir, http) = (poster_dir.clone(), http_poster.clone());
                     tokio::spawn(async move {
-                        let rows = crate::app::home::load_home(&c).await;
-                        // Rows first, so Home is usable at once; artwork follows as PosterReady.
-                        let _ = tx.send(MainMsg::HomeLoaded(rows.clone()));
-                        fetch_home_art(&c, &tx, &rows.rows, &dir, http.as_ref());
+                        let rows = if unified {
+                            crate::app::home::load_unified_home(&c, &order, &hidden).await
+                        } else {
+                            crate::app::home::load_home(&c).await
+                        };
+                        send_home(&c, &tx, rows, &dir, http.as_ref());
+                    });
+                }
+            }
+            UiCmd::LoadHomeSection { section } => {
+                if let Some(c) = &client {
+                    // Movies and TV Shows tabs (one big library only); same spawn-and-send shape.
+                    let (order, hidden) = (cfg.library_order.clone(), cfg.hidden_libraries.clone());
+                    let (c, tx) = (c.clone(), main_tx.clone());
+                    let (dir, http) = (poster_dir.clone(), http_poster.clone());
+                    tokio::spawn(async move {
+                        let rows = crate::app::home::load_section(&c, section, &order, &hidden).await;
+                        send_home(&c, &tx, rows, &dir, http.as_ref());
                     });
                 }
             }
@@ -855,6 +872,18 @@ pub(crate) fn fetch_art(
     poster_dir: &std::path::Path,
     http: Option<&reqwest::Client>,
 ) {
+    fetch_art_gated(jobs, main_tx, poster_dir, http, None);
+}
+
+/// `fetch_art` with an optional gate: when `gate` is given, each download waits
+/// for a permit first, so a long grid never has more than the gate's width in flight.
+pub(crate) fn fetch_art_gated(
+    jobs: Vec<(u64, String)>,
+    main_tx: &UnboundedSender<MainMsg>,
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+    gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+) {
     let Some(http) = http.cloned() else {
         return;
     };
@@ -862,7 +891,12 @@ pub(crate) fn fetch_art(
         let tx = main_tx.clone();
         let dir = poster_dir.to_path_buf();
         let http = http.clone();
+        let gate = gate.clone();
         tokio::spawn(async move {
+            let _permit = match gate {
+                Some(g) => g.acquire_owned().await.ok(),
+                None => None,
+            };
             let path = dir.join(format!("{:016x}.img", key));
             let bytes = match tokio::fs::read(&path).await {
                 Ok(b) => Some(b),
@@ -882,6 +916,28 @@ pub(crate) fn fetch_art(
             }
         });
     }
+}
+
+/// Send one Home reply, then its artwork: rows first so Home is usable at once,
+/// and the grid's posters after the row artwork. Posters arrive as `PosterReady`.
+fn send_home(
+    c: &JellyfinClient,
+    tx: &UnboundedSender<MainMsg>,
+    rows: crate::app::messages::HomeRows,
+    dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+) {
+    let _ = tx.send(MainMsg::HomeLoaded(rows.clone()));
+    fetch_home_art(c, tx, &rows.rows, dir, http);
+    // The whole grid, not just the first 200 posters; twelve downloads at a time.
+    let jobs: Vec<(u64, String)> = rows
+        .grid
+        .iter()
+        .filter(|it| it.has_image())
+        .map(|it| (sys_key(&it.id), build_image_url(&c.base, &it.id, &c.token, 400)))
+        .collect();
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(12));
+    fetch_art_gated(jobs, tx, dir, http, Some(gate));
 }
 
 /// Fetch Home artwork after `HomeLoaded` has been sent. Poster rows get Primary
@@ -1518,12 +1574,33 @@ mod tests {
 
     /// Worker connected to a fresh mock via the password path.
     async fn connected() -> (TestEnv, Mock, H) {
+        connected_with(base_cfg()).await
+    }
+
+    /// As `connected`, with the given config (layout, hidden libraries, ...).
+    async fn connected_with(cfg: Config) -> (TestEnv, Mock, H) {
         let env = TestEnv::new();
         let m = start_mock().await;
-        let mut h = H::start(base_cfg());
+        let mut h = H::start(cfg);
         h.send(connect_pw(&m.url()));
         assert!(matches!(h.next().await, MainMsg::Connected { .. }));
         (env, m, h)
+    }
+
+    /// The Home reply behind `next_nonposter`, whole (section, rows and grid).
+    fn home_reply(m: MainMsg) -> crate::app::messages::HomeRows {
+        match m {
+            MainMsg::HomeLoaded(h) => h,
+            other => panic!("expected HomeLoaded, got {other:?}"),
+        }
+    }
+
+    fn unified_cfg(hidden: &[&str]) -> Config {
+        Config {
+            layout_mode: Some(crate::config::LayoutMode::Unified),
+            hidden_libraries: hidden.iter().map(|s| s.to_string()).collect(),
+            ..base_cfg()
+        }
     }
 
     fn items_of(m: MainMsg) -> (String, Vec<String>, bool) {
@@ -1924,6 +2001,96 @@ mod tests {
 
     fn titles(rows: &[(String, Vec<String>)]) -> Vec<&str> {
         rows.iter().map(|r| r.0.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn one_big_library_home_splits_recent_rows_by_type() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&[])).await;
+        h.send(UiCmd::LoadHome);
+        let reply = home_reply(h.next_nonposter().await);
+        assert_eq!(reply.section, crate::config::HomeSection::Home);
+        let titles: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Continue Watching", "Next Up", "Recently Added Movies", "Recently Added TV", "Because you watched Movie One", "More with Some Actor"]
+        );
+        assert!(reply.grid.is_empty(), "Home has no grid");
+        let movies: Vec<&str> = reply.rows[2].items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(movies, ["Movie One", "Movie Two"]);
+        assert_eq!(reply.rows[3].items[0].name, "Show One");
+        // Library-scoped requests: one Latest per movie library and per show library.
+        let latest: Vec<String> = m
+            .find("GET", "/Users/u1/Items/Latest")
+            .iter()
+            .map(|r| r.qp("ParentId").unwrap_or_default().to_string())
+            .collect();
+        assert!(latest.iter().any(|p| p == "v-mov") && latest.iter().any(|p| p == "v-tv"), "{latest:?}");
+        assert!(latest.iter().all(|p| p != "v-mus"), "music is not a Home library: {latest:?}");
+    }
+
+    #[tokio::test]
+    async fn one_big_library_home_skips_hidden_libraries() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&["v-tv"])).await;
+        h.send(UiCmd::LoadHome);
+        let reply = home_reply(h.next_nonposter().await);
+        let titles: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
+        assert!(!titles.contains(&"Recently Added TV"), "{titles:?}");
+        assert!(!titles.contains(&"Next Up"), "{titles:?}");
+        assert!(m.find("GET", "/Shows/NextUp").is_empty(), "a hidden show library is never queried");
+        assert!(m.find("GET", "/Users/u1/Items/Latest").iter().all(|r| r.qp("ParentId") != Some("v-tv")));
+    }
+
+    #[tokio::test]
+    async fn movies_tab_queries_visible_movie_libraries_only() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&["v-tv"])).await;
+        h.send(UiCmd::LoadHomeSection { section: crate::config::HomeSection::Movies });
+        let reply = home_reply(h.next_nonposter().await);
+        assert_eq!(reply.section, crate::config::HomeSection::Movies);
+        let grid: Vec<&str> = reply.grid.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(grid, ["Movie One", "Movie Two"]);
+        assert!(reply.grid.iter().all(|i| i.item_type == "Movie"));
+        let rows: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
+        assert!(rows.contains(&"Recently Added") && !rows.iter().any(|t| t.contains("TV")), "{rows:?}");
+        let grid_reqs: Vec<Req> = m.find("GET", "/Users/u1/Items").into_iter().filter(|r| r.path == "/Users/u1/Items").collect();
+        assert!(!grid_reqs.is_empty());
+        for r in &grid_reqs {
+            assert_eq!(r.qp("IncludeItemTypes"), Some("Movie"), "{:?}", r.query);
+            assert_eq!(r.qp("ParentId"), Some("v-mov"), "only the visible movie library: {:?}", r.query);
+            assert_eq!(r.qp("Recursive"), Some("true"));
+        }
+        assert!(m.find("GET", "/Shows/NextUp").is_empty());
+        for r in m.find("GET", "/Users/u1/Items/Resume") {
+            assert_eq!(r.qp("ParentId"), Some("v-mov"));
+        }
+    }
+
+    #[tokio::test]
+    async fn tv_tab_queries_series_in_visible_show_libraries() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&[])).await;
+        h.send(UiCmd::LoadHomeSection { section: crate::config::HomeSection::TvShows });
+        let reply = home_reply(h.next_nonposter().await);
+        assert_eq!(reply.section, crate::config::HomeSection::TvShows);
+        let grid: Vec<&str> = reply.grid.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(grid, ["Show One"]);
+        let rows: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(rows, ["Next Up", "Recently Added"]);
+        let grid_reqs: Vec<Req> = m.find("GET", "/Users/u1/Items").into_iter().filter(|r| r.path == "/Users/u1/Items").collect();
+        assert_eq!(grid_reqs.len(), 1, "one grid request per visible show library");
+        assert_eq!(grid_reqs[0].qp("IncludeItemTypes"), Some("Series"));
+        assert_eq!(grid_reqs[0].qp("ParentId"), Some("v-tv"));
+        let next = m.find("GET", "/Shows/NextUp");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].qp("ParentId"), Some("v-tv"));
+        assert!(m.find("GET", "/Movies/Recommendations").is_empty(), "no recommendations on the TV tab");
+    }
+
+    #[tokio::test]
+    async fn movies_tab_with_every_movie_library_hidden_is_empty() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&["v-mov"])).await;
+        h.send(UiCmd::LoadHomeSection { section: crate::config::HomeSection::Movies });
+        let reply = home_reply(h.next_nonposter().await);
+        assert!(reply.grid.is_empty() && reply.rows.is_empty());
+        assert!(m.reqs().iter().all(|r| r.path != "/Users/u1/Items"), "no library, no grid request");
     }
 
     #[tokio::test]

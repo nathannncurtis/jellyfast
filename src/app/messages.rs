@@ -1,4 +1,4 @@
-use crate::config::{Config, LayoutMode};
+use crate::config::{Config, HomeSection, LayoutMode};
 use crate::jellyfin::models::ListItem;
 use crate::seerr::models::{SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
@@ -87,6 +87,11 @@ pub enum UiCmd {
     /// Fetch the Home screen rows (continue watching, next up, recently added,
     /// recommendations). Answered with `MainMsg::HomeLoaded`.
     LoadHome,
+    /// One Home tab in the one-big-library layout: Movies or TV Shows. Its rows and
+    /// poster grid come back as `MainMsg::HomeLoaded` tagged with the same section.
+    LoadHomeSection {
+        section: HomeSection,
+    },
     SaveSettings {
         settings: Settings,
         reconnect: bool,
@@ -223,9 +228,14 @@ pub struct HomeRow {
     pub items: Vec<ListItem>,
 }
 
+/// Home content for one tab. `grid` is the full poster grid under the rows (Movies
+/// and TV Shows tabs only; empty on Home). The UI drops a reply whose `section` is
+/// no longer the one on screen.
 #[derive(Debug, Clone, Default)]
 pub struct HomeRows {
+    pub section: HomeSection,
     pub rows: Vec<HomeRow>,
+    pub grid: Vec<ListItem>,
 }
 
 #[derive(Debug, Clone)]

@@ -18,6 +18,16 @@ pub enum LayoutMode {
     Unified,
 }
 
+/// Which tab the one-big-library Home shows: the mixed Home, or one media type.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeSection {
+    #[default]
+    Home,
+    Movies,
+    TvShows,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     #[serde(default)]
@@ -39,6 +49,9 @@ pub struct Config {
     /// `None` until the first-run onboarding is answered; that is what shows it.
     #[serde(default)]
     pub layout_mode: Option<LayoutMode>,
+    /// Last Home tab chosen in the one-big-library layout (`None` means Home).
+    #[serde(default)]
+    pub home_section: Option<HomeSection>,
     #[serde(default)]
     pub settings: Settings,
     /// "Remember me" on the login card. When true, the session token is kept in
@@ -78,6 +91,7 @@ impl Default for Config {
             hidden_libraries: Vec::new(),
             sort_by: None,
             layout_mode: None,
+            home_section: None,
         }
     }
 }
@@ -279,6 +293,21 @@ mod tests {
         let l = load_config();
         assert_eq!(l.library_order, ["v2", "v1"]);
         assert_eq!(l.hidden_libraries, ["v3"]);
+    }
+
+    #[test]
+    fn home_section_defaults_to_home_and_round_trips() {
+        let _e = TestEnv::new();
+        fs::create_dir_all(config_dir()).unwrap();
+        fs::write(config_path(), "{\"server_url\":\"http://a\"}").unwrap();
+        assert_eq!(load_config().home_section, None, "missing key means the Home tab");
+        fs::write(config_path(), "{\"home_section\":\"tv_shows\"}").unwrap();
+        assert_eq!(load_config().home_section, Some(HomeSection::TvShows));
+        let mut c = load_config();
+        c.home_section = Some(HomeSection::Movies);
+        save_config(&c);
+        assert_eq!(load_config().home_section, Some(HomeSection::Movies));
+        assert_eq!(HomeSection::default(), HomeSection::Home);
     }
 
     #[test]

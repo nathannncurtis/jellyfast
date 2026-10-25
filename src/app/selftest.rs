@@ -156,6 +156,12 @@ fn steps() -> Vec<Step> {
         ("unified: browse grid", s_unified_browse, 150),
         ("unified: sidebar actions and Home", s_unified_actions, 100),
         ("unified: login restores Browse", s_unified_login, 100),
+        ("unified tabs: segmented control on Home", s_tabs_home, 100),
+        ("unified tabs: Movies shows only movies", s_tabs_movies, 100),
+        ("unified tabs: grid re-flows on resize", s_tabs_resize, 150),
+        ("unified tabs: TV Shows shows only series", s_tabs_shows, 100),
+        ("unified tabs: back to Home", s_tabs_home_again, 100),
+        ("unified tabs: tab remembered on return", s_tabs_remember, 100),
         ("settings: layout back to separate", s_layout_settings, 100),
         ("connected: Home wins over a remembered library", s_connected_library, 100),
         ("items: movies", s_items_movies, 100),
@@ -274,11 +280,12 @@ fn item(id: &str, name: &str, ty: &str, played: bool, pos: i64, run: i64) -> Lis
         year: Some(1999),
         season: Some(1),
         episode: Some(2),
-        user_data: Some(UserData { played, position_ticks: pos }),
+        user_data: Some(UserData { played, position_ticks: pos, last_played_date: None }),
         aspect: Some(0.667),
         image_tags: Some(ImageTags { primary: Some("tag".into()), thumb: None }),
         backdrop_tags: None,
         run_time_ticks: Some(run),
+        date_created: None,
     }
 }
 fn items_of(ty: &str, n: usize) -> Vec<ListItem> {
@@ -817,6 +824,7 @@ fn s_home_rows() {
             HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: items_of("Movie", 2) },
             HomeRow { title: "Recently Added in Movies".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 3) },
         ],
+        ..Default::default()
     }));
     unsafe {
         let ui = UI.get().unwrap();
@@ -1761,7 +1769,7 @@ fn s_home_open() {
     state_check("home: asks the worker for rows", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadHome)));
 }
 fn s_home_fake() {
-    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows() }));
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
     unsafe {
         let ui = UI.get().unwrap();
         state_check("home: five rows built", ui.home.views.len() == 5);
@@ -1819,7 +1827,7 @@ fn s_home_empty() {
         state_check("home: empty title", read_field(ui.status_label.get()) == "Nothing here yet");
     }
     audit_both("home empty");
-    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows() }));
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
     unsafe {
         let ui = UI.get().unwrap();
         state_check("home: rows back, state hidden", !visible(ui.state_host.get()) && ui.home.views.len() == 5);
@@ -2110,12 +2118,148 @@ fn s_layout_settings() {
         state_check("settings: library rows are back", ui.rows.len() == 5);
         state_check("settings: Browse row removed", ui.browse_row.get().is_null());
         state_check("settings: Home still the place", ui.home.active);
+        state_check("settings: home tabs hidden in the separate layout", is_hidden(ui.home.seg.get()));
         let cmds = take_cmds();
         state_check(
             "settings: worker told the layout",
             cmds.iter().any(|c| matches!(c, UiCmd::SetLayoutMode { mode: crate::config::LayoutMode::Separate })),
         );
     }
+}
+/// Unified Home tabs: the segmented control, and each tab's rows and grid.
+fn s_tabs_home() {
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: segmented control exists", !ui.home.seg.get().is_null());
+        state_check("tabs: control shown on Home", visible(ui.home.seg.get()));
+        let idx: NSInteger = msg_send![ui.home.seg.get(), selectedSegment];
+        state_check("tabs: Home selected", idx == 0 && ui.home.section == crate::config::HomeSection::Home);
+        state_check("tabs: Home has no grid", ui.home.grid.is_empty());
+        state_check("tabs: Home rows built", ui.home.views.len() == 5);
+    }
+    take_cmds();
+    audit_both("unified home tabs");
+}
+fn s_tabs_movies() {
+    use crate::config::HomeSection;
+    // Clicking the control (the segment path), then the Go menu path below.
+    unsafe {
+        let ui = UI.get().unwrap();
+        let _: () = msg_send![ui.home.seg.get(), setSelectedSegment: 1isize];
+        act(sel!(homeSegment:), ui.home.seg.get());
+    }
+    let cmds = take_cmds();
+    state_check("tabs: Movies asks for movie content", cmds.iter().any(|c| matches!(c, UiCmd::LoadHomeSection { section: HomeSection::Movies })));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: header reads Movies", read_field(ui.header_title.get()) == "Movies");
+        state_check("tabs: Home rows cleared", ui.home.views.is_empty());
+        state_check("tabs: loading state shown", visible(ui.state_host.get()) && read_field(ui.status_label.get()) == "Loading Movies…");
+        state_check("tabs: Movies remembered in config", ui.cfg.home_section == Some(HomeSection::Movies));
+    }
+    // A Home reply that arrives after the switch is dropped.
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
+    unsafe { state_check("tabs: stale Home reply ignored", UI.get().unwrap().home.views.is_empty()) };
+    // The Movies reply is mixed on purpose: series must not show on this tab.
+    let mut mixed = items_of("Movie", 14);
+    mixed.extend(items_of("Series", 4));
+    handle_main(MainMsg::HomeLoaded(HomeRows {
+        section: HomeSection::Movies,
+        rows: vec![
+            HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: items_of("Movie", 3) },
+            HomeRow { title: "Recently Added".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 6) },
+        ],
+        grid: mixed,
+    }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: movie rows and grid built", ui.home.views.len() == 3);
+        state_check("tabs: only movies on the Movies tab", ui.home.flat.iter().all(|i| i.item_type == "Movie"));
+        state_check("tabs: all 14 movies in the grid", ui.home.grid.len() == 14 && ui.home.views[2].cells.len() == 14);
+        state_check("tabs: no loading state once loaded", !visible(ui.state_host.get()));
+    }
+    // The Go menu path: Movies is already selected, so this is a repeat (no reload).
+    unsafe { act(sel!(showHomeSection:), tagged_button(1)) };
+    state_check("tabs: repeat Movies pick does not reload", !take_cmds().iter().any(|c| matches!(c, UiCmd::LoadHomeSection { .. })));
+    audit_both("unified movies tab");
+}
+fn s_tabs_resize() {
+    use crate::ui::library::grid_metrics;
+    unsafe {
+        let ui = UI.get().unwrap();
+        for (w, h) in [(1700.0, 1000.0), (960.0, 600.0)] {
+            let _: () = msg_send![ui.win.get(), setContentSize: size(w, h)];
+            let _: () = msg_send![ui.win.get(), displayIfNeeded];
+            let doc = ui.home.doc.get();
+            let dw = bounds_of(doc).size.w;
+            let m = grid_metrics(bounds_of(ui.home.scroll.get()).size.w.max(200.), crate::ui::theme::POSTER_ASPECT);
+            let cells = &ui.home.views[2].cells;
+            let right = cells.iter().map(|c| frame_of(c.container)).fold(0.0f64, |a, f| a.max(f.origin.x + f.size.w));
+            state_check(&format!("tabs: grid fits {}x{}", w, h), right <= dw - crate::ui::theme::EDGE + 0.5 && cells[0].container.is_null() == false);
+            state_check(&format!("tabs: grid columns match {}x{}", w, h), cells.len() == 14 && m.cols >= 1);
+        }
+    }
+    unsafe { set_content_size(1280.0, 800.0) };
+}
+fn s_tabs_shows() {
+    use crate::config::HomeSection;
+    unsafe { act(sel!(showHomeSection:), tagged_button(2)) };
+    let cmds = take_cmds();
+    state_check("tabs: TV Shows asks for series", cmds.iter().any(|c| matches!(c, UiCmd::LoadHomeSection { section: HomeSection::TvShows })));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: header reads TV Shows", read_field(ui.header_title.get()) == "TV Shows");
+        let idx: NSInteger = msg_send![ui.home.seg.get(), selectedSegment];
+        state_check("tabs: TV Shows selected in the control", idx == 2);
+    }
+    let mut mixed = items_of("Series", 12);
+    mixed.extend(items_of("Movie", 3));
+    handle_main(MainMsg::HomeLoaded(HomeRows {
+        section: HomeSection::TvShows,
+        rows: vec![
+            HomeRow { title: "Next Up".into(), kind: HomeRowKind::NextUp, items: items_of("Episode", 4) },
+            HomeRow { title: "Recently Added".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Series", 5) },
+        ],
+        grid: mixed,
+    }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: series rows and grid built", ui.home.views.len() == 3);
+        state_check("tabs: only series and episodes on TV Shows", ui.home.flat.iter().all(|i| matches!(i.item_type.as_str(), "Series" | "Episode")));
+        state_check("tabs: all 12 series in the grid", ui.home.grid.len() == 12);
+    }
+    audit_both("unified tv tab");
+}
+fn s_tabs_home_again() {
+    unsafe { act(sel!(showHomeSection:), tagged_button(0)) };
+    let cmds = take_cmds();
+    state_check("tabs: Home asks for LoadHome", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: Home remembered in config", ui.cfg.home_section == Some(crate::config::HomeSection::Home));
+        let idx: NSInteger = msg_send![ui.home.seg.get(), selectedSegment];
+        state_check("tabs: Home selected in the control", idx == 0);
+    }
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
+    unsafe { state_check("tabs: Home rows back", UI.get().unwrap().home.views.len() == 5 && UI.get().unwrap().home.grid.is_empty()) };
+}
+fn s_tabs_remember() {
+    use crate::config::HomeSection;
+    unsafe {
+        act(sel!(showHomeSection:), tagged_button(2));
+        take_cmds();
+        // Leave for Browse, then come back from the sidebar: the TV tab is shown again.
+        act(sel!(browseSelected:), nil());
+        state_check("tabs: Browse leaves Home", !UI.get().unwrap().home.active);
+        act(sel!(homeSelected:), nil());
+        let ui = UI.get().unwrap();
+        state_check("tabs: Home reopens on the remembered tab", ui.home.section == HomeSection::TvShows);
+    }
+    let cmds = take_cmds();
+    state_check("tabs: reopening asks for TV content", cmds.iter().any(|c| matches!(c, UiCmd::LoadHomeSection { section: HomeSection::TvShows })));
+    unsafe { act(sel!(showHomeSection:), tagged_button(0)) };
+    take_cmds();
 }
 fn s_play_start() {
     handle_main(playback(0.0, 6.0));

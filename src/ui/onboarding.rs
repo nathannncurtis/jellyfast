@@ -54,7 +54,7 @@ const OPTIONS: [(&str, &str, &str); 2] = [
     (
         "square.grid.2x2",
         "One big library",
-        "Like a streaming service: Home, then one Browse grid that mixes movies and shows.",
+        "Like a streaming service: Home, with Movies and TV Shows tabs, plus one Browse grid for both.",
     ),
 ];
 
