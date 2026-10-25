@@ -32,6 +32,12 @@ pub struct Config {
     /// the Keychain and the app signs in on launch; when false nothing persists.
     #[serde(default = "default_remember_me")]
     pub remember_me: bool,
+    /// Library view ids in the user's chosen sidebar order. Unlisted libraries follow in server order.
+    #[serde(default)]
+    pub library_order: Vec<String>,
+    /// Library view ids the user hid from the sidebar.
+    #[serde(default)]
+    pub hidden_libraries: Vec<String>,
 }
 
 fn default_remember_me() -> bool {
@@ -51,6 +57,8 @@ impl Default for Config {
             volume: 0.0,
             settings: Settings::default(),
             remember_me: default_remember_me(),
+            library_order: Vec::new(),
+            hidden_libraries: Vec::new(),
         }
     }
 }
@@ -236,6 +244,22 @@ mod tests {
         let c = load_config();
         assert_eq!(c.server_url.as_deref(), Some("http://a"));
         assert!(!c.device_id.is_empty());
+    }
+
+    #[test]
+    fn library_prefs_default_when_absent_and_roundtrip() {
+        let _e = TestEnv::new();
+        fs::create_dir_all(config_dir()).unwrap();
+        fs::write(config_path(), "{\"server_url\":\"http://a\"}").unwrap();
+        let c = load_config();
+        assert!(c.library_order.is_empty() && c.hidden_libraries.is_empty());
+        let mut c = c;
+        c.library_order = vec!["v2".into(), "v1".into()];
+        c.hidden_libraries = vec!["v3".into()];
+        save_config(&c);
+        let l = load_config();
+        assert_eq!(l.library_order, ["v2", "v1"]);
+        assert_eq!(l.hidden_libraries, ["v3"]);
     }
 
     #[test]

@@ -65,6 +65,11 @@ pub enum UiCmd {
     },
     SignOut,
     ProbeServer,
+    /// Sidebar library order and hidden ids, written from the Settings sheet.
+    SaveLibraries {
+        order: Vec<String>,
+        hidden: Vec<String>,
+    },
     /// Debounced like `Search`. Blank query yields empty `SeerrResults`.
     SeerrSearch {
         q: String,

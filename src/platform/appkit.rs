@@ -343,10 +343,19 @@ pub struct Ui {
     pub retry_pending: bool,
     pub s_quality: Ptr,
     pub s_theme: Ptr,
+    pub s_lib_pop: Ptr,
+    pub s_lib_show: Ptr,
+    pub s_lib_up: Ptr,
+    pub s_lib_down: Ptr,
     pub seerr: crate::ui::seerr::SeerrUi,
     // Rust-side state
     pub rows: Vec<(*mut Object, String)>, // sidebar row buttons + view ids
-    pub views: Vec<(String, String, Option<String>)>,
+    pub views: Vec<(String, String, Option<String>)>, // sidebar: visible, ordered
+    pub all_views: Vec<(String, String, Option<String>)>, // every library from the server (+ Live TV)
+    pub user_label: String,
+    pub lib_edit: Vec<(String, String, Option<String>)>, // Settings working copy, full order
+    pub lib_hidden: Vec<String>,                          // Settings working copy
+    pub lib_sel: usize,
     pub items: Vec<ListItem>,
     pub poster_cache: HashMap<u64, *mut Object>, // +1 owned NSImage
     pub grid_data: Option<Box<GridData>>,
@@ -492,6 +501,10 @@ pub(crate) unsafe fn register_classes() {
             (sel!(toggleApiKey:), toggle_api_key as Extern0),
             (sel!(saveSettings:), save_settings as Extern0),
             (sel!(cancelSettings:), cancel_settings as Extern0),
+            (sel!(libSelected:), crate::ui::settings::lib_selected as Extern0),
+            (sel!(libVisibleToggled:), crate::ui::settings::lib_visible_toggled as Extern0),
+            (sel!(libMoveUp:), crate::ui::settings::lib_move_up as Extern0),
+            (sel!(libMoveDown:), crate::ui::settings::lib_move_down as Extern0),
             (sel!(sortChanged:), sort_changed as Extern0),
             (sel!(controlTextDidChange:), text_changed as Extern0),
             (sel!(jrTick:), tick as Extern0),
@@ -690,6 +703,7 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
             && ui.cfg.server_url.as_deref().map(crate::jellyfin::urls::bare_url)
                 != Some(crate::jellyfin::urls::bare_url(&new_url));
         ui.cfg.settings = s;
+        crate::ui::settings::commit_library_prefs();
         // The worker resolves and stores the URL (see server_url below); the
         // keeping-session save never overwrites the worker-owned session fields.
         crate::config::save_config_keeping_session(&ui.cfg);
@@ -1121,9 +1135,18 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         retry_pending: false,
         s_quality: Ptr(nil()),
         s_theme: Ptr(nil()),
+        s_lib_pop: Ptr(nil()),
+        s_lib_show: Ptr(nil()),
+        s_lib_up: Ptr(nil()),
+        s_lib_down: Ptr(nil()),
         seerr: crate::ui::seerr::SeerrUi::new(),
         rows: vec![],
         views: vec![],
+        all_views: vec![],
+        user_label: String::new(),
+        lib_edit: vec![],
+        lib_hidden: vec![],
+        lib_sel: 0,
         items: vec![],
         poster_cache: HashMap::new(),
         grid_data: None,

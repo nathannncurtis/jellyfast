@@ -150,6 +150,7 @@ fn steps() -> Vec<Step> {
         ("seerr: wrap up", s_seerr_end, 50),
         ("settings: open+cancel", s_settings_cancel, 600),
         ("settings: open+save", s_settings_save, 600),
+        ("libraries: sidebar order + hidden, settings controls", s_library_prefs, 300),
         ("playback: start", s_play_start, 2500),
         ("playback: chrome", s_play_chrome, 100),
         ("playback: controls", s_play_controls, 300),
@@ -1113,6 +1114,94 @@ fn s_settings_save() {
             );
         });
     });
+}
+/// Library order/visibility: sidebar honours the saved prefs, the Settings controls edit
+/// them, and Save emits SaveLibraries. Restores empty prefs at the end.
+fn s_library_prefs() {
+    use crate::ui::shell::apply_library_prefs;
+    fn ids(v: &[(String, String, Option<String>)]) -> Vec<String> {
+        v.iter().map(|x| x.0.clone()).collect()
+    }
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.library_order = s(&["v3", "v1", "v2", "v4", "v5"]);
+        ui.cfg.hidden_libraries = s(&["v4"]);
+        apply_library_prefs();
+        let row_ids: Vec<String> = ui.rows.iter().map(|r| r.1.clone()).collect();
+        state_check("sidebar follows saved order and hides v4", row_ids == s(&["v3", "v1", "v2", "v5"]));
+        state_check("hidden library gone from sidebar rows", row_ids.len() == 4);
+        let open_idx = ui.mode_stack.first().and_then(|m| ui.views.iter().position(|v| v.0 == m.0));
+        state_check("selection follows the open library", open_idx.is_some() && ui.selected_view == open_idx);
+
+        let cfg = ui.cfg.clone();
+        handle_main(MainMsg::SettingsSnapshot(Box::new(cfg)));
+        audit_both("settings libraries");
+        let ui = UI.get_mut().unwrap();
+        state_check("settings lists all libraries in saved order", ids(&ui.lib_edit) == s(&["v3", "v1", "v2", "v4", "v5"]));
+        state_check("settings shows v4 as hidden", ui.lib_hidden == s(&["v4"]));
+        state_check("first library selected in popup", ui.lib_sel == 0 && is_shown_state(ui.s_lib_show.get()));
+
+        // Move v3 down: order becomes v1, v3, v2, v4, v5 and the selection follows it.
+        act(sel!(libMoveDown:), nil());
+        state_check("move down swaps and follows selection", ids(&ui.lib_edit) == s(&["v1", "v3", "v2", "v4", "v5"]) && ui.lib_sel == 1);
+        state_check("up arrow enabled after moving down", ctl_enabled(ui.s_lib_up.get()));
+
+        // Show v4 again.
+        pick(3);
+        let _: () = msg_send![ui.s_lib_show.get(), setState: 1isize];
+        act(sel!(libVisibleToggled:), nil());
+        state_check("checkbox shows v4", ui.lib_hidden.is_empty());
+
+        // Hide v1 (top row): the up arrow is disabled there.
+        pick(0);
+        let _: () = msg_send![ui.s_lib_show.get(), setState: 0isize];
+        act(sel!(libVisibleToggled:), nil());
+        state_check("checkbox hides v1", ui.lib_hidden == s(&["v1"]));
+        state_check("up arrow disabled on first row", !ctl_enabled(ui.s_lib_up.get()));
+
+        // Only one library left visible: the last one cannot be hidden.
+        ui.lib_hidden = s(&["v1", "v3", "v2", "v4"]);
+        pick(4);
+        let _: () = msg_send![ui.s_lib_show.get(), setState: 0isize];
+        act(sel!(libVisibleToggled:), nil());
+        state_check("last visible library cannot be hidden", !ui.lib_hidden.contains(&"v5".to_string()));
+        ui.lib_hidden = s(&["v1"]);
+
+        act(sel!(saveSettings:), nil());
+        let ui = UI.get_mut().unwrap();
+        let cmds = take_cmds();
+        state_check(
+            "save emits SaveLibraries with the edited order and hidden list",
+            cmds.iter().any(|c| matches!(c,
+                UiCmd::SaveLibraries { order, hidden } if *order == s(&["v1", "v3", "v2", "v4", "v5"]) && *hidden == s(&["v1"]))),
+        );
+        state_check("saved prefs reach ui.cfg", ui.cfg.library_order == s(&["v1", "v3", "v2", "v4", "v5"]) && ui.cfg.hidden_libraries == s(&["v1"]));
+        let row_ids: Vec<String> = ui.rows.iter().map(|r| r.1.clone()).collect();
+        state_check("sidebar updates after save", row_ids == s(&["v3", "v2", "v4", "v5"]));
+
+        // Restore defaults so later steps see the normal sidebar.
+        ui.cfg.library_order.clear();
+        ui.cfg.hidden_libraries.clear();
+        apply_library_prefs();
+        state_check("defaults restored", ui.rows.len() == 5);
+    }
+}
+unsafe fn is_shown_state(cb: *mut Object) -> bool {
+    let st: NSInteger = msg_send![cb, state];
+    st != 0
+}
+unsafe fn ctl_enabled(v: *mut Object) -> bool {
+    let e: BOOL = msg_send![v, isEnabled];
+    e == YES
+}
+/// Select an item in the Libraries popup and fire its action, as a click would.
+unsafe fn pick(i: isize) {
+    let ui = UI.get_mut().unwrap();
+    let _: () = msg_send![ui.s_lib_pop.get(), selectItemAtIndex: i];
+    act(sel!(libSelected:), nil());
 }
 fn s_play_start() {
     handle_main(playback(0.0, 6.0));

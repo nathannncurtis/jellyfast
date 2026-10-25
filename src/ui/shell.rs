@@ -634,7 +634,23 @@ pub(crate) unsafe fn sidebar_refresh_selection() {
     }
 }
 
-pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Option<String>)], has_live_tv: bool) {
+/// Recompute the sidebar from `all_views` and the saved order/visibility, then rebuild it.
+/// Keeps the selection on the same library when it is still shown.
+pub(crate) unsafe fn apply_library_prefs() {
+    let ui = UI.get_mut().unwrap();
+    ui.views = crate::app::libraries::visible_views(&ui.all_views, &ui.cfg.library_order, &ui.cfg.hidden_libraries);
+    let user = ui.user_label.clone();
+    sidebar_rebuild(user);
+    let ui = UI.get_mut().unwrap();
+    ui.selected_view = ui
+        .mode_stack
+        .first()
+        .and_then(|m| ui.views.iter().position(|v| v.0 == m.0));
+    sidebar_refresh_selection();
+}
+
+/// Rebuild the sidebar rows from `ui.views`. Callers set `ui.views` first.
+pub(crate) unsafe fn sidebar_rebuild(user: String) {
     let ui = UI.get_mut().unwrap();
     let stack = ui.side_stack.get();
     // Drop everything built last time (header, rows, footer) so nothing piles up.
@@ -647,10 +663,6 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
         }
         let _: () = msg_send![stack, removeArrangedSubview: v];
         let _: () = msg_send![v, removeFromSuperview];
-    }
-    // Live TV needs a views entry so the button's tag resolves in viewSelected:.
-    if has_live_tv && !views.iter().any(|v| v.2.as_deref() == Some("livetv")) {
-        ui.views.push(("livetv".into(), "Live TV".into(), Some("livetv".into())));
     }
     let views: Vec<(String, String, Option<String>)> = ui.views.clone();
 

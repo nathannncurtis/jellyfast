@@ -33,8 +33,14 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::Connected { user_name, views, has_live_tv } => {
             unsafe {
                 let ui = UI.get_mut().unwrap();
-                ui.views = views.clone();
-                sidebar_rebuild(user_name, &views, has_live_tv);
+                // Live TV needs a views entry so the button's tag resolves in viewSelected:.
+                let mut all = views.clone();
+                if has_live_tv && !all.iter().any(|v| v.2.as_deref() == Some("livetv")) {
+                    all.push(("livetv".into(), "Live TV".into(), Some("livetv".into())));
+                }
+                ui.all_views = all;
+                ui.user_label = user_name;
+                apply_library_prefs();
                 show_login_or_library(true);
                 // Land on the last-used library, or the first one.
                 let idx = ui
