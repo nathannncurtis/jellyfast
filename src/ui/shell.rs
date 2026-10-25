@@ -72,36 +72,31 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.sidebar = Ptr(sb);
 
     let stack: *mut Object = msg_send![class!(NSStackView), alloc];
-    let stack: *mut Object = msg_send![stack, initWithFrame: rect(12., 12., 216., b.size.h - 24.)];
-    let _: () = msg_send![stack, setOrientation: 1i64]; // vertical
-    let _: () = msg_send![stack, setAlignment: 0i64]; // leading
-    let _: () = msg_send![stack, setSpacing: 6.0f64];
+    let stack: *mut Object =
+        msg_send![stack, initWithFrame: rect(SP3, 0., SIDEBAR_W - 2. * SP3, b.size.h - TITLEBAR_H)];
+    let _: () = msg_send![stack, setOrientation: 1isize]; // vertical
+    let _: () = msg_send![stack, setAlignment: 7isize]; // NSLayoutAttributeWidth: rows fill the width
+    let _: () = msg_send![stack, setSpacing: 2.0f64];
+    let _: () = msg_send![stack, setDetachesHiddenViews: YES];
+    let _: () = msg_send![stack, setEdgeInsets: NSEdgeInsets { top: 0., left: 0., bottom: SP3, right: 0. }];
     set_autoresize(stack, RESIZE_H | RESIZE_W);
     add_sub(sb, stack);
     autorel(stack);
     ui.side_stack = Ptr(stack);
 
-    let title = make_label("Jellyfin", 17.0, true, false);
-    add_arranged(stack, title, 12.0, 6.0);
-
-    // Search field
+    // Search field (the only static sidebar row; libraries and footer are rebuilt).
     let sf: *mut Object = msg_send![class!(NSSearchField), alloc];
-    let sf: *mut Object = msg_send![sf, initWithFrame: rect(0., 0., 216., 28.)];
-    let _: () = msg_send![sf.cell(), setPlaceholderString: ns("Search libraries")];
+    let sf: *mut Object = msg_send![sf, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, SIDEBAR_ROW_H)];
+    let _: () = msg_send![sf.cell(), setPlaceholderString: ns("Search")];
+    let _: () = msg_send![sf, setControlSize: 3usize];
     let _: () = msg_send![sf, setTarget: ui.ctl.get()];
     let _: () = msg_send![sf, setDelegate: ui.ctl.get()]; // controlTextDidChange: -> Search
     let _: () = msg_send![sf, setSendsWholeSearchString: NO];
-    add_arranged(stack, sf, 0.0, 4.0);
+    fix_height(sf, SIDEBAR_ROW_H);
+    let _: () = msg_send![stack, addView: sf inGravity: 1isize];
+    let _: () = msg_send![stack, setCustomSpacing: SP4 afterView: sf];
     autorel(sf);
     ui.search = Ptr(sf);
-
-    // Libraries get injected by sidebar_rebuild(); spacer + buttons below.
-    let settings_btn: *mut Object = msg_send![class!(NSButton),
-        buttonWithTitle: ns("Settings…") target: ui.ctl.get() action: sel!(showSettings:)];
-    add_arranged(stack, settings_btn, 0.0, 2.0);
-    let seerr_btn: *mut Object = msg_send![class!(NSButton),
-        buttonWithTitle: ns("Request something new…") target: ui.ctl.get() action: sel!(openSeerr:)];
-    add_arranged(stack, seerr_btn, 0.0, 2.0);
 
     // Header row (title + sort)
     let ht = make_label("Library", 20.0, true, false);
@@ -472,46 +467,226 @@ pub(crate) unsafe fn separator() -> *mut Object {
 }
 
 // ---- Sidebar ------------------------------------------------------------
+/// Pin a view's height (arranged stack views have no autoresizing constraints).
+pub(crate) unsafe fn fix_height(v: *mut Object, h: f64) {
+    let _: () = msg_send![v, setTranslatesAutoresizingMaskIntoConstraints: NO];
+    let anchor: *mut Object = msg_send![v, heightAnchor];
+    let c: *mut Object = msg_send![anchor, constraintEqualToConstant: h];
+    let _: () = msg_send![c, setActive: YES];
+}
+
+pub(crate) struct RowData {
+    bg: *mut Object,
+    selected: bool,
+}
+pub(crate) static ROW_CLASS: OnceLock<&'static Class> = OnceLock::new();
+
+pub(crate) unsafe fn register_sidebar_row() {
+    let mut d = ClassDecl::new("JRSidebarRow", class!(NSView)).unwrap();
+    d.add_ivar::<*mut c_void>("jrRow");
+    d.add_method(sel!(isFlipped), row_flipped as extern "C" fn(&mut Object, Sel) -> BOOL);
+    d.add_method(sel!(mouseEntered:), row_enter as extern "C" fn(&mut Object, Sel, *mut Object));
+    d.add_method(sel!(mouseExited:), row_exit as extern "C" fn(&mut Object, Sel, *mut Object));
+    ROW_CLASS.set(d.register()).ok();
+}
+extern "C" fn row_flipped(_t: &mut Object, _c: Sel) -> BOOL {
+    YES
+}
+unsafe fn row_data(this: *mut Object) -> *mut RowData {
+    *(*this).get_ivar::<*mut c_void>("jrRow") as *mut RowData
+}
+unsafe fn row_paint(rd: &RowData, hover: bool) {
+    if rd.selected {
+        let _: () = msg_send![rd.bg, setFillColor: color(C_FILL_SEL)];
+        let _: () = msg_send![rd.bg, setTransparent: NO];
+    } else if hover {
+        let _: () = msg_send![rd.bg, setFillColor: color(C_FILL_HOVER)];
+        let _: () = msg_send![rd.bg, setTransparent: NO];
+    } else {
+        let _: () = msg_send![rd.bg, setTransparent: YES];
+    }
+}
+extern "C" fn row_enter(this: &mut Object, _c: Sel, _e: *mut Object) {
+    unsafe {
+        let rd = row_data(this);
+        if !rd.is_null() {
+            row_paint(&*rd, true);
+        }
+    }
+}
+extern "C" fn row_exit(this: &mut Object, _c: Sel, _e: *mut Object) {
+    unsafe {
+        let rd = row_data(this);
+        if !rd.is_null() {
+            row_paint(&*rd, false);
+        }
+    }
+}
+pub(crate) unsafe fn row_set_selected(row: *mut Object, selected: bool) {
+    let rd = row_data(row);
+    if !rd.is_null() {
+        (*rd).selected = selected;
+        row_paint(&*rd, false);
+    }
+}
+pub(crate) unsafe fn row_free(row: *mut Object) {
+    let rd = row_data(row);
+    if !rd.is_null() {
+        drop(Box::from_raw(rd));
+        (*row).set_ivar::<*mut c_void>("jrRow", std::ptr::null_mut());
+    }
+}
+
+/// One 28 pt sidebar row: selection/hover pill, symbol, label, full-row hit button.
+pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, tag: NSInteger) -> *mut Object {
+    let w = SIDEBAR_W - 2. * SP3;
+    let cls = *ROW_CLASS.get().unwrap();
+    let row: *mut Object = msg_send![cls, alloc];
+    let row: *mut Object = msg_send![row, initWithFrame: rect(0., 0., w, SIDEBAR_ROW_H)];
+    let bg = surface(rect(0., 0., w, SIDEBAR_ROW_H), C_FILL_SEL, R_ROW);
+    let _: () = msg_send![bg, setTransparent: YES];
+    set_autoresize(bg, RESIZE_W | RESIZE_H);
+    add_sub(row, bg);
+    let img = symbol(symbol_name, 15., Weight::Medium);
+    let iv: *mut Object = msg_send![class!(NSImageView), alloc];
+    let iv: *mut Object = autorel(msg_send![iv, initWithFrame: rect(SP2, 4., 20., 20.)]);
+    if !img.is_null() {
+        let _: () = msg_send![iv, setImage: img];
+        let _: () = msg_send![iv, setContentTintColor: color(C_ACCENT)];
+    }
+    add_sub(row, iv);
+    let l = label(title, T_BODY, C_TEXT, ALIGN_LEFT);
+    set_frame(l, rect(36., 6., w - 36. - SP2, 16.));
+    set_autoresize(l, RESIZE_W);
+    add_sub(row, l);
+    let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
+        target: nil() action: action];
+    let ui = UI.get_mut().unwrap();
+    let _: () = msg_send![btn, setTarget: ui.ctl.get()];
+    let _: () = msg_send![btn, setBordered: NO];
+    let _: () = msg_send![btn, setTag: tag];
+    set_frame(btn, rect(0., 0., w, SIDEBAR_ROW_H));
+    set_autoresize(btn, RESIZE_W | RESIZE_H);
+    add_sub(row, btn);
+    let rd = Box::into_raw(Box::new(RowData { bg, selected: false }));
+    (*row).set_ivar::<*mut c_void>("jrRow", rd as *mut c_void);
+    let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut Object = msg_send![ta,
+        initWithRect: rect(0., 0., w, SIDEBAR_ROW_H)
+        options: (0x01usize | 0x80usize | 0x200usize) owner: row userInfo: nil()];
+    let _: () = msg_send![row, addTrackingArea: ta];
+    autorel(ta);
+    fix_height(row, SIDEBAR_ROW_H);
+    autorel(row)
+}
+
+/// Refresh the selection pill on every library row from `ui.selected_view`.
+pub(crate) unsafe fn sidebar_refresh_selection() {
+    let ui = UI.get_mut().unwrap();
+    for (i, (row, _)) in ui.rows.iter().enumerate() {
+        row_set_selected(*row, ui.selected_view == Some(i));
+    }
+}
+
 pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Option<String>)], has_live_tv: bool) {
     let ui = UI.get_mut().unwrap();
-    let ui_tx = ui.ui_tx.clone();
-    // Clear previous rows (stack retains arranged subviews; removing them
-    // releases them — we never held our own +1).
-    for (btn, _) in ui.rows.drain(..) {
-        let _: () = msg_send![ui.side_stack.get(), removeArrangedSubview: btn];
-        let _: () = msg_send![btn, removeFromSuperview];
+    let stack = ui.side_stack.get();
+    // Drop everything built last time (header, rows, footer) so nothing piles up.
+    for (row, _) in ui.rows.drain(..) {
+        row_free(row);
     }
-    let user_l = make_label(&format!("Signed in as {}", user), 11.0, false, false);
-    let _: () = msg_send![user_l, setTextColor: color_named("secondary")];
-    add_arranged(ui.side_stack.get(), user_l, 0.0, 2.0);
-    ui.rows.push((user_l, String::new())); // removed with the rows on the next rebuild
+    for v in ui.side_dyn.drain(..) {
+        if is_row(v) {
+            row_free(v);
+        }
+        let _: () = msg_send![stack, removeArrangedSubview: v];
+        let _: () = msg_send![v, removeFromSuperview];
+    }
     // Live TV needs a views entry so the button's tag resolves in viewSelected:.
     if has_live_tv && !views.iter().any(|v| v.2.as_deref() == Some("livetv")) {
         ui.views.push(("livetv".into(), "Live TV".into(), Some("livetv".into())));
     }
     let views: Vec<(String, String, Option<String>)> = ui.views.clone();
 
+    // Section header
+    let hdr_box: *mut Object = msg_send![class!(NSView), alloc];
+    let hdr_box: *mut Object = autorel(msg_send![hdr_box, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, 20.)]);
+    let hdr = label("Library", T_CAPTION_EM, C_TEXT3, ALIGN_LEFT);
+    set_frame(hdr, rect(SP2, 2., SIDEBAR_W - 2. * SP3 - SP2, 16.));
+    set_autoresize(hdr, RESIZE_W);
+    add_sub(hdr_box, hdr);
+    fix_height(hdr_box, 20.);
+    let _: () = msg_send![stack, addView: hdr_box inGravity: 1isize];
+    ui.side_dyn.push(hdr_box);
+
     for (i, (id, name, ct)) in views.iter().enumerate() {
-        let symbol = match ct.as_deref() {
+        let symbol_name = match ct.as_deref() {
             Some("movies") => "film",
             Some("tvshows") => "tv",
             Some("music") => "music.note",
             Some("livetv") => "antenna.radiowaves.left.and.right",
+            Some("boxsets") => "rectangle.stack",
             _ => "square.stack",
         };
-        let btn: *mut Object = msg_send![class!(NSButton),
-            buttonWithTitle: ns(name) target: ui.ctl.get() action: sel!(viewSelected:)];
-        let _: () = msg_send![btn, setBordered: NO];
-        let _: () = msg_send![btn, setTag: i as NSInteger];
-        let img = symbol_image(symbol, 13.0);
-        if !img.is_null() {
-            let _: () = msg_send![btn, setImage: img];
-            let _: () = msg_send![btn, setImagePosition: 2i64]; // imageLeft
-        }
-        add_arranged(ui.side_stack.get(), btn, 0.0, 0.0);
-        ui.rows.push((btn, id.clone()));
+        let row = sidebar_row(name, symbol_name, sel!(viewSelected:), i as NSInteger);
+        let _: () = msg_send![stack, addView: row inGravity: 1isize];
+        ui.rows.push((row, id.clone()));
+        ui.side_dyn.push(row);
+        row_set_selected(row, ui.selected_view == Some(i));
     }
-    let _ = ui_tx;
+
+    // Footer (bottom gravity): Request, hairline, user row.
+    let req = sidebar_row("Request…", "plus.magnifyingglass", sel!(openSeerr:), 0);
+    let _: () = msg_send![stack, addView: req inGravity: 3isize];
+    ui.side_dyn.push(req);
+    let hl = hairline(rect(0., 0., SIDEBAR_W - 2. * SP3, 1.));
+    fix_height(hl, 1.);
+    let _: () = msg_send![stack, addView: hl inGravity: 3isize];
+    ui.side_dyn.push(hl);
+    let urow = user_row(&user);
+    let _: () = msg_send![stack, addView: urow inGravity: 3isize];
+    ui.side_dyn.push(urow);
+}
+
+unsafe fn is_row(v: *mut Object) -> bool {
+    let cls = *ROW_CLASS.get().unwrap();
+    let b: BOOL = msg_send![v, isKindOfClass: cls];
+    b == YES
+}
+
+/// Avatar circle with the user's initial, the name, and a gear that opens Settings.
+unsafe fn user_row(user: &str) -> *mut Object {
+    let w = SIDEBAR_W - 2. * SP3;
+    let h = 36.;
+    let row: *mut Object = msg_send![class!(NSView), alloc];
+    let row: *mut Object = autorel(msg_send![row, initWithFrame: rect(0., 0., w, h)]);
+    let av = surface(rect(SP2, (h - 22.) / 2., 22., 22.), C_FILL_SEL, 11.);
+    let initial: String = user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+    let il = label(&initial, T_CAPTION_EM, C_TEXT, ALIGN_CENTER);
+    set_frame(il, rect(0., 3., 22., 14.));
+    let avc: *mut Object = msg_send![av, contentView];
+    add_sub(avc, il);
+    add_sub(row, av);
+    let nl = label(user, T_BODY, C_TEXT, ALIGN_LEFT);
+    set_frame(nl, rect(SP2 + 22. + SP2, (h - 16.) / 2., w - (SP2 + 22. + SP2) - 22. - SP2 - SP1, 16.));
+    set_autoresize(nl, RESIZE_W);
+    add_sub(row, nl);
+    let ui = UI.get_mut().unwrap();
+    let gear: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
+        target: ui.ctl.get() action: sel!(showSettings:)];
+    let _: () = msg_send![gear, setBordered: NO];
+    let gi = symbol("gearshape", 15., Weight::Medium);
+    if !gi.is_null() {
+        let _: () = msg_send![gear, setImage: gi];
+    }
+    let _: () = msg_send![gear, setImagePosition: 1isize]; // image only
+    let _: () = msg_send![gear, setContentTintColor: color(C_TEXT2)];
+    let _: () = msg_send![gear, setToolTip: ns("Settings")];
+    set_frame(gear, rect(w - 22. - SP2, (h - 22.) / 2., 22., 22.));
+    set_autoresize(gear, MARGIN_MINX);
+    add_sub(row, gear);
+    fix_height(row, h);
+    row
 }
 
 // ---- View switching ------------------------------------------------------

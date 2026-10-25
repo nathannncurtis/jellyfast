@@ -46,6 +46,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
                 if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
                     ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
                     ui.selected_view = Some(idx);
+                    sidebar_refresh_selection();
                     set_busy(true);
                     let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
                 }
@@ -94,6 +95,9 @@ pub(crate) fn handle_main(msg: MainMsg) {
             }
         },
         MainMsg::SignedOut => unsafe {
+            let ui = UI.get_mut().unwrap();
+            ui.selected_view = None;
+            sidebar_refresh_selection();
             show_login_or_library(false);
             login_status("You've signed out.");
         },

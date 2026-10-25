@@ -272,6 +272,7 @@ pub struct Ui {
     pub sel_audio: usize,
     pub mode_stack: Vec<(String, String, Option<String>)>, // for back nav
     pub selected_view: Option<usize>,
+    pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
 }
 unsafe impl Send for Ui {}
@@ -411,6 +412,7 @@ pub(crate) unsafe fn register_classes() {
         d.register();
     }
     crate::ui::seerr::register_seerr_classes();
+    register_sidebar_row();
     // Poster grid container
     {
         let mut d = ClassDecl::new("JRGridView", class!(NSView)).unwrap();
@@ -642,6 +644,7 @@ pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Ob
         if let Some((id, name, ct)) = ui.views.get(tag as usize).cloned() {
             ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
             ui.selected_view = Some(tag as usize);
+            sidebar_refresh_selection();
             ui.cfg.last_view = Some(id.clone());
             crate::config::save_config(&ui.cfg);
             set_busy(true);
@@ -953,6 +956,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         sel_audio: 0,
         mode_stack: vec![],
         selected_view: None,
+        side_dyn: vec![],
         cur_title: String::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
@@ -1005,6 +1009,20 @@ unsafe impl objc::Encode for NSSize {
 unsafe impl objc::Encode for NSRect {
     fn encode() -> objc::Encoding {
         unsafe { objc::Encoding::from_str("{CGRect={CGPoint=dd}{CGSize=dd}}") }
+    }
+}
+/// NSEdgeInsets { top, left, bottom, right }.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NSEdgeInsets {
+    pub top: CGFloat,
+    pub left: CGFloat,
+    pub bottom: CGFloat,
+    pub right: CGFloat,
+}
+unsafe impl objc::Encode for NSEdgeInsets {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{NSEdgeInsets=dddd}") }
     }
 }
 unsafe impl objc::Encode for CMTime {

@@ -103,6 +103,7 @@ fn steps() -> Vec<Step> {
         ("items: movies", s_items_movies, 100),
         ("worker->UI path (WORKER_TX)", s_worker_path, 400),
         ("worker->UI path check", s_worker_check, 50),
+        ("audit: sidebar (long names)", s_audit_sidebar, 150),
         ("posters (png, jpeg, garbage)", s_posters, 100),
         ("audit: grid (long titles)", s_audit_grid, 200),
         ("resize window", s_resize, 200),
@@ -574,15 +575,65 @@ fn s_hover() {
         }
     }
 }
+fn selected_rows() -> usize {
+    unsafe {
+        let ui = UI.get().unwrap();
+        ui.rows
+            .iter()
+            .filter(|r| {
+                let rb: *mut Object = msg_send![r.0, subviews];
+                let bg: *mut Object = msg_send![rb, objectAtIndex: 0usize];
+                let t: BOOL = msg_send![bg, isTransparent];
+                t == NO
+            })
+            .count()
+    }
+}
 fn s_sidebar_click() {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let tags: Vec<*mut Object> = ui.rows.iter().map(|r| r.0).collect();
-        state_check("sidebar rows == label + 5 views (livetv already present)", tags.len() == 6);
-        for b in tags.into_iter().skip(1) {
+        let rows: Vec<*mut Object> = ui.rows.iter().map(|r| r.0).collect();
+        state_check("5 library rows (livetv already present)", rows.len() == 5);
+        // arranged: search field, "Library" header, then JRSidebarRow rows
+        let arr: *mut Object = msg_send![ui.side_stack.get(), arrangedSubviews];
+        let third: *mut Object = msg_send![arr, objectAtIndex: 2usize];
+        let cls = objc::runtime::Class::get("JRSidebarRow").unwrap();
+        let k: BOOL = msg_send![third, isKindOfClass: cls];
+        state_check("first library row is a JRSidebarRow", k == YES);
+        let sf = frame_of(ui.side_stack.get());
+        let sb = frame_of(ui.sidebar.get());
+        state_check(
+            "sidebar stack leaves the title bar band free",
+            sf.origin.y + sf.size.h <= sb.size.h - crate::ui::theme::TITLEBAR_H + 0.5,
+        );
+        state_check("one row selected after auto-select", selected_rows() == 1);
+        for b in rows {
             act(sel!(viewSelected:), b);
+            state_check("exactly one row selected after click", selected_rows() == 1);
         }
+        let n_before: usize = { let a: *mut Object = msg_send![ui.side_stack.get(), arrangedSubviews]; msg_send![a, count] };
+        handle_main(MainMsg::Connected {
+            user_name: "tester".into(),
+            views: ui.views.clone(),
+            has_live_tv: true,
+        });
+        let n_after: usize = { let a: *mut Object = msg_send![ui.side_stack.get(), arrangedSubviews]; msg_send![a, count] };
+        state_check("sidebar rebuild does not pile up views", n_before == n_after);
     }
+}
+fn s_audit_sidebar() {
+    handle_main(MainMsg::Connected {
+        user_name: "a-very-long-username-that-must-truncate-in-the-footer".into(),
+        views: vec![
+            ("v1".into(), "Movies".into(), Some("movies".into())),
+            ("v2".into(), "Shows with an exceedingly long library name".into(), Some("tvshows".into())),
+            ("v3".into(), "Music".into(), Some("music".into())),
+            ("v4".into(), "Live TV".into(), Some("livetv".into())),
+            ("v5".into(), "Misc".into(), None),
+        ],
+        has_live_tv: true,
+    });
+    audit_both("sidebar");
 }
 fn s_items_series() {
     send_items("Shows", items_of("Series", 5), true);
