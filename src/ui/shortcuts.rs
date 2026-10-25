@@ -67,6 +67,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Controls", "Next Subtitle Track", "subCycle:", "c", 0, 0),
     s("Controls", "Next Audio Track", "audioCycle:", "a", 0, 0),
     s("Controls", "Enter / Exit Full Screen", "fullscreen:", "f", 0, 0),
+    s("Controls", "Picture in Picture", "togglePiP:", "p", ALT | CMD, 0),
     // Playback speed (submenu of Controls)
     s("Speed", "0.5×", "setSpeed:", "1", CTRL | CMD, 50),
     s("Speed", "0.75×", "setSpeed:", "2", CTRL | CMD, 75),
@@ -105,7 +106,7 @@ pub(crate) const EXEMPT_ACTIONS: &[&str] = &["showAbout:"];
 /// Actions that only make sense while something is playing; they grey out when idle.
 const PLAYBACK_ACTIONS: &[&str] = &[
     "playPause:", "stopPlayback:", "seekBack:", "seekFwd:", "volUp:", "volDown:", "mute:",
-    "subCycle:", "audioCycle:", "setSpeed:",
+    "subCycle:", "audioCycle:", "setSpeed:", "togglePiP:",
 ];
 
 /// Human label for a key equivalent, e.g. "⌘F", "⌃⌘2", "←", "⇧⇥", "Space".
@@ -200,6 +201,7 @@ pub(crate) unsafe fn item_enabled(action: &str, tag: NSInteger, mods: NSUInteger
         "openSelected:" => main_window_active() && crate::ui::library::kb_focus_index().is_some(),
         "focusNext:" | "focusPrevious:" => main_window_active() && grid_has_items() && !settings_open(),
         "seerrShowTab:" => crate::ui::seerr::is_configured(&ui.cfg.settings),
+        "togglePiP:" => crate::ui::playerbar::pip_available(),
         _ => true,
     }
 }

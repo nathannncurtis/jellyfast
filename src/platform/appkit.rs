@@ -467,7 +467,7 @@ pub(crate) unsafe fn register_classes() {
         );
         d.add_method(
             sel!(applicationShouldTerminateAfterLastWindowClosed:),
-            always_yes_obj as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
+            crate::ui::playerbar::terminate_after_last_window as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
         );
         d.add_method(
             sel!(applicationSupportsSecureRestorableState:),

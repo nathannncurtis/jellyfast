@@ -12,10 +12,12 @@ use objc::declare::ClassDecl;
 use objc::msg_send;
 use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
 use objc::{sel, sel_impl};
+use std::os::raw::c_void;
 use std::sync::OnceLock;
 
 static BAR_CLASS: OnceLock<&'static Class> = OnceLock::new();
 static SCRUB_CLASS: OnceLock<&'static Class> = OnceLock::new();
+static PIP_CLASS: OnceLock<&'static Class> = OnceLock::new();
 
 /// Secondary button hit size, and the larger play/pause target.
 const BTN: f64 = 40.;
@@ -49,8 +51,14 @@ pub struct PlayerBar {
     pub speed: Ptr,
     pub pip: Ptr,
     pub full: Ptr,
-    /// Owned Picture in Picture controller, created on first use.
+    /// Owned Picture in Picture controller for the player layer, created when a video starts.
     pub pip_ctl: Ptr,
+    /// The AVPlayerLayer the controller was built for (not owned; AVPlayerView owns the layer).
+    pub pip_layer: Ptr,
+    /// Owned delegate for the controller (AVKit keeps only a weak reference to it).
+    pub pip_delegate: Ptr,
+    /// Whether the PiP button currently shows the exit glyph.
+    pip_shows_exit: bool,
     /// Played fraction and buffered-end fraction, both 0..1, as last drawn.
     pub frac: f64,
     pub buffered: f64,
@@ -87,6 +95,9 @@ impl PlayerBar {
             pip: n(),
             full: n(),
             pip_ctl: n(),
+            pip_layer: n(),
+            pip_delegate: n(),
+            pip_shows_exit: false,
             frac: 0.0,
             buffered: 0.0,
             hover: None,
@@ -115,6 +126,29 @@ pub(crate) unsafe fn register_playerbar_classes() {
     s.add_method(sel!(mouseMoved:), scrub_moved as extern "C" fn(&mut Object, Sel, *mut Object));
     s.add_method(sel!(mouseExited:), scrub_exited as extern "C" fn(&mut Object, Sel, *mut Object));
     SCRUB_CLASS.set(s.register()).ok();
+
+    // Picture in Picture delegate: AVKit calls it on the main thread for start, stop, failure and restore.
+    let mut p = ClassDecl::new("JRPiPDelegate", class!(NSObject)).unwrap();
+    if let Some(proto) = objc::runtime::Protocol::get("AVPictureInPictureControllerDelegate") {
+        p.add_protocol(proto);
+    }
+    p.add_method(
+        sel!(pictureInPictureController:restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:),
+        pip_restore as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object),
+    );
+    p.add_method(
+        sel!(pictureInPictureControllerDidStartPictureInPicture:),
+        pip_started as extern "C" fn(&mut Object, Sel, *mut Object),
+    );
+    p.add_method(
+        sel!(pictureInPictureControllerDidStopPictureInPicture:),
+        pip_stopped as extern "C" fn(&mut Object, Sel, *mut Object),
+    );
+    p.add_method(
+        sel!(pictureInPictureController:failedToStartPictureInPictureWithError:),
+        pip_failed as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object),
+    );
+    PIP_CLASS.set(p.register()).ok();
 }
 
 extern "C" fn yes_obj(_t: &mut Object, _c: Sel, _e: *mut Object) -> BOOL {
@@ -307,6 +341,8 @@ pub(crate) unsafe fn update() {
     if ui.pbar.bar.get().is_null() || ui.playing.is_none() || ui.pitem.get().is_null() {
         return;
     }
+    sync_pip_controls();
+    let ui = UI.get_mut().unwrap();
     let paused = ui.playing.as_ref().map(|p| p.paused).unwrap_or(true);
     let t: CMTime = msg_send![ui.player.get(), currentTime];
     let dur = duration_of(ui);
@@ -353,21 +389,33 @@ pub(crate) unsafe fn update() {
     }
 }
 
-/// Playback started: show the bar and check whether Picture in Picture can be offered here.
+/// Playback started: show the bar and set up Picture in Picture for this player layer, if the Mac has it.
 pub(crate) unsafe fn on_start() {
     let ui = UI.get_mut().unwrap();
     if ui.pbar.bar.get().is_null() {
         return;
     }
-    let root: *mut Object = msg_send![ui.avview.get(), layer];
+    sync_pip_controls();
+}
+
+/// Makes the PiP controller once AVPlayerView has its layer (it appears lazily, so this may take a few ticks),
+/// then hides the button when there is no controller and syncs its state. Cheap; runs on start and each tick.
+unsafe fn sync_pip_controls() {
+    let ui = UI.get_mut().unwrap();
     let supported: BOOL = msg_send![class!(AVPictureInPictureController), isPictureInPictureSupported];
-    let ok = supported == YES && !find_player_layer(root, 0).is_null();
-    set_hidden(ui.pbar.pip.get(), !ok);
+    if supported == YES && ui.pbar.pip_ctl.get().is_null() {
+        ensure_pip_controller();
+    }
+    let ui = UI.get_mut().unwrap();
+    let have = supported == YES && !ui.pbar.pip_ctl.get().is_null();
+    set_hidden(ui.pbar.pip.get(), !have);
+    refresh_pip_button();
 }
 
 /// Finds the AVPlayerLayer that AVPlayerView draws into (it may sit below the view's root layer).
 unsafe fn find_player_layer(l: *mut Object, depth: u32) -> *mut Object {
-    if l.is_null() || depth > 4 {
+    // AVPlayerView nests its AVPlayerLayer about six levels down, so the search goes that deep.
+    if l.is_null() || depth > 8 {
         return nil();
     }
     let is: BOOL = msg_send![l, isKindOfClass: class!(AVPlayerLayer)];
@@ -591,6 +639,126 @@ pub(crate) extern "C" fn show_speed_menu(_t: &mut Object, _c: Sel, sender: *mut 
 
 // ---- Picture in Picture ------------------------------------------------------------------------------
 
+/// The controller for the player layer under AVPlayerView. One is kept per layer and reused for every item
+/// played in it; if the layer is ever replaced, the old controller is stopped and released first.
+/// Returns null when no player layer exists yet.
+unsafe fn ensure_pip_controller() -> *mut Object {
+    let ui = UI.get_mut().unwrap();
+    let root: *mut Object = msg_send![ui.avview.get(), layer];
+    let layer = find_player_layer(root, 0);
+    if layer.is_null() {
+        return nil();
+    }
+    if !ui.pbar.pip_ctl.get().is_null() {
+        if ui.pbar.pip_layer.get() == layer {
+            return ui.pbar.pip_ctl.get();
+        }
+        release_pip_controller();
+    }
+    let ui = UI.get_mut().unwrap();
+    if ui.pbar.pip_delegate.get().is_null() {
+        let dcls = *PIP_CLASS.get().unwrap();
+        let d: *mut Object = msg_send![dcls, new];
+        ui.pbar.pip_delegate = Ptr(d); // +1 from new, kept for the app's life
+    }
+    let c: *mut Object = msg_send![class!(AVPictureInPictureController), alloc];
+    let c: *mut Object = msg_send![c, initWithPlayerLayer: layer];
+    if c.is_null() {
+        return nil();
+    }
+    let _: () = msg_send![c, setDelegate: ui.pbar.pip_delegate.get()];
+    for kp in ["pictureInPicturePossible", "pictureInPictureActive"] {
+        let _: () = msg_send![c, addObserver: ui.ctl.get() forKeyPath: ns(kp) options: 0usize context: nil()];
+    }
+    ui.pbar.pip_ctl = Ptr(c); // +1 from alloc/init, owned by the bar
+    ui.pbar.pip_layer = Ptr(layer);
+    c
+}
+
+/// Stops the controller, drops its observers and delegate, and releases it.
+unsafe fn release_pip_controller() {
+    let ui = UI.get_mut().unwrap();
+    let c = ui.pbar.pip_ctl.get();
+    if c.is_null() {
+        return;
+    }
+    let active: BOOL = msg_send![c, isPictureInPictureActive];
+    if active == YES {
+        let _: () = msg_send![c, stopPictureInPicture];
+    }
+    for kp in ["pictureInPicturePossible", "pictureInPictureActive"] {
+        let _: () = msg_send![c, removeObserver: ui.ctl.get() forKeyPath: ns(kp)];
+    }
+    let _: () = msg_send![c, setDelegate: nil()];
+    release_obj(c);
+    ui.pbar.pip_ctl = Ptr(nil());
+    ui.pbar.pip_layer = Ptr(nil());
+}
+
+/// Whether Picture in Picture can be started or is already showing. Drives the button and the ⌥⌘P menu item.
+pub(crate) unsafe fn pip_available() -> bool {
+    let c = match UI.get() {
+        Some(u) => u.pbar.pip_ctl.get(),
+        None => return false,
+    };
+    if c.is_null() {
+        return false;
+    }
+    let possible: BOOL = msg_send![c, isPictureInPicturePossible];
+    let active: BOOL = msg_send![c, isPictureInPictureActive];
+    possible == YES || active == YES
+}
+
+/// Whether Picture in Picture is showing right now.
+pub(crate) unsafe fn pip_active() -> bool {
+    match UI.get() {
+        Some(u) if !u.pbar.pip_ctl.get().is_null() => {
+            let active: BOOL = msg_send![u.pbar.pip_ctl.get(), isPictureInPictureActive];
+            active == YES
+        }
+        _ => false,
+    }
+}
+
+/// Syncs the Picture in Picture button with the controller. Disabled while AVKit cannot start PiP
+/// (for example before the item is ready); the glyph switches to the exit icon while PiP is showing.
+pub(crate) unsafe fn refresh_pip_button() {
+    let ui = match UI.get_mut() {
+        Some(u) => u,
+        None => return,
+    };
+    let btn = ui.pbar.pip.get();
+    if btn.is_null() {
+        return;
+    }
+    let on = pip_available();
+    let active = pip_active();
+    let _: () = msg_send![btn, setEnabled: if on { YES } else { NO }];
+    let _: () = msg_send![btn, setAlphaValue: if on { 1.0f64 } else { 0.35f64 }];
+    if active != ui.pbar.pip_shows_exit {
+        ui.pbar.pip_shows_exit = active;
+        let name = if active { "pip.exit" } else { "pip.enter" };
+        let tip = if active { "Exit Picture in Picture" } else { "Picture in Picture" };
+        let img = symbol(name, 20., Weight::Medium);
+        if !img.is_null() {
+            let _: () = msg_send![btn, setImage: img];
+        }
+        let _: () = msg_send![btn, setToolTip: ns(tip)];
+    }
+}
+
+/// Stops Picture in Picture if it is showing (playback stopped, the item ended, or the player went to audio).
+pub(crate) unsafe fn pip_stop() {
+    let c = match UI.get() {
+        Some(u) => u.pbar.pip_ctl.get(),
+        None => return,
+    };
+    if !c.is_null() && pip_active() {
+        let _: () = msg_send![c, stopPictureInPicture];
+    }
+    refresh_pip_button();
+}
+
 /// Toggles Picture in Picture on the AVPlayerLayer under AVPlayerView. Off-screen (self-test) it only counts the press.
 pub(crate) extern "C" fn toggle_pip(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
@@ -598,27 +766,79 @@ pub(crate) extern "C" fn toggle_pip(_t: &mut Object, _c: Sel, _s: *mut Object) {
             UI.get_mut().unwrap().pbar.pip_presses += 1;
             return;
         }
-        let ui = UI.get_mut().unwrap();
-        if ui.pbar.pip_ctl.get().is_null() {
-            let root: *mut Object = msg_send![ui.avview.get(), layer];
-            let layer = find_player_layer(root, 0);
-            if layer.is_null() {
-                return;
-            }
-            let c: *mut Object = msg_send![class!(AVPictureInPictureController), alloc];
-            let c: *mut Object = autorel(msg_send![c, initWithPlayerLayer: layer]);
-            if c.is_null() {
-                return;
-            }
-            ui.pbar.pip_ctl = Ptr::retained(c);
+        let c = ensure_pip_controller();
+        if c.is_null() {
+            return;
         }
-        let c = ui.pbar.pip_ctl.get();
-        let active: BOOL = msg_send![c, isPictureInPictureActive];
-        if active == YES {
+        if pip_active() {
             let _: () = msg_send![c, stopPictureInPicture];
-        } else {
+        } else if pip_available() {
             let _: () = msg_send![c, startPictureInPicture];
         }
+        refresh_pip_button();
+    }
+}
+
+/// `keepsRunningAfterLastWindowClosed` stand-in: closing the window quits the app as usual, unless Picture in
+/// Picture is showing, in which case the app keeps running so the PiP window can bring the player back.
+pub(crate) extern "C" fn terminate_after_last_window(_t: &mut Object, _c: Sel, _o: *mut Object) -> BOOL {
+    if unsafe { pip_active() } { NO } else { YES }
+}
+
+/// Calls an Objective-C block that takes one BOOL. A block literal keeps its invoke pointer at offset 16
+/// (after isa, flags and reserved), and the invoke function takes the block itself as its first argument.
+unsafe fn call_block_bool(block: *mut Object, v: BOOL) {
+    let invoke = *((block as *const u8).add(16) as *const *const c_void);
+    let f: extern "C" fn(*mut Object, BOOL) = std::mem::transmute(invoke);
+    f(block, v);
+}
+
+/// Restore from the Picture in Picture window: bring the main player window back, then tell AVKit it may
+/// finish the transition by calling the completion handler with YES.
+extern "C" fn pip_restore(_t: &mut Object, _c: Sel, _ctl: *mut Object, done: *mut Object) {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let w = ui.win.get();
+        let mini: BOOL = msg_send![w, isMiniaturized];
+        if mini == YES {
+            let _: () = msg_send![w, deminiaturize: nil()];
+        }
+        let _: () = msg_send![ui.app.get(), activateIgnoringOtherApps: YES];
+        let _: () = msg_send![w, makeKeyAndOrderFront: nil()];
+        crate::ui::player::show_bars();
+        if !done.is_null() {
+            call_block_bool(done, YES);
+        }
+    }
+}
+
+extern "C" fn pip_started(_t: &mut Object, _c: Sel, _ctl: *mut Object) {
+    unsafe { refresh_pip_button() }
+}
+
+/// PiP ended. If the main window is closed (not just minimised or the app hidden), nothing is left to show,
+/// so the app quits as it would after closing its last window.
+extern "C" fn pip_stopped(_t: &mut Object, _c: Sel, _ctl: *mut Object) {
+    unsafe {
+        refresh_pip_button();
+        let ui = match UI.get() {
+            Some(u) => u,
+            None => return,
+        };
+        let w = ui.win.get();
+        let vis: BOOL = msg_send![w, isVisible];
+        let mini: BOOL = msg_send![w, isMiniaturized];
+        let hidden: BOOL = msg_send![ui.app.get(), isHidden];
+        if vis == NO && mini == NO && hidden == NO {
+            let _: () = msg_send![ui.app.get(), terminate: nil()];
+        }
+    }
+}
+
+extern "C" fn pip_failed(_t: &mut Object, _c: Sel, _ctl: *mut Object, _err: *mut Object) {
+    unsafe {
+        refresh_pip_button();
+        crate::ui::player::toast("Picture in Picture could not start.", Some("pip.exit"), true);
     }
 }
 
