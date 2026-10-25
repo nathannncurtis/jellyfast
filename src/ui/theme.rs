@@ -3,11 +3,10 @@
 //! Nothing here is stateful; call sites pick tokens instead of raw numbers.
 #![allow(unsafe_code)]
 #![allow(dead_code)]
+use objc2::encode::{Encode, Encoding};
+use objc2::runtime::{AnyObject, Bool, MessageReceiver, Sel};
+use objc2::{class, msg_send, sel};
 use crate::platform::appkit::*;
-use objc::class;
-use objc::msg_send;
-use objc::runtime::{Object, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 
 // ---- Spacing (4-pt grid) -----------------------------------------------
 pub const SP1: f64 = 4.;
@@ -104,11 +103,11 @@ pub const ALIGN_CENTER: usize = 1;
 pub const ALIGN_RIGHT: usize = 2;
 pub const ALIGN_NATURAL: usize = 4;
 
-pub unsafe fn font(t: TypeStyle) -> *mut Object {
+pub unsafe fn font(t: TypeStyle) -> *mut AnyObject {
     if t.mono {
-        msg_send![class!(NSFont), monospacedDigitSystemFontOfSize: t.size weight: t.weight.value()]
+        msg_send![class!(NSFont), monospacedDigitSystemFontOfSize: t.size, weight: t.weight.value()]
     } else {
-        msg_send![class!(NSFont), systemFontOfSize: t.size weight: t.weight.value()]
+        msg_send![class!(NSFont), systemFontOfSize: t.size, weight: t.weight.value()]
     }
 }
 
@@ -147,7 +146,7 @@ pub const C_ON_MEDIA: Col = Col::OnMedia;
 pub const C_ON_MEDIA2: Col = Col::OnMedia2;
 
 /// Semantic NSColor for a role (autoreleased / shared, never freed by us).
-pub unsafe fn color(c: Col) -> *mut Object {
+pub unsafe fn color(c: Col) -> *mut AnyObject {
     let cls = class!(NSColor);
     match c {
         Col::Text => msg_send![cls, labelColor],
@@ -157,16 +156,16 @@ pub unsafe fn color(c: Col) -> *mut Object {
         Col::Card => msg_send![cls, windowBackgroundColor],
         Col::Separator => msg_send![cls, separatorColor],
         Col::FillSel => {
-            let ok: BOOL = msg_send![cls, respondsToSelector: sel!(tertiarySystemFillColor)];
-            if ok == YES {
+            let ok: Bool = msg_send![cls, respondsToSelector: sel!(tertiarySystemFillColor)];
+            if ok == Bool::YES {
                 msg_send![cls, tertiarySystemFillColor]
             } else {
                 msg_send![cls, quaternaryLabelColor]
             }
         }
         Col::FillHover => {
-            let ok: BOOL = msg_send![cls, respondsToSelector: sel!(quaternarySystemFillColor)];
-            if ok == YES {
+            let ok: Bool = msg_send![cls, respondsToSelector: sel!(quaternarySystemFillColor)];
+            if ok == Bool::YES {
                 msg_send![cls, quaternarySystemFillColor]
             } else {
                 msg_send![cls, quaternaryLabelColor]
@@ -178,25 +177,25 @@ pub unsafe fn color(c: Col) -> *mut Object {
         Col::Warn => msg_send![cls, systemOrangeColor],
         Col::OnMedia => msg_send![cls, whiteColor],
         Col::OnMedia2 => {
-            let w: *mut Object = msg_send![cls, whiteColor];
+            let w: *mut AnyObject = msg_send![cls, whiteColor];
             msg_send![w, colorWithAlphaComponent: 0.72f64]
         }
         Col::Clear => msg_send![cls, clearColor],
     }
 }
 /// Role colour with alpha (autoreleased).
-pub unsafe fn color_a(c: Col, a: f64) -> *mut Object {
+pub unsafe fn color_a(c: Col, a: f64) -> *mut AnyObject {
     let base = color(c);
     msg_send![base, colorWithAlphaComponent: a]
 }
 /// Resolved CGColor for a role under the *current* appearance. Layers that
 /// must follow light/dark need this re-applied from `apply_theme`.
-pub unsafe fn cg(c: Col) -> *mut Object {
+pub unsafe fn cg(c: Col) -> *mut CGColor {
     msg_send![color(c), CGColor]
 }
-pub unsafe fn cg_black(alpha: f64) -> *mut Object {
-    let b: *mut Object = msg_send![class!(NSColor), blackColor];
-    let c: *mut Object = msg_send![b, colorWithAlphaComponent: alpha];
+pub unsafe fn cg_black(alpha: f64) -> *mut CGColor {
+    let b: *mut AnyObject = msg_send![class!(NSColor), blackColor];
+    let c: *mut AnyObject = msg_send![b, colorWithAlphaComponent: alpha];
     msg_send![c, CGColor]
 }
 
@@ -226,16 +225,16 @@ pub const M_IDLE_HIDE: f64 = 2.5;
 
 pub fn reduce_motion() -> bool {
     unsafe {
-        let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let b: BOOL = msg_send![ws, accessibilityDisplayShouldReduceMotion];
-        b == YES
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let b: Bool = msg_send![ws, accessibilityDisplayShouldReduceMotion];
+        b == Bool::YES
     }
 }
 pub fn reduce_transparency() -> bool {
     unsafe {
-        let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let b: BOOL = msg_send![ws, accessibilityDisplayShouldReduceTransparency];
-        b == YES
+        let ws: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let b: Bool = msg_send![ws, accessibilityDisplayShouldReduceTransparency];
+        b == Bool::YES
     }
 }
 /// Duration after honouring Reduce Motion (fades up to M_FAST remain).
@@ -246,58 +245,57 @@ pub fn dur(d: f64) -> f64 {
         d
     }
 }
-pub unsafe fn timing_ease_out() -> *mut Object {
+pub unsafe fn timing_ease_out() -> *mut AnyObject {
     msg_send![class!(CAMediaTimingFunction), functionWithName: ns("easeOut")]
 }
-pub unsafe fn timing_ease_in_out() -> *mut Object {
+pub unsafe fn timing_ease_in_out() -> *mut AnyObject {
     msg_send![class!(CAMediaTimingFunction), functionWithName: ns("easeInEaseOut")]
 }
-pub unsafe fn timing_emph() -> *mut Object {
+pub unsafe fn timing_emph() -> *mut AnyObject {
     // Unnamed selector parts are not expressible in msg_send!, so go through the runtime directly.
-    objc::__send_message(
+    MessageReceiver::send_message(
         class!(CAMediaTimingFunction),
-        objc::runtime::Sel::register("functionWithControlPoints::::"),
+        Sel::register(c"functionWithControlPoints::::"),
         (0.2f32, 0.8f32, 0.2f32, 1.0f32),
     )
-    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Begin an implicit-animation group for view properties set via `animator`.
-pub unsafe fn anim_begin(d: f64, timing: *mut Object) {
+pub unsafe fn anim_begin(d: f64, timing: *mut AnyObject) {
     let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
-    let ctx: *mut Object = msg_send![class!(NSAnimationContext), currentContext];
+    let ctx: *mut AnyObject = msg_send![class!(NSAnimationContext), currentContext];
     let _: () = msg_send![ctx, setDuration: dur(d)];
     let _: () = msg_send![ctx, setTimingFunction: timing];
-    let _: () = msg_send![ctx, setAllowsImplicitAnimation: YES];
+    let _: () = msg_send![ctx, setAllowsImplicitAnimation: Bool::YES];
 }
 pub unsafe fn anim_end() {
     let _: () = msg_send![class!(NSAnimationContext), endGrouping];
 }
 /// Fade any hidden/shown swap inside `container` (made layer-backed here).
 /// Call it in the same run-loop turn, *before* the swap.
-pub unsafe fn crossfade(container: *mut Object, d: f64) {
+pub unsafe fn crossfade(container: *mut AnyObject, d: f64) {
     if dur(d) <= 0.0 {
         return;
     }
-    let t: *mut Object = msg_send![class!(CATransition), animation];
+    let t: *mut AnyObject = msg_send![class!(CATransition), animation];
     let _: () = msg_send![t, setType: ns("fade")];
     let _: () = msg_send![t, setDuration: dur(d)];
     let l = layer_of(container);
-    let _: () = msg_send![l, addAnimation: t forKey: ns("jrFade")];
+    let _: () = msg_send![l, addAnimation: t, forKey: ns("jrFade")];
 }
 /// CATransaction with a duration (0 disables animation). Pair with `tx_end`.
 pub unsafe fn tx_begin(d: f64) {
     let _: () = msg_send![class!(CATransaction), begin];
     let d = dur(d);
     if d <= 0.0 {
-        let _: () = msg_send![class!(CATransaction), setDisableActions: YES];
+        let _: () = msg_send![class!(CATransaction), setDisableActions: Bool::YES];
     } else {
         let _: () = msg_send![class!(CATransaction), setAnimationDuration: d];
     }
 }
 pub unsafe fn tx_begin_instant() {
     let _: () = msg_send![class!(CATransaction), begin];
-    let _: () = msg_send![class!(CATransaction), setDisableActions: YES];
+    let _: () = msg_send![class!(CATransaction), setDisableActions: Bool::YES];
 }
 pub unsafe fn tx_end() {
     let _: () = msg_send![class!(CATransaction), commit];
@@ -305,46 +303,46 @@ pub unsafe fn tx_end() {
 
 // ---- Layer helpers --------------------------------------------------------------------
 /// Radius with the continuous ("squircle") corner curve.
-pub unsafe fn set_corner(layer: *mut Object, r: f64) {
+pub unsafe fn set_corner(layer: *mut AnyObject, r: f64) {
     let _: () = msg_send![layer, setCornerRadius: r];
     let _: () = msg_send![layer, setCornerCurve: ns("continuous")];
 }
 
 // ---- Labels ---------------------------------------------------------------------------------
 /// Single-line label that truncates with an ellipsis (autoreleased).
-pub unsafe fn label(text: &str, t: TypeStyle, c: Col, align: usize) -> *mut Object {
-    let v: *mut Object = msg_send![class!(NSTextField), labelWithString: ns(text)];
+pub unsafe fn label(text: &str, t: TypeStyle, c: Col, align: usize) -> *mut AnyObject {
+    let v: *mut AnyObject = msg_send![class!(NSTextField), labelWithString: ns(text)];
     let _: () = msg_send![v, setFont: font(t)];
     let _: () = msg_send![v, setTextColor: color(c)];
     let _: () = msg_send![v, setAlignment: align as isize];
-    let cell: *mut Object = msg_send![v, cell];
+    let cell: *mut AnyObject = msg_send![v, cell];
     let _: () = msg_send![cell, setLineBreakMode: 4usize]; // truncating tail
     let _: () = msg_send![v, setMaximumNumberOfLines: 1isize];
     v
 }
 /// Multi-line label that wraps (autoreleased).
-pub unsafe fn wrapping_label(text: &str, t: TypeStyle, c: Col, align: usize) -> *mut Object {
-    let v: *mut Object = msg_send![class!(NSTextField), wrappingLabelWithString: ns(text)];
+pub unsafe fn wrapping_label(text: &str, t: TypeStyle, c: Col, align: usize) -> *mut AnyObject {
+    let v: *mut AnyObject = msg_send![class!(NSTextField), wrappingLabelWithString: ns(text)];
     let _: () = msg_send![v, setFont: font(t)];
     let _: () = msg_send![v, setTextColor: color(c)];
     let _: () = msg_send![v, setAlignment: align as isize];
     v
 }
-pub unsafe fn set_label_color(v: *mut Object, c: Col) {
+pub unsafe fn set_label_color(v: *mut AnyObject, c: Col) {
     let _: () = msg_send![v, setTextColor: color(c)];
 }
 
 // ---- Symbols ----------------------------------------------------------------------------------
 /// SF Symbol at a size and weight (autoreleased; nil when the symbol is missing).
-pub unsafe fn symbol(name: &str, point_size: f64, weight: Weight) -> *mut Object {
-    let img: *mut Object =
-        msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name) accessibilityDescription: nil()];
+pub unsafe fn symbol(name: &str, point_size: f64, weight: Weight) -> *mut AnyObject {
+    let img: *mut AnyObject =
+        msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name), accessibilityDescription: nil()];
     if img.is_null() {
         return img;
     }
-    let cfg: *mut Object = msg_send![class!(NSImageSymbolConfiguration),
-        configurationWithPointSize: point_size weight: weight.value()];
-    let scaled: *mut Object = msg_send![img, imageWithSymbolConfiguration: cfg];
+    let cfg: *mut AnyObject = msg_send![class!(NSImageSymbolConfiguration),
+        configurationWithPointSize: point_size, weight: weight.value()];
+    let scaled: *mut AnyObject = msg_send![img, imageWithSymbolConfiguration: cfg];
     if scaled.is_null() {
         img
     } else {
@@ -353,9 +351,9 @@ pub unsafe fn symbol(name: &str, point_size: f64, weight: Weight) -> *mut Object
 }
 
 // ---- NSBox "custom" surface (redraws dynamically with the appearance) ---------------------------
-pub unsafe fn surface(frame: NSRect, fill: Col, radius: f64) -> *mut Object {
-    let b: *mut Object = msg_send![class!(NSBox), alloc];
-    let b: *mut Object = msg_send![b, initWithFrame: frame];
+pub unsafe fn surface(frame: NSRect, fill: Col, radius: f64) -> *mut AnyObject {
+    let b: *mut AnyObject = msg_send![class!(NSBox), alloc];
+    let b: *mut AnyObject = msg_send![b, initWithFrame: frame];
     let _: () = msg_send![b, setBoxType: 4usize]; // NSBoxCustom
     let _: () = msg_send![b, setBorderWidth: 0.0f64];
     let _: () = msg_send![b, setTitlePosition: 0usize]; // NSNoTitle
@@ -365,9 +363,9 @@ pub unsafe fn surface(frame: NSRect, fill: Col, radius: f64) -> *mut Object {
     autorel(b)
 }
 /// Hairline separator (NSBox separator type, 1 pt).
-pub unsafe fn hairline(frame: NSRect) -> *mut Object {
-    let b: *mut Object = msg_send![class!(NSBox), alloc];
-    let b: *mut Object = msg_send![b, initWithFrame: frame];
+pub unsafe fn hairline(frame: NSRect) -> *mut AnyObject {
+    let b: *mut AnyObject = msg_send![class!(NSBox), alloc];
+    let b: *mut AnyObject = msg_send![b, initWithFrame: frame];
     let _: () = msg_send![b, setBoxType: 2usize]; // NSBoxSeparator
     autorel(b)
 }
@@ -378,10 +376,16 @@ pub unsafe fn hairline(frame: NSRect) -> *mut Object {
 pub struct CATransform3D {
     pub m: [f64; 16],
 }
-unsafe impl objc::Encode for CATransform3D {
-    fn encode() -> objc::Encoding {
-        unsafe { objc::Encoding::from_str("{CATransform3D=dddddddddddddddd}") }
-    }
+unsafe impl Encode for CATransform3D {
+    const ENCODING: Encoding = Encoding::Struct(
+        "CATransform3D",
+        &[
+            Encoding::Double, Encoding::Double, Encoding::Double, Encoding::Double,
+            Encoding::Double, Encoding::Double, Encoding::Double, Encoding::Double,
+            Encoding::Double, Encoding::Double, Encoding::Double, Encoding::Double,
+            Encoding::Double, Encoding::Double, Encoding::Double, Encoding::Double,
+        ],
+    );
 }
 #[link(name = "QuartzCore", kind = "framework")]
 extern "C" {
@@ -390,21 +394,21 @@ extern "C" {
 }
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    fn CGPathCreateWithRoundedRect(rect: NSRect, cw: f64, ch: f64, t: *const std::os::raw::c_void) -> *mut std::os::raw::c_void;
-    fn CGPathRelease(p: *mut std::os::raw::c_void);
+    fn CGPathCreateWithRoundedRect(rect: NSRect, cw: f64, ch: f64, t: *const std::os::raw::c_void) -> *mut CGPath;
+    fn CGPathRelease(p: *mut CGPath);
 }
 /// Set a rounded-rect `shadowPath` for the layer (cheap shadows, no offscreen pass).
-pub unsafe fn set_shadow_path(layer: *mut Object, w: f64, h: f64, r: f64) {
+pub unsafe fn set_shadow_path(layer: *mut AnyObject, w: f64, h: f64, r: f64) {
     let path = CGPathCreateWithRoundedRect(rect(0., 0., w, h), r, r, std::ptr::null());
     let _: () = msg_send![layer, setShadowPath: path];
     CGPathRelease(path);
 }
 /// CGImage backing of an NSImage (not retained; valid while the image lives).
-pub unsafe fn cg_image(img: *mut Object) -> *mut Object {
-    msg_send![img, CGImageForProposedRect: std::ptr::null_mut::<NSRect>() context: nil() hints: nil()]
+pub unsafe fn cg_image(img: *mut AnyObject) -> *mut CGImage {
+    msg_send![img, CGImageForProposedRect: std::ptr::null_mut::<NSRect>(), context: nil(), hints: nil()]
 }
-pub unsafe fn black_cg() -> *mut Object {
+pub unsafe fn black_cg() -> *mut CGColor {
     cg_black(1.0)
 }
 
-pub const _UNUSED_NO: BOOL = NO;
+pub const _UNUSED_NO: Bool = Bool::NO;

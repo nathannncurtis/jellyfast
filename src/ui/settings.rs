@@ -1,4 +1,6 @@
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use crate::*;
 use crate::jellyfin::models::*;
 use crate::app::controller::*;
@@ -8,11 +10,6 @@ use crate::platform::appkit::*;
 use crate::platform::avkit::*;
 use crate::ui::library::*;
 use crate::ui::shell::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, BOOL, NO, Object, Sel, YES};
-use objc::{sel, sel_impl};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -23,15 +20,14 @@ pub(crate) unsafe fn build_settings_window() {
     use crate::ui::theme::*;
     let ui = UI.get_mut().unwrap();
     const WIN_W: f64 = 520.;
-    let w: *mut Object = msg_send![jr_window_class(), alloc];
-    let w: *mut Object = msg_send![w,
-        initWithContentRect: rect(0., 0., WIN_W, 560.)
-        styleMask: (1 | 2) as NSUInteger backing: 2usize defer: NO];
+    let w: *mut AnyObject = msg_send![jr_window_class(), alloc];
+    let w: *mut AnyObject = msg_send![w,
+        initWithContentRect: rect(0., 0., WIN_W, 560.), styleMask: (1 | 2) as NSUInteger, backing: 2usize, defer: Bool::NO];
     let _: () = msg_send![w, setTitle: ns("Settings")];
-    let _: () = msg_send![w, setReleasedWhenClosed: NO];
+    let _: () = msg_send![w, setReleasedWhenClosed: Bool::NO];
     ui.settings_win = Ptr::retained(w);
     release_obj(w); // Ptr::retained took its own +1; drop the alloc/init +1 (same as seerr.rs)
-    let c: *mut Object = msg_send![w, contentView];
+    let c: *mut AnyObject = msg_send![w, contentView];
 
     // Two-column form laid out top-down from a running `top`; frames are applied once the
     // total height is known, so rows can never land on each other.
@@ -40,13 +36,13 @@ pub(crate) unsafe fn build_settings_window() {
     const CTRL_X: f64 = LABEL_X + LABEL_W + SP3; // 186
     const CTRL_W: f64 = WIN_W - CTRL_X - SP6; // 310
     const ROW_H: f64 = 28.;
-    let mut place: Vec<(*mut Object, NSRect)> = vec![]; // rect.origin.y holds `top`
+    let mut place: Vec<(*mut AnyObject, NSRect)> = vec![]; // rect.origin.y holds `top`
     let mut top = SP5;
-    let put = |place: &mut Vec<(*mut Object, NSRect)>, v: *mut Object, x: f64, top: f64, wd: f64, h: f64| {
+    let put = |place: &mut Vec<(*mut AnyObject, NSRect)>, v: *mut AnyObject, x: f64, top: f64, wd: f64, h: f64| {
         add_sub(c, v);
         place.push((v, rect(x, top, wd, h)));
     };
-    let section = |place: &mut Vec<(*mut Object, NSRect)>, top: &mut f64, title: &str, first: bool| {
+    let section = |place: &mut Vec<(*mut AnyObject, NSRect)>, top: &mut f64, title: &str, first: bool| {
         if !first {
             *top += SP6;
         }
@@ -56,7 +52,7 @@ pub(crate) unsafe fn build_settings_window() {
         *top += 1. + SP3;
     };
     // A labelled row: right-aligned label vertically centred on the control.
-    let row = |place: &mut Vec<(*mut Object, NSRect)>, top: &mut f64, text: &str, ctl: *mut Object, ctl_h: f64, ctl_w: f64| -> *mut Object {
+    let row = |place: &mut Vec<(*mut AnyObject, NSRect)>, top: &mut f64, text: &str, ctl: *mut AnyObject, ctl_h: f64, ctl_w: f64| -> *mut AnyObject {
         let l = label(text, T_BODY, C_TEXT, ALIGN_RIGHT);
         put(place, l, LABEL_X, *top + (ROW_H - 16.) / 2., LABEL_W, 16.);
         put(place, ctl, CTRL_X, *top + (ROW_H - ctl_h) / 2., ctl_w, ctl_h);
@@ -64,19 +60,19 @@ pub(crate) unsafe fn build_settings_window() {
         l
     };
     // Help text sits under its control, never inside the label.
-    let help = |place: &mut Vec<(*mut Object, NSRect)>, top: &mut f64, text: &str| -> *mut Object {
+    let help = |place: &mut Vec<(*mut AnyObject, NSRect)>, top: &mut f64, text: &str| -> *mut AnyObject {
         let h = wrapping_label(text, T_CAPTION, C_TEXT2, ALIGN_LEFT);
-        let cell: *mut Object = msg_send![h, cell];
+        let cell: *mut AnyObject = msg_send![h, cell];
         let need: NSSize = msg_send![cell, cellSizeForBounds: rect(0., 0., CTRL_W, 1000.)];
         let ht = need.h.ceil();
         put(place, h, CTRL_X, *top + SP1, CTRL_W, ht);
         *top += SP1 + ht;
         h
     };
-    let popup = |items: &[&str]| -> *mut Object {
-        let p: *mut Object = msg_send![class!(NSPopUpButton), alloc];
-        let p: *mut Object = msg_send![p, initWithFrame: rect(0., 0., 200., 26.) pullsDown: NO];
-        let arr: *mut Object = msg_send![class!(NSMutableArray), array];
+    let popup = |items: &[&str]| -> *mut AnyObject {
+        let p: *mut AnyObject = msg_send![class!(NSPopUpButton), alloc];
+        let p: *mut AnyObject = msg_send![p, initWithFrame: rect(0., 0., 200., 26.), pullsDown: Bool::NO];
+        let arr: *mut AnyObject = msg_send![class!(NSMutableArray), array];
         for t in items {
             let _: () = msg_send![arr, addObject: ns(t)];
         }
@@ -123,10 +119,9 @@ pub(crate) unsafe fn build_settings_window() {
     let lib_row_top = top;
     row(&mut place, &mut top, "Library", lp, 26., 200.);
     ui.s_lib_pop = Ptr(lp);
-    let arrow = |name: &str, tip: &str, action: objc::runtime::Sel| -> *mut Object {
-        let b: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-            target: ui.ctl.get() action: action];
-        let _: () = msg_send![b, setBordered: NO];
+    let arrow = |name: &str, tip: &str, action: Sel| -> *mut AnyObject {
+        let b: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: action];
+        let _: () = msg_send![b, setBordered: Bool::NO];
         let img = symbol(name, 12., Weight::Semibold);
         if !img.is_null() {
             let _: () = msg_send![b, setImage: img];
@@ -142,18 +137,16 @@ pub(crate) unsafe fn build_settings_window() {
     put(&mut place, down, CTRL_X + 200. + SP2 + 24. + SP1, lib_row_top + (ROW_H - 24.) / 2., 24., 24.);
     ui.s_lib_up = Ptr(up);
     ui.s_lib_down = Ptr(down);
-    let show: *mut Object = msg_send![class!(NSButton),
-        checkboxWithTitle: ns("Show in sidebar")
-        target: ui.ctl.get() action: sel!(libVisibleToggled:)];
+    let show: *mut AnyObject = msg_send![class!(NSButton),
+        checkboxWithTitle: ns("Show in sidebar"), target: ui.ctl.get(), action: sel!(libVisibleToggled:)];
     put(&mut place, show, CTRL_X, top + (ROW_H - 18.) / 2., CTRL_W, 18.);
     top += ROW_H;
     ui.s_lib_show = Ptr(show);
     help(&mut place, &mut top, "Pick a library, then use the arrows to move it. Hidden libraries stay on the server.");
 
     section(&mut place, &mut top, "Requests (Seerr)", false);
-    let cb: *mut Object = msg_send![class!(NSButton),
-        checkboxWithTitle: ns("Enable requests")
-        target: nil() action: nil()];
+    let cb: *mut AnyObject = msg_send![class!(NSButton),
+        checkboxWithTitle: ns("Enable requests"), target: nil(), action: None::<Sel>];
     put(&mut place, cb, CTRL_X, top + (ROW_H - 18.) / 2., CTRL_W, 18.);
     top += ROW_H + SP3;
     ui.seerr.s_on = Ptr(cb);
@@ -196,12 +189,10 @@ pub(crate) unsafe fn build_settings_window() {
 
     // Buttons: bottom-right, 88 wide, SP3 apart, SP5 from the edges.
     top += SP5;
-    let save: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Save")
-        target: ui.ctl.get() action: sel!(saveSettings:)];
+    let save: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Save"), target: ui.ctl.get(), action: sel!(saveSettings:)];
     let _: () = msg_send![save, setKeyEquivalent: ns("\r")];
     put(&mut place, save, WIN_W - SP5 - 88., top, 88., 32.);
-    let cancel: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Cancel")
-        target: ui.ctl.get() action: sel!(cancelSettings:)];
+    let cancel: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Cancel"), target: ui.ctl.get(), action: sel!(cancelSettings:)];
     let _: () = msg_send![cancel, setKeyEquivalent: ns("\u{1b}")];
     put(&mut place, cancel, WIN_W - SP5 - 88. - SP3 - 88., top, 88., 32.);
     top += 32. + SP5;
@@ -271,8 +262,8 @@ pub(crate) unsafe fn lib_refresh() {
     let pop = ui.s_lib_pop.get();
     let _: () = msg_send![pop, removeAllItems];
     let n = ui.lib_edit.len();
-    let enable = |v: *mut Object, on: bool| {
-        let _: () = msg_send![v, setEnabled: if on { YES } else { NO }];
+    let enable = |v: *mut AnyObject, on: bool| {
+        let _: () = msg_send![v, setEnabled: if on { Bool::YES } else { Bool::NO }];
     };
     if n == 0 {
         let _: () = msg_send![pop, addItemWithTitle: ns("No libraries yet")];
@@ -297,7 +288,7 @@ pub(crate) unsafe fn lib_refresh() {
     enable(ui.s_lib_down.get(), ui.lib_sel + 1 < n);
 }
 
-pub(crate) extern "C" fn lib_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn lib_selected(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let i: NSInteger = msg_send![ui.s_lib_pop.get(), indexOfSelectedItem];
@@ -308,7 +299,7 @@ pub(crate) extern "C" fn lib_selected(_t: &mut Object, _c: Sel, _s: *mut Object)
 
 /// Checkbox: show or hide the selected library. The last visible library cannot be hidden,
 /// so the box snaps back instead.
-pub(crate) extern "C" fn lib_visible_toggled(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn lib_visible_toggled(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if ui.lib_sel >= ui.lib_edit.len() {
@@ -328,11 +319,11 @@ pub(crate) extern "C" fn lib_visible_toggled(_t: &mut Object, _c: Sel, _s: *mut 
     }
 }
 
-pub(crate) extern "C" fn lib_move_up(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn lib_move_up(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { lib_move(true) }
 }
 
-pub(crate) extern "C" fn lib_move_down(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn lib_move_down(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { lib_move(false) }
 }
 

@@ -5,17 +5,14 @@
 //! subtitles, audio, speed, Picture in Picture and full screen on the right.
 //! It fades with the top bar after the idle timeout (see `player::hide_bars_if_idle`).
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use crate::platform::appkit::*;
 use crate::ui::theme::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 use std::sync::OnceLock;
 
-static BAR_CLASS: OnceLock<&'static Class> = OnceLock::new();
-static SCRUB_CLASS: OnceLock<&'static Class> = OnceLock::new();
+static BAR_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+static SCRUB_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 
 /// Secondary button hit size, and the larger play/pause target.
 const BTN: f64 = 40.;
@@ -101,32 +98,32 @@ impl PlayerBar {
 }
 
 pub(crate) unsafe fn register_playerbar_classes() {
-    let mut d = ClassDecl::new("JRPlayerBar", class!(NSView)).unwrap();
-    d.add_method(sel!(makeBackingLayer), bar_layer as extern "C" fn(&mut Object, Sel) -> *mut Object);
-    d.add_method(sel!(layout), bar_layout as extern "C" fn(&mut Object, Sel));
+    let mut d = ClassBuilder::new(c"JRPlayerBar", class!(NSView)).unwrap();
+    d.add_method(sel!(makeBackingLayer), bar_layer as extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject);
+    d.add_method(sel!(layout), bar_layout as extern "C" fn(*mut AnyObject, Sel));
     BAR_CLASS.set(d.register()).ok();
 
-    let mut s = ClassDecl::new("JRScrubber", class!(NSView)).unwrap();
-    s.add_method(sel!(drawRect:), scrub_draw as extern "C" fn(&mut Object, Sel, NSRect));
-    s.add_method(sel!(acceptsFirstMouse:), yes_obj as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL);
-    s.add_method(sel!(mouseDown:), scrub_down as extern "C" fn(&mut Object, Sel, *mut Object));
-    s.add_method(sel!(mouseDragged:), scrub_drag as extern "C" fn(&mut Object, Sel, *mut Object));
-    s.add_method(sel!(mouseUp:), scrub_up as extern "C" fn(&mut Object, Sel, *mut Object));
-    s.add_method(sel!(mouseMoved:), scrub_moved as extern "C" fn(&mut Object, Sel, *mut Object));
-    s.add_method(sel!(mouseExited:), scrub_exited as extern "C" fn(&mut Object, Sel, *mut Object));
+    let mut s = ClassBuilder::new(c"JRScrubber", class!(NSView)).unwrap();
+    s.add_method(sel!(drawRect:), scrub_draw as extern "C" fn(*mut AnyObject, Sel, NSRect));
+    s.add_method(sel!(acceptsFirstMouse:), yes_obj as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool);
+    s.add_method(sel!(mouseDown:), scrub_down as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    s.add_method(sel!(mouseDragged:), scrub_drag as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    s.add_method(sel!(mouseUp:), scrub_up as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    s.add_method(sel!(mouseMoved:), scrub_moved as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    s.add_method(sel!(mouseExited:), scrub_exited as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
     SCRUB_CLASS.set(s.register()).ok();
 }
 
-extern "C" fn yes_obj(_t: &mut Object, _c: Sel, _e: *mut Object) -> BOOL {
-    YES
+extern "C" fn yes_obj(_t: *mut AnyObject, _c: Sel, _e: *mut AnyObject) -> Bool {
+    Bool::YES
 }
 
-extern "C" fn bar_layer(_t: &mut Object, _c: Sel) -> *mut Object {
+extern "C" fn bar_layer(_t: *mut AnyObject, _c: Sel) -> *mut AnyObject {
     unsafe {
         // Transparent at the top, darkening toward the bottom edge so white controls read on video.
-        let l: *mut Object = msg_send![class!(CAGradientLayer), layer];
-        let cols = [cg_black(0.0), cg_black(0.72)];
-        let arr: *mut Object = msg_send![class!(NSArray), arrayWithObjects: cols.as_ptr() count: 2usize];
+        let l: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
+        let cols = [cg_black(0.0) as *mut AnyObject, cg_black(0.72) as *mut AnyObject];
+        let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObjects: cols.as_ptr(), count: 2usize];
         let _: () = msg_send![l, setColors: arr];
         let _: () = msg_send![l, setStartPoint: NSPoint { x: 0.5, y: 1.0 }];
         let _: () = msg_send![l, setEndPoint: NSPoint { x: 0.5, y: 0.0 }];
@@ -134,7 +131,7 @@ extern "C" fn bar_layer(_t: &mut Object, _c: Sel) -> *mut Object {
     }
 }
 
-extern "C" fn bar_layout(this: &mut Object, _c: Sel) {
+extern "C" fn bar_layout(this: *mut AnyObject, _c: Sel) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), layout];
         relayout();
@@ -142,12 +139,12 @@ extern "C" fn bar_layout(this: &mut Object, _c: Sel) {
 }
 
 /// Builds the bar inside the player host, above AVKit's view. Hidden state is set by playback.
-pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
+pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
     let bcls = *BAR_CLASS.get().unwrap();
-    let bar: *mut Object = msg_send![bcls, alloc];
-    let bar: *mut Object = msg_send![bar, initWithFrame: rect(0., 0., b.size.w, PLAYER_CTRL_H)];
-    let _: () = msg_send![bar, setWantsLayer: YES];
+    let bar: *mut AnyObject = msg_send![bcls, alloc];
+    let bar: *mut AnyObject = msg_send![bar, initWithFrame: rect(0., 0., b.size.w, PLAYER_CTRL_H)];
+    let _: () = msg_send![bar, setWantsLayer: Bool::YES];
     set_autoresize(bar, RESIZE_W | MARGIN_MAXY);
     add_sub(ph, bar);
     autorel(bar);
@@ -155,12 +152,11 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
 
     // Scrubber: a plain view that draws itself and handles the pointer.
     let scls = *SCRUB_CLASS.get().unwrap();
-    let sc: *mut Object = msg_send![scls, alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: rect(0., 0., 10., SCRUB_H)];
-    let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
-    let ta: *mut Object = msg_send![ta,
-        initWithRect: rect(0., 0., 0., 0.)
-        options: (0x01usize | 0x02usize | 0x20usize | 0x200usize) owner: sc userInfo: nil()];
+    let sc: *mut AnyObject = msg_send![scls, alloc];
+    let sc: *mut AnyObject = msg_send![sc, initWithFrame: rect(0., 0., 10., SCRUB_H)];
+    let ta: *mut AnyObject = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut AnyObject = msg_send![ta,
+        initWithRect: rect(0., 0., 0., 0.), options: (0x01usize | 0x02usize | 0x20usize | 0x200usize), owner: sc, userInfo: nil()];
     let _: () = msg_send![sc, addTrackingArea: ta];
     autorel(ta);
     add_sub(bar, sc);
@@ -178,7 +174,7 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
     let chip = vev(MAT_HUD, BLEND_WITHIN);
     let cl = layer_of(chip);
     set_corner(cl, TIP_H / 2.);
-    let _: () = msg_send![cl, setMasksToBounds: YES];
+    let _: () = msg_send![cl, setMasksToBounds: Bool::YES];
     set_hidden(chip, true);
     add_sub(bar, chip);
     ui.pbar.tip = Ptr(chip);
@@ -196,12 +192,12 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
 
     let mute = ctl_button(bar, "speaker.wave.2.fill", 20., "Mute", sel!(mute:));
     ui.pbar.mute = Ptr(mute);
-    let s: *mut Object = msg_send![class!(NSSlider), alloc];
-    let s: *mut Object = msg_send![s, initWithFrame: rect(0., 0., VOL_W, 16.)];
+    let s: *mut AnyObject = msg_send![class!(NSSlider), alloc];
+    let s: *mut AnyObject = msg_send![s, initWithFrame: rect(0., 0., VOL_W, 16.)];
     let _: () = msg_send![s, setMinValue: 0.0f64];
     let _: () = msg_send![s, setMaxValue: 1.0f64];
     let _: () = msg_send![s, setControlSize: 0usize]; // regular: easier to hit from the couch
-    let _: () = msg_send![s, setContinuous: YES];
+    let _: () = msg_send![s, setContinuous: Bool::YES];
     let _: () = msg_send![s, setTarget: ui.ctl.get()];
     let _: () = msg_send![s, setAction: sel!(jrNowVolume:)];
     let _: () = msg_send![s, setToolTip: ns("Volume")];
@@ -223,10 +219,10 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
     relayout();
 }
 
-unsafe fn ctl_button(bar: *mut Object, name: &str, pt: f64, tip: &str, action: Sel) -> *mut Object {
+unsafe fn ctl_button(bar: *mut AnyObject, name: &str, pt: f64, tip: &str, action: Sel) -> *mut AnyObject {
     let ui = UI.get().unwrap();
-    let b: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("") target: ui.ctl.get() action: action];
-    let _: () = msg_send![b, setBordered: NO];
+    let b: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: action];
+    let _: () = msg_send![b, setBordered: Bool::NO];
     let img = symbol(name, pt, Weight::Medium);
     if !img.is_null() {
         let _: () = msg_send![b, setImage: img];
@@ -293,7 +289,7 @@ unsafe fn duration_of(ui: &Ui) -> f64 {
 fn redraw_scrub() {
     unsafe {
         if let Some(ui) = UI.get() {
-            let _: () = msg_send![ui.pbar.scrub.get(), setNeedsDisplay: YES];
+            let _: () = msg_send![ui.pbar.scrub.get(), setNeedsDisplay: Bool::YES];
         }
     }
 }
@@ -318,10 +314,10 @@ pub(crate) unsafe fn update() {
         ui.pbar.frac = if dur > 0.0 { (cur / dur).clamp(0.0, 1.0) } else { 0.0 };
     }
     // Buffered range: the end of the last loaded range, as a fraction of the duration.
-    let ranges: *mut Object = msg_send![ui.pitem.get(), loadedTimeRanges];
+    let ranges: *mut AnyObject = msg_send![ui.pitem.get(), loadedTimeRanges];
     let n: NSUInteger = msg_send![ranges, count];
     ui.pbar.buffered = if n > 0 && dur > 0.0 {
-        let v: *mut Object = msg_send![ranges, objectAtIndex: n - 1];
+        let v: *mut AnyObject = msg_send![ranges, objectAtIndex: n - 1];
         let r: CMTimeRange = msg_send![v, CMTimeRangeValue];
         ((r.start.seconds() + r.duration.seconds()) / dur).clamp(0.0, 1.0)
     } else {
@@ -330,9 +326,9 @@ pub(crate) unsafe fn update() {
     redraw_scrub();
 
     let v: f32 = msg_send![ui.player.get(), volume];
-    let muted: BOOL = msg_send![ui.player.get(), isMuted];
+    let muted: Bool = msg_send![ui.player.get(), isMuted];
     let _: () = msg_send![ui.pbar.vol.get(), setDoubleValue: v as f64];
-    let icon = if muted == YES || v <= 0.001 {
+    let icon = if muted == Bool::YES || v <= 0.001 {
         "speaker.slash.fill"
     } else if v < 0.5 {
         "speaker.wave.1.fill"
@@ -359,28 +355,28 @@ pub(crate) unsafe fn on_start() {
     if ui.pbar.bar.get().is_null() {
         return;
     }
-    let root: *mut Object = msg_send![ui.avview.get(), layer];
-    let supported: BOOL = msg_send![class!(AVPictureInPictureController), isPictureInPictureSupported];
-    let ok = supported == YES && !find_player_layer(root, 0).is_null();
+    let root: *mut AnyObject = msg_send![ui.avview.get(), layer];
+    let supported: Bool = msg_send![class!(AVPictureInPictureController), isPictureInPictureSupported];
+    let ok = supported == Bool::YES && !find_player_layer(root, 0).is_null();
     set_hidden(ui.pbar.pip.get(), !ok);
 }
 
 /// Finds the AVPlayerLayer that AVPlayerView draws into (it may sit below the view's root layer).
-unsafe fn find_player_layer(l: *mut Object, depth: u32) -> *mut Object {
+unsafe fn find_player_layer(l: *mut AnyObject, depth: u32) -> *mut AnyObject {
     if l.is_null() || depth > 4 {
         return nil();
     }
-    let is: BOOL = msg_send![l, isKindOfClass: class!(AVPlayerLayer)];
-    if is == YES {
+    let is: Bool = msg_send![l, isKindOfClass: class!(AVPlayerLayer)];
+    if is == Bool::YES {
         return l;
     }
-    let subs: *mut Object = msg_send![l, sublayers];
+    let subs: *mut AnyObject = msg_send![l, sublayers];
     if subs.is_null() {
         return nil();
     }
     let n: NSUInteger = msg_send![subs, count];
     for i in 0..n {
-        let s: *mut Object = msg_send![subs, objectAtIndex: i];
+        let s: *mut AnyObject = msg_send![subs, objectAtIndex: i];
         let f = find_player_layer(s, depth + 1);
         if !f.is_null() {
             return f;
@@ -391,24 +387,24 @@ unsafe fn find_player_layer(l: *mut Object, depth: u32) -> *mut Object {
 
 // ---- scrubber -----------------------------------------------------------------------------------
 
-unsafe fn fill_rr(r: NSRect, radius: f64, c: *mut Object) {
+unsafe fn fill_rr(r: NSRect, radius: f64, c: *mut AnyObject) {
     let _: () = msg_send![c, set];
-    let p: *mut Object = msg_send![class!(NSBezierPath), bezierPathWithRoundedRect: r xRadius: radius yRadius: radius];
+    let p: *mut AnyObject = msg_send![class!(NSBezierPath), bezierPathWithRoundedRect: r, xRadius: radius, yRadius: radius];
     let _: () = msg_send![p, fill];
 }
-unsafe fn fill_oval(r: NSRect, c: *mut Object) {
+unsafe fn fill_oval(r: NSRect, c: *mut AnyObject) {
     let _: () = msg_send![c, set];
-    let p: *mut Object = msg_send![class!(NSBezierPath), bezierPathWithOvalInRect: r];
+    let p: *mut AnyObject = msg_send![class!(NSBezierPath), bezierPathWithOvalInRect: r];
     let _: () = msg_send![p, fill];
 }
 
-extern "C" fn scrub_draw(this: &mut Object, _c: Sel, _dirty: NSRect) {
+extern "C" fn scrub_draw(this: *mut AnyObject, _c: Sel, _dirty: NSRect) {
     unsafe {
         let ui = match UI.get() {
             Some(u) => u,
             None => return,
         };
-        let b = bounds_of(this as *mut Object);
+        let b = bounds_of(this);
         let (w, h) = (b.size.w, b.size.h);
         let p = &ui.pbar;
         let hot = p.hover.is_some() || p.dragging;
@@ -426,9 +422,9 @@ extern "C" fn scrub_draw(this: &mut Object, _c: Sel, _dirty: NSRect) {
 }
 
 /// Fraction of the track under an event's pointer, 0..1.
-unsafe fn frac_at(this: *mut Object, ev: *mut Object) -> f64 {
+unsafe fn frac_at(this: *mut AnyObject, ev: *mut AnyObject) -> f64 {
     let loc: NSPoint = msg_send![ev, locationInWindow];
-    let p: NSPoint = msg_send![this, convertPoint: loc fromView: nil()];
+    let p: NSPoint = msg_send![this, convertPoint: loc, fromView: nil()];
     let w = bounds_of(this).size.w;
     if w <= 0.0 {
         0.0
@@ -478,9 +474,9 @@ pub(crate) unsafe fn set_hover(f: Option<f64>) {
     redraw_scrub();
 }
 
-extern "C" fn scrub_down(this: &mut Object, _c: Sel, ev: *mut Object) {
+extern "C" fn scrub_down(this: *mut AnyObject, _c: Sel, ev: *mut AnyObject) {
     unsafe {
-        let me = this as *mut Object;
+        let me = this;
         let ui = UI.get_mut().unwrap();
         // A click on the faded-out bar only brings it back; it does not seek.
         let a: f64 = msg_send![ui.pbar.bar.get(), alphaValue];
@@ -492,26 +488,26 @@ extern "C" fn scrub_down(this: &mut Object, _c: Sel, ev: *mut Object) {
         seek_frac(frac_at(me, ev));
     }
 }
-extern "C" fn scrub_drag(this: &mut Object, _c: Sel, ev: *mut Object) {
+extern "C" fn scrub_drag(this: *mut AnyObject, _c: Sel, ev: *mut AnyObject) {
     unsafe {
-        let me = this as *mut Object;
+        let me = this;
         let f = frac_at(me, ev);
         seek_frac(f);
         set_hover(Some(f));
     }
 }
-extern "C" fn scrub_up(_this: &mut Object, _c: Sel, _ev: *mut Object) {
+extern "C" fn scrub_up(_this: *mut AnyObject, _c: Sel, _ev: *mut AnyObject) {
     if let Some(ui) = UI.get_mut() {
         ui.pbar.dragging = false;
     }
     redraw_scrub();
 }
-extern "C" fn scrub_moved(this: &mut Object, _c: Sel, ev: *mut Object) {
+extern "C" fn scrub_moved(this: *mut AnyObject, _c: Sel, ev: *mut AnyObject) {
     unsafe {
-        set_hover(Some(frac_at(this as *mut Object, ev)));
+        set_hover(Some(frac_at(this, ev)));
     }
 }
-extern "C" fn scrub_exited(_this: &mut Object, _c: Sel, _ev: *mut Object) {
+extern "C" fn scrub_exited(_this: *mut AnyObject, _c: Sel, _ev: *mut AnyObject) {
     unsafe {
         if let Some(ui) = UI.get_mut() {
             if !ui.pbar.dragging {
@@ -523,12 +519,12 @@ extern "C" fn scrub_exited(_this: &mut Object, _c: Sel, _ev: *mut Object) {
 
 // ---- menus ----------------------------------------------------------------------------------------
 
-unsafe fn new_menu(title: &str) -> *mut Object {
-    let m: *mut Object = msg_send![class!(NSMenu), alloc];
-    let m: *mut Object = msg_send![m, initWithTitle: ns(title)];
+unsafe fn new_menu(title: &str) -> *mut AnyObject {
+    let m: *mut AnyObject = msg_send![class!(NSMenu), alloc];
+    let m: *mut AnyObject = msg_send![m, initWithTitle: ns(title)];
     autorel(m)
 }
-unsafe fn menu_row(menu: *mut Object, title: &str, action: Sel, tag: isize, on: bool) {
+unsafe fn menu_row(menu: *mut AnyObject, title: &str, action: Sel, tag: isize, on: bool) {
     let it = menu_item(title, action, "");
     let _: () = msg_send![it, setTarget: UI.get().unwrap().ctl.get()];
     let _: () = msg_send![it, setTag: tag];
@@ -536,19 +532,19 @@ unsafe fn menu_row(menu: *mut Object, title: &str, action: Sel, tag: isize, on: 
     let _: () = msg_send![menu, addItem: it];
 }
 /// Opens a menu under its button. Self-test mode only counts the items.
-unsafe fn present(menu: *mut Object, anchor: *mut Object) {
+unsafe fn present(menu: *mut AnyObject, anchor: *mut AnyObject) {
     let n: NSInteger = msg_send![menu, numberOfItems];
     UI.get_mut().unwrap().pbar.last_menu_items = n as usize;
     if offscreen_mode() {
         return;
     }
     let h = bounds_of(anchor).size.h;
-    let _: BOOL = msg_send![menu, popUpMenuPositioningItem: nil() atLocation: NSPoint { x: 0.0, y: h } inView: anchor];
+    let _: Bool = msg_send![menu, popUpMenuPositioningItem: nil(), atLocation: NSPoint { x: 0.0, y: h }, inView: anchor];
 }
 
 /// Subtitle (which = 0) or audio (which = 1) menu. Tags are `which * 1000 + index`, where index 0 is Off
 /// and index i+1 is option i. Selection itself is `avkit::set_track`, shared with the Controls menu.
-unsafe fn track_menu(which: usize, anchor: *mut Object) {
+unsafe fn track_menu(which: usize, anchor: *mut AnyObject) {
     let ui = UI.get_mut().unwrap();
     let (opts, cur) = if which == 0 {
         (ui.sub_opts.clone(), ui.sel_sub)
@@ -564,19 +560,19 @@ unsafe fn track_menu(which: usize, anchor: *mut Object) {
     }
     present(menu, anchor);
 }
-pub(crate) extern "C" fn show_sub_menu(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn show_sub_menu(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe { track_menu(0, sender) }
 }
-pub(crate) extern "C" fn show_audio_menu(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn show_audio_menu(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe { track_menu(1, sender) }
 }
-pub(crate) extern "C" fn pick_track(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn pick_track(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let tag: NSInteger = msg_send![sender, tag];
         crate::platform::avkit::set_track((tag / 1000) as usize, (tag % 1000) as usize);
     }
 }
-pub(crate) extern "C" fn show_speed_menu(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn show_speed_menu(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get().unwrap();
         let rate: f32 = msg_send![ui.player.get(), defaultRate];
@@ -592,7 +588,7 @@ pub(crate) extern "C" fn show_speed_menu(_t: &mut Object, _c: Sel, sender: *mut 
 // ---- Picture in Picture ------------------------------------------------------------------------------
 
 /// Toggles Picture in Picture on the AVPlayerLayer under AVPlayerView. Off-screen (self-test) it only counts the press.
-pub(crate) extern "C" fn toggle_pip(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn toggle_pip(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         if offscreen_mode() {
             UI.get_mut().unwrap().pbar.pip_presses += 1;
@@ -600,21 +596,21 @@ pub(crate) extern "C" fn toggle_pip(_t: &mut Object, _c: Sel, _s: *mut Object) {
         }
         let ui = UI.get_mut().unwrap();
         if ui.pbar.pip_ctl.get().is_null() {
-            let root: *mut Object = msg_send![ui.avview.get(), layer];
+            let root: *mut AnyObject = msg_send![ui.avview.get(), layer];
             let layer = find_player_layer(root, 0);
             if layer.is_null() {
                 return;
             }
-            let c: *mut Object = msg_send![class!(AVPictureInPictureController), alloc];
-            let c: *mut Object = autorel(msg_send![c, initWithPlayerLayer: layer]);
+            let c: *mut AnyObject = msg_send![class!(AVPictureInPictureController), alloc];
+            let c: *mut AnyObject = autorel(msg_send![c, initWithPlayerLayer: layer]);
             if c.is_null() {
                 return;
             }
             ui.pbar.pip_ctl = Ptr::retained(c);
         }
         let c = ui.pbar.pip_ctl.get();
-        let active: BOOL = msg_send![c, isPictureInPictureActive];
-        if active == YES {
+        let active: Bool = msg_send![c, isPictureInPictureActive];
+        if active == Bool::YES {
             let _: () = msg_send![c, stopPictureInPicture];
         } else {
             let _: () = msg_send![c, startPictureInPicture];

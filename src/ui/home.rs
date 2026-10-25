@@ -3,16 +3,14 @@
 //! cells, so hover lift, progress and posters behave the same. Selecting Home swaps
 //! the library grid for this scroll view; any library load swaps it back.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::messages::{HomeRow, UiCmd};
 use crate::jellyfin::models::ListItem;
 use crate::platform::appkit::*;
 use crate::ui::library::{build_cell_keyed, free_cell_data, layout_cell, poster_key, Metrics};
 use crate::ui::shell::{header_layout, hide_state, set_count, show_state, sidebar_refresh_selection};
 use crate::ui::theme::*;
-use objc::class;
-use objc::msg_send;
-use objc::runtime::{Class, Object, Sel, NO, YES};
-use objc::{sel, sel_impl};
 
 /// `cfg.last_view` value meaning "Home was the last selected place".
 pub const HOME_ID: &str = "home";
@@ -75,19 +73,19 @@ impl HomeUi {
 
 /// A flipped plain view (`JRFlipView`, registered by the Seerr module): rows and
 /// cards are laid out top-down.
-unsafe fn flip_view(frame: NSRect) -> *mut Object {
-    let cls = Class::get("JRFlipView").expect("JRFlipView registered at startup");
-    let v: *mut Object = msg_send![cls, alloc];
+unsafe fn flip_view(frame: NSRect) -> *mut AnyObject {
+    let cls = AnyClass::get(c"JRFlipView").expect("JRFlipView registered at startup");
+    let v: *mut AnyObject = msg_send![cls, alloc];
     msg_send![v, initWithFrame: frame] // +1; the caller autorels after adding
 }
 
 /// The Home scroll view, hidden until Home is selected.
-pub(crate) unsafe fn build_scroll(content_host: *mut Object, frame: NSRect) {
+pub(crate) unsafe fn build_scroll(content_host: *mut AnyObject, frame: NSRect) {
     let ui = UI.get_mut().unwrap();
-    let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: frame];
-    let _: () = msg_send![sc, setHasVerticalScroller: YES];
-    let _: () = msg_send![sc, setDrawsBackground: YES];
+    let sc: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+    let sc: *mut AnyObject = msg_send![sc, initWithFrame: frame];
+    let _: () = msg_send![sc, setHasVerticalScroller: Bool::YES];
+    let _: () = msg_send![sc, setDrawsBackground: Bool::YES];
     let _: () = msg_send![sc, setBackgroundColor: color(C_CANVAS)];
     set_autoresize(sc, RESIZE_W | RESIZE_H);
     set_hidden(sc, true);
@@ -118,7 +116,7 @@ unsafe fn rebuild() {
     }
     ui.home.flat.clear();
     let doc = ui.home.doc.get();
-    let none: *mut Object = msg_send![class!(NSArray), array];
+    let none: *mut AnyObject = msg_send![class!(NSArray), array];
     let _: () = msg_send![doc, setSubviews: none];
 
     let w = bounds_of(ui.home.scroll.get()).size.w.max(200.);
@@ -140,11 +138,11 @@ unsafe fn rebuild() {
         let strip_h = m.cell_h + 2. * STRIP_PAD;
         let n = r.items.len() as f64;
         let cards_w = 2. * EDGE + n * tile_w + (n - 1.).max(0.) * CARD_GAP;
-        let strip: *mut Object = msg_send![class!(NSScrollView), alloc];
-        let strip: *mut Object = msg_send![strip, initWithFrame: rect(0., strip_y, w, strip_h)];
-        let _: () = msg_send![strip, setHasHorizontalScroller: YES];
-        let _: () = msg_send![strip, setHasVerticalScroller: NO];
-        let _: () = msg_send![strip, setDrawsBackground: NO];
+        let strip: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+        let strip: *mut AnyObject = msg_send![strip, initWithFrame: rect(0., strip_y, w, strip_h)];
+        let _: () = msg_send![strip, setHasHorizontalScroller: Bool::YES];
+        let _: () = msg_send![strip, setHasVerticalScroller: Bool::NO];
+        let _: () = msg_send![strip, setDrawsBackground: Bool::NO];
         let _: () = msg_send![strip, setBorderType: 0usize];
         set_autoresize(strip, RESIZE_W);
         add_sub(doc, strip);
@@ -248,10 +246,10 @@ pub(crate) unsafe fn leave() {
     sidebar_refresh_selection();
 }
 
-pub(crate) extern "C" fn home_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn home_selected(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { enter() }
 }
 
-pub(crate) extern "C" fn browse_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn browse_selected(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { enter_browse() }
 }

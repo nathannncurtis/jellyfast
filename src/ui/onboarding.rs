@@ -4,14 +4,12 @@
 //! later in Settings. Closing it without choosing keeps the default (separate
 //! libraries), so it never blocks the app.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use crate::config::LayoutMode;
 use crate::platform::appkit::*;
 use crate::ui::shell::set_layout_mode;
 use crate::ui::theme::*;
-use objc::class;
-use objc::msg_send;
-use objc::runtime::{Object, Sel, BOOL, NO};
-use objc::{sel, sel_impl};
 
 const CARD_W: f64 = 560.;
 const PAD: f64 = SP8;
@@ -59,10 +57,10 @@ const OPTIONS: [(&str, &str, &str); 2] = [
 ];
 
 /// Build the hidden overlay over `content` (the library side). Call once at startup.
-pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
+pub(crate) unsafe fn build(content: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
-    let host: *mut Object = msg_send![class!(NSView), alloc];
-    let host: *mut Object = msg_send![host, initWithFrame: b];
+    let host: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let host: *mut AnyObject = msg_send![host, initWithFrame: b];
     set_autoresize(host, RESIZE_W | RESIZE_H);
     let layer = layer_of(host);
     let _: () = msg_send![layer, setBackgroundColor: crate::ui::theme::cg_black(0.42)];
@@ -78,7 +76,7 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
     let _: () = msg_send![card, setBorderColor: color(C_SEPARATOR)];
     set_autoresize(card, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
     add_sub(host, card);
-    let cv: *mut Object = msg_send![card, contentView];
+    let cv: *mut AnyObject = msg_send![card, contentView];
     let inner_w = CARD_W - 2. * PAD;
     // y of a row whose top sits `top` below the card top, with height `h`.
     let y = |top: f64, h: f64| card_h - top - h;
@@ -97,8 +95,8 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
         add_sub(cv, tile);
         ui.onboard.tiles[i] = Ptr(tile);
 
-        let tv: *mut Object = msg_send![class!(NSImageView), alloc];
-        let tv: *mut Object = autorel(msg_send![tv, initWithFrame: rect(SP5, (TILE_H - ICON) / 2., ICON, ICON)]);
+        let tv: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+        let tv: *mut AnyObject = autorel(msg_send![tv, initWithFrame: rect(SP5, (TILE_H - ICON) / 2., ICON, ICON)]);
         let img = symbol(icon, ICON, Weight::Regular);
         if !img.is_null() {
             let _: () = msg_send![tv, setImage: img];
@@ -110,7 +108,7 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
         let text_w = inner_w - text_x - SP5 - TICK - SP3;
         let head_l = label(head, T_HEADLINE, C_TEXT, ALIGN_LEFT);
         let body_l = wrapping_label(body, T_CALLOUT, C_TEXT2, ALIGN_LEFT);
-        let cell: *mut Object = msg_send![body_l, cell];
+        let cell: *mut AnyObject = msg_send![body_l, cell];
         let need: NSSize = msg_send![cell, cellSizeForBounds: rect(0., 0., text_w, 1000.)];
         let body_h = need.h.ceil();
         let block = 18. + SP1 + body_h;
@@ -120,15 +118,14 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
         add_sub(tile, head_l);
         add_sub(tile, body_l);
 
-        let tk: *mut Object = msg_send![class!(NSImageView), alloc];
-        let tk: *mut Object = autorel(msg_send![tk, initWithFrame: rect(inner_w - SP5 - TICK, (TILE_H - TICK) / 2., TICK, TICK)]);
+        let tk: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+        let tk: *mut AnyObject = autorel(msg_send![tk, initWithFrame: rect(inner_w - SP5 - TICK, (TILE_H - TICK) / 2., TICK, TICK)]);
         add_sub(tile, tk);
         ui.onboard.ticks[i] = Ptr(tk);
 
         // Transparent hit target over the whole tile (no title, no image).
-        let hit: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-            target: ui.ctl.get() action: sel!(onboardPick:)];
-        let _: () = msg_send![hit, setBordered: NO];
+        let hit: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: sel!(onboardPick:)];
+        let _: () = msg_send![hit, setBordered: Bool::NO];
         let _: () = msg_send![hit, setTag: i as NSInteger];
         set_frame(hit, rect(0., 0., inner_w, TILE_H));
         set_autoresize(hit, RESIZE_W);
@@ -136,8 +133,7 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
         top += TILE_H + TILE_GAP;
     }
     // Continue, bottom-right of the card.
-    let go: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Continue")
-        target: ui.ctl.get() action: sel!(onboardContinue:)];
+    let go: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Continue"), target: ui.ctl.get(), action: sel!(onboardContinue:)];
     let _: () = msg_send![go, setKeyEquivalent: ns("\r")];
     set_frame(go, rect(CARD_W - PAD - BTN_W, y(card_h - PAD - BTN_H, BTN_H), BTN_W, BTN_H));
     set_autoresize(go, MARGIN_MINX | MARGIN_MINY);
@@ -173,8 +169,8 @@ pub(crate) unsafe fn visible() -> bool {
     if ui.onboard.host.get().is_null() {
         return false;
     }
-    let h: BOOL = msg_send![ui.onboard.host.get(), isHidden];
-    h == NO
+    let h: Bool = msg_send![ui.onboard.host.get(), isHidden];
+    h == Bool::NO
 }
 
 /// Show the overlay with the default option highlighted.
@@ -194,7 +190,7 @@ unsafe fn hide() {
 }
 
 /// Tile click: highlight that option.
-pub(crate) extern "C" fn onboard_pick(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn onboard_pick(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
@@ -204,7 +200,7 @@ pub(crate) extern "C" fn onboard_pick(_t: &mut Object, _c: Sel, sender: *mut Obj
 }
 
 /// Continue: save the highlighted layout and close the card.
-pub(crate) extern "C" fn onboard_continue(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn onboard_continue(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let mode = if ui.onboard.picked == PICK_UNIFIED { LayoutMode::Unified } else { LayoutMode::Separate };

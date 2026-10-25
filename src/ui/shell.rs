@@ -1,4 +1,6 @@
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use crate::*;
 use crate::jellyfin::models::*;
 use crate::app::controller::*;
@@ -8,11 +10,6 @@ use crate::platform::avkit::*;
 use crate::ui::theme::*;
 use crate::ui::library::*;
 use crate::ui::settings::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, BOOL, NO, Object, Sel, YES};
-use objc::{sel, sel_impl};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -28,21 +25,21 @@ pub(crate) unsafe fn build_window_and_ui() {
         }
     }
     let style: NSUInteger = 1 | 2 | 4 | 8 | (1 << 15); // titled|closable|mini|resizable|fullSizeContent
-    let win: *mut Object = msg_send![jr_window_class(), alloc];
-    let win: *mut Object = msg_send![win,
-        initWithContentRect: frame styleMask: style backing: 2usize defer: NO];
+    let win: *mut AnyObject = msg_send![jr_window_class(), alloc];
+    let win: *mut AnyObject = msg_send![win,
+        initWithContentRect: frame, styleMask: style, backing: 2usize, defer: Bool::NO];
     let _: () = msg_send![win, setTitle: ns("Jellyfast")];
     let _: () = msg_send![win, setTitleVisibility: 1i64]; // hidden; the title still names the window in menus
-    let _: () = msg_send![win, setTitlebarAppearsTransparent: YES];
-    let _: () = msg_send![win, setReleasedWhenClosed: NO];
+    let _: () = msg_send![win, setTitlebarAppearsTransparent: Bool::YES];
+    let _: () = msg_send![win, setReleasedWhenClosed: Bool::NO];
     let _: () = msg_send![win, setTabbingMode: 2i64]; // disallowed
     let _: () = msg_send![win, setMinSize: size(960., 600.)];
     place_window(win);
     ui.win = Ptr::retained(win);
 
-    let content: *mut Object = msg_send![win, contentView];
+    let content: *mut AnyObject = msg_send![win, contentView];
     let b = bounds_of(content);
-    let _: () = msg_send![content, setWantsLayer: YES]; // crossfade() needs a layer
+    let _: () = msg_send![content, setWantsLayer: Bool::YES]; // crossfade() needs a layer
 
     // Login backdrop only: the main window itself is opaque.
     let bg = vev(MAT_UNDER_WINDOW, BLEND_BEHIND);
@@ -52,8 +49,8 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.bgfx = Ptr(bg);
 
     // --- Content host (library side) ---
-    let content_host: *mut Object = msg_send![class!(NSView), alloc];
-    let content_host: *mut Object = msg_send![content_host, initWithFrame: b];
+    let content_host: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let content_host: *mut AnyObject = msg_send![content_host, initWithFrame: b];
     set_autoresize(content_host, RESIZE_W | RESIZE_H);
     add_sub(content, content_host);
     autorel(content_host);
@@ -71,13 +68,13 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(content_host, sb);
     ui.sidebar = Ptr(sb);
 
-    let stack: *mut Object = msg_send![class!(NSStackView), alloc];
-    let stack: *mut Object =
+    let stack: *mut AnyObject = msg_send![class!(NSStackView), alloc];
+    let stack: *mut AnyObject =
         msg_send![stack, initWithFrame: rect(SP3, 0., SIDEBAR_W - 2. * SP3, b.size.h - TITLEBAR_H)];
     let _: () = msg_send![stack, setOrientation: 1isize]; // vertical
     let _: () = msg_send![stack, setAlignment: 7isize]; // NSLayoutAttributeWidth: rows fill the width
     let _: () = msg_send![stack, setSpacing: 2.0f64];
-    let _: () = msg_send![stack, setDetachesHiddenViews: YES];
+    let _: () = msg_send![stack, setDetachesHiddenViews: Bool::YES];
     let _: () = msg_send![stack, setEdgeInsets: NSEdgeInsets { top: 0., left: 0., bottom: SP3, right: 0. }];
     set_autoresize(stack, RESIZE_H | RESIZE_W);
     add_sub(sb, stack);
@@ -85,33 +82,32 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.side_stack = Ptr(stack);
 
     // Search field (the only static sidebar row; libraries and footer are rebuilt).
-    let sf: *mut Object = msg_send![class!(NSSearchField), alloc];
-    let sf: *mut Object = msg_send![sf, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, SIDEBAR_ROW_H)];
+    let sf: *mut AnyObject = msg_send![class!(NSSearchField), alloc];
+    let sf: *mut AnyObject = msg_send![sf, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, SIDEBAR_ROW_H)];
     let _: () = msg_send![sf.cell(), setPlaceholderString: ns("Search")];
     let _: () = msg_send![sf, setControlSize: 3usize];
     let _: () = msg_send![sf, setTarget: ui.ctl.get()];
     let _: () = msg_send![sf, setDelegate: ui.ctl.get()]; // controlTextDidChange: -> Search
-    let _: () = msg_send![sf, setSendsWholeSearchString: NO];
+    let _: () = msg_send![sf, setSendsWholeSearchString: Bool::NO];
     fix_height(sf, SIDEBAR_ROW_H);
-    let _: () = msg_send![stack, addView: sf inGravity: 1isize];
-    let _: () = msg_send![stack, setCustomSpacing: SP4 afterView: sf];
+    let _: () = msg_send![stack, addView: sf, inGravity: 1isize];
+    let _: () = msg_send![stack, setCustomSpacing: SP4, afterView: sf];
     autorel(sf);
     ui.search = Ptr(sf);
 
     // Header band: back, title, count, spinner, sort (laid out by `header_layout`).
     let pb = bounds_of(content_host);
     let hcls = *HEADER_CLASS.get().unwrap();
-    let header: *mut Object = msg_send![hcls, alloc];
-    let header: *mut Object = msg_send![header, initWithFrame:
+    let header: *mut AnyObject = msg_send![hcls, alloc];
+    let header: *mut AnyObject = msg_send![header, initWithFrame:
         rect(SIDEBAR_W, pb.size.h - TITLEBAR_H - HEADER_H, pb.size.w - SIDEBAR_W, HEADER_H)];
     set_autoresize(header, RESIZE_W | MARGIN_MINY);
     add_sub(content_host, header);
     autorel(header);
     ui.header = Ptr(header);
 
-    let back: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-        target: ui.ctl.get() action: sel!(goBack:)];
-    let _: () = msg_send![back, setBordered: NO];
+    let back: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: sel!(goBack:)];
+    let _: () = msg_send![back, setBordered: Bool::NO];
     let bi = symbol("chevron.left", 15., Weight::Medium);
     if !bi.is_null() {
         let _: () = msg_send![back, setImage: bi];
@@ -131,20 +127,20 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.header_count = Ptr(hc);
 
     // Small spinner: shown only while a view with items already on screen reloads.
-    let sp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
-    let sp: *mut Object = msg_send![sp, initWithFrame: rect(0., 0., 16., 16.)];
-    let _: () = msg_send![sp, setIndeterminate: YES];
+    let sp: *mut AnyObject = msg_send![class!(NSProgressIndicator), alloc];
+    let sp: *mut AnyObject = msg_send![sp, initWithFrame: rect(0., 0., 16., 16.)];
+    let _: () = msg_send![sp, setIndeterminate: Bool::YES];
     let _: () = msg_send![sp, setStyle: 1isize]; // spinning
     let _: () = msg_send![sp, setControlSize: 1usize];
-    let _: () = msg_send![sp, setUsesThreadedAnimation: YES];
+    let _: () = msg_send![sp, setUsesThreadedAnimation: Bool::YES];
     set_hidden(sp, true);
     add_sub(header, sp);
     autorel(sp);
     ui.spinner = Ptr(sp);
 
-    let pop: *mut Object = msg_send![class!(NSPopUpButton), alloc];
-    let pop: *mut Object = msg_send![pop, initWithFrame: rect(0., 0., 120., 24.) pullsDown: NO];
-    let arr: *mut Object = msg_send![class!(NSMutableArray), array];
+    let pop: *mut AnyObject = msg_send![class!(NSPopUpButton), alloc];
+    let pop: *mut AnyObject = msg_send![pop, initWithFrame: rect(0., 0., 120., 24.), pullsDown: Bool::NO];
+    let arr: *mut AnyObject = msg_send![class!(NSMutableArray), array];
     for t in ["Name", "Date Added", "Rating", "Last Played"] {
         let _: () = msg_send![arr, addObject: ns(t)];
     }
@@ -152,7 +148,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     let _: () = msg_send![pop, setTarget: ui.ctl.get()];
     let _: () = msg_send![pop, setAction: sel!(sortChanged:)];
     let _: () = msg_send![pop, setControlSize: 1usize];
-    let _: () = msg_send![pop, setBordered: NO];
+    let _: () = msg_send![pop, setBordered: Bool::NO];
     let _: () = msg_send![pop, setFont: font(T_CALLOUT)];
     add_sub(header, pop);
     autorel(pop);
@@ -160,10 +156,10 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // Grid scroll view
     let grid_area = rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h - TITLEBAR_H - HEADER_H - SP3);
-    let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: grid_area];
-    let _: () = msg_send![sc, setHasVerticalScroller: YES];
-    let _: () = msg_send![sc, setDrawsBackground: YES];
+    let sc: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+    let sc: *mut AnyObject = msg_send![sc, initWithFrame: grid_area];
+    let _: () = msg_send![sc, setHasVerticalScroller: Bool::YES];
+    let _: () = msg_send![sc, setDrawsBackground: Bool::YES];
     let _: () = msg_send![sc, setBackgroundColor: color(C_CANVAS)];
     set_autoresize(sc, RESIZE_W | RESIZE_H);
     add_sub(content_host, sc);
@@ -172,34 +168,34 @@ pub(crate) unsafe fn build_window_and_ui() {
     crate::ui::home::build_scroll(content_host, grid_area);
 
     let grid_cls = *GRID_CLASS.get().unwrap();
-    let grid: *mut Object = msg_send![grid_cls, alloc];
-    let grid: *mut Object = msg_send![grid, initWithFrame: rect(0., 0., pb.size.w - SIDEBAR_W, 10.)];
+    let grid: *mut AnyObject = msg_send![grid_cls, alloc];
+    let grid: *mut AnyObject = msg_send![grid, initWithFrame: rect(0., 0., pb.size.w - SIDEBAR_W, 10.)];
     // One GridData box, owned by ui.grid_data and also referenced by the grid's ivar.
     ui.grid_data = Some(Box::new(GridData { cells: vec![], ratio: POSTER_ASPECT }));
     let data: *mut GridData = &mut **ui.grid_data.as_mut().unwrap();
-    (*grid).set_ivar::<*mut c_void>("jrData", data as *mut c_void);
+    *ivar_ptr::<*mut c_void>(&*grid, c"jrData") = data as *mut c_void;
     set_autoresize(grid, RESIZE_W);
-    let _: *mut Object = msg_send![sc, setDocumentView: grid];
+    let _: () = msg_send![sc, setDocumentView: grid];
     autorel(grid);
     ui.grid = Ptr(grid);
 
     // Empty / error state, centred on the grid area (not the window).
-    let host: *mut Object = msg_send![class!(NSView), alloc];
-    let host: *mut Object = msg_send![host, initWithFrame: grid_area];
+    let host: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let host: *mut AnyObject = msg_send![host, initWithFrame: grid_area];
     set_autoresize(host, RESIZE_W | RESIZE_H);
     set_hidden(host, true);
     add_sub(content_host, host);
     autorel(host);
     ui.state_host = Ptr(host);
     let (sw, sh) = (360., 164.);
-    let state: *mut Object = msg_send![class!(NSView), alloc];
-    let state: *mut Object = msg_send![state, initWithFrame:
+    let state: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let state: *mut AnyObject = msg_send![state, initWithFrame:
         rect((grid_area.size.w - sw) / 2., (grid_area.size.h - sh) / 2., sw, sh)];
     set_autoresize(state, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
     add_sub(host, state);
     autorel(state);
-    let si: *mut Object = msg_send![class!(NSImageView), alloc];
-    let si: *mut Object = msg_send![si, initWithFrame: rect((sw - 40.) / 2., sh - 40., 40., 40.)];
+    let si: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let si: *mut AnyObject = msg_send![si, initWithFrame: rect((sw - 40.) / 2., sh - 40., 40., 40.)];
     let _: () = msg_send![si, setContentTintColor: color(C_TEXT3)];
     add_sub(state, si);
     autorel(si);
@@ -212,8 +208,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     set_frame(sbody, rect(0., sh - 40. - SP3 - 26. - SP1 - 34., sw, 34.));
     add_sub(state, sbody);
     ui.state_body = Ptr(sbody);
-    let sbtn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Try Again")
-        target: ui.ctl.get() action: sel!(refresh:)];
+    let sbtn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Try Again"), target: ui.ctl.get(), action: sel!(refresh:)];
     let _: () = msg_send![sbtn, setBezelStyle: 1isize];
     set_frame(sbtn, rect((sw - 110.) / 2., 0., 110., 28.));
     set_hidden(sbtn, true);
@@ -231,26 +226,26 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // --- Player host (AVKit) + chrome ---
     let pcls = *crate::ui::player::PLAYER_HOST_CLASS.get().unwrap();
-    let ph: *mut Object = msg_send![pcls, alloc];
-    let ph: *mut Object = msg_send![ph, initWithFrame: b];
+    let ph: *mut AnyObject = msg_send![pcls, alloc];
+    let ph: *mut AnyObject = msg_send![ph, initWithFrame: b];
     set_autoresize(ph, RESIZE_W | RESIZE_H);
     add_sub(content, ph);
     autorel(ph);
     ui.player_host = Ptr(ph);
     set_hidden(ph, true);
 
-    let avv: *mut Object = msg_send![class!(AVPlayerView), alloc];
-    let avv: *mut Object = msg_send![avv, initWithFrame: b];
+    let avv: *mut AnyObject = msg_send![class!(AVPlayerView), alloc];
+    let avv: *mut AnyObject = msg_send![avv, initWithFrame: b];
     set_autoresize(avv, RESIZE_W | RESIZE_H);
-    let _: () = msg_send![avv, setShowsFullScreenToggleButton: YES];
-    let _: () = msg_send![avv, setShowsFrameSteppingButtons: NO];
-    let _: () = msg_send![avv, setShowsSharingServiceButton: NO];
-    let _: () = msg_send![avv, setAllowsPictureInPicturePlayback: YES];
+    let _: () = msg_send![avv, setShowsFullScreenToggleButton: Bool::YES];
+    let _: () = msg_send![avv, setShowsFrameSteppingButtons: Bool::NO];
+    let _: () = msg_send![avv, setShowsSharingServiceButton: Bool::NO];
+    let _: () = msg_send![avv, setAllowsPictureInPicturePlayback: Bool::YES];
     add_sub(ph, avv);
     autorel(avv);
     ui.avview = Ptr(avv);
 
-    let player: *mut Object = autorel(msg_send![class!(AVPlayer), new]); // empty until something plays
+    let player: *mut AnyObject = autorel(msg_send![class!(AVPlayer), new]); // empty until something plays
     // about:blank won't play; we replace the item on every real playback.
     ui.player = Ptr::retained(player);
     let _: () = msg_send![avv, setPlayer: player];
@@ -268,24 +263,24 @@ pub(crate) unsafe fn build_window_and_ui() {
     let _: () = msg_send![card, setBorderWidth: 1.0f64];
     let _: () = msg_send![card, setBorderColor: color(C_SEPARATOR)];
     set_autoresize(card, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
-    let _: () = msg_send![card, setWantsLayer: YES];
-    let shadow: *mut Object = msg_send![class!(NSShadow), alloc];
-    let shadow: *mut Object = autorel(msg_send![shadow, init]);
+    let _: () = msg_send![card, setWantsLayer: Bool::YES];
+    let shadow: *mut AnyObject = msg_send![class!(NSShadow), alloc];
+    let shadow: *mut AnyObject = autorel(msg_send![shadow, init]);
     let _: () = msg_send![shadow, setShadowBlurRadius: SH_CARD.radius];
     let _: () = msg_send![shadow, setShadowOffset: size(0., SH_CARD.dy)];
     let _: () = msg_send![shadow, setShadowColor: color_a_black_fn(SH_CARD.opacity as f64)];
     let _: () = msg_send![card, setShadow: shadow];
     add_sub(content, card);
     ui.login_card = Ptr(card);
-    let cv: *mut Object = msg_send![card, contentView];
+    let cv: *mut AnyObject = msg_send![card, contentView];
 
     let inner_x = SP8;
     let inner_w = card_w - 2. * SP8;
     let top = |t: f64, h: f64| card_h - t - h; // y from a distance below the card top
 
     let mark = symbol("play.rectangle.on.rectangle.fill", 36., Weight::Regular);
-    let mv: *mut Object = msg_send![class!(NSImageView), alloc];
-    let mv: *mut Object = autorel(msg_send![mv, initWithFrame: rect(inner_x, top(SP8, 44.), inner_w, 44.)]);
+    let mv: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let mv: *mut AnyObject = autorel(msg_send![mv, initWithFrame: rect(inner_x, top(SP8, 44.), inner_w, 44.)]);
     if !mark.is_null() {
         let _: () = msg_send![mv, setImage: mark];
         let _: () = msg_send![mv, setContentTintColor: color(C_ACCENT)];
@@ -300,7 +295,7 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     let fields_top = SP8 + 44. + SP3 + 26. + SP1 + 16. + SP6; // 148
     let fh = 28.;
-    let large_field = |ph: &str, secure: bool, row: f64| -> *mut Object {
+    let large_field = |ph: &str, secure: bool, row: f64| -> *mut AnyObject {
         let f = text_field(ph, secure);
         let _: () = msg_send![f, setControlSize: 3usize]; // large
         let _: () = msg_send![f, setFont: font(T_BODY)];
@@ -319,9 +314,8 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.login_key = Ptr(key_f);
 
     let tog_top = fields_top + 3. * fh + 2. * SP3 + SP2;
-    let tog: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Use an API key instead")
-        target: ui.ctl.get() action: sel!(toggleApiKey:)];
-    let _: () = msg_send![tog, setBordered: NO];
+    let tog: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Use an API key instead"), target: ui.ctl.get(), action: sel!(toggleApiKey:)];
+    let _: () = msg_send![tog, setBordered: Bool::NO];
     let _: () = msg_send![tog, setFont: font(T_CALLOUT)];
     let _: () = msg_send![tog, setContentTintColor: color(C_ACCENT)];
     let _: () = msg_send![tog, setAlignment: ALIGN_LEFT as isize];
@@ -331,8 +325,7 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // "Remember me" checkbox, checked from the saved preference (default on).
     let rem_top = tog_top + 18. + SP3;
-    let rem: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Remember me")
-        target: nil() action: nil()];
+    let rem: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Remember me"), target: nil(), action: None::<Sel>];
     let _: () = msg_send![rem, setButtonType: 3usize]; // NSSwitchButton (checkbox)
     let _: () = msg_send![rem, setControlSize: 0usize]; // regular
     let _: () = msg_send![rem, setFont: font(T_CALLOUT)];
@@ -342,8 +335,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.login_remember = Ptr(rem);
 
     let btn_top = rem_top + 18. + SP5;
-    let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Connect")
-        target: ui.ctl.get() action: sel!(connectClicked:)];
+    let btn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Connect"), target: ui.ctl.get(), action: sel!(connectClicked:)];
     let _: () = msg_send![btn, setBezelStyle: 1isize]; // push
     let _: () = msg_send![btn, setControlSize: 3usize];
     let _: () = msg_send![btn, setKeyEquivalent: ns("\r")];
@@ -352,12 +344,12 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.login_btn = Ptr(btn);
 
     let st_top = btn_top + 32. + SP3;
-    let lsp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
-    let lsp: *mut Object = autorel(msg_send![lsp, initWithFrame: rect(inner_x, top(st_top, 16.), 16., 16.)]);
+    let lsp: *mut AnyObject = msg_send![class!(NSProgressIndicator), alloc];
+    let lsp: *mut AnyObject = autorel(msg_send![lsp, initWithFrame: rect(inner_x, top(st_top, 16.), 16., 16.)]);
     let _: () = msg_send![lsp, setStyle: 1isize]; // spinning
     let _: () = msg_send![lsp, setControlSize: 1usize]; // small
-    let _: () = msg_send![lsp, setIndeterminate: YES];
-    let _: () = msg_send![lsp, setUsesThreadedAnimation: YES];
+    let _: () = msg_send![lsp, setIndeterminate: Bool::YES];
+    let _: () = msg_send![lsp, setUsesThreadedAnimation: Bool::YES];
     set_hidden(lsp, true);
     add_sub(cv, lsp);
     ui.login_spin = Ptr(lsp);
@@ -384,13 +376,12 @@ pub(crate) unsafe fn build_window_and_ui() {
     let _: () = msg_send![win, makeKeyAndOrderFront: nil()];
     if !offscreen_mode() {
         #[allow(deprecated)]
-        let _: () = msg_send![ui.app.get(), activateIgnoringOtherApps: YES];
+        let _: () = msg_send![ui.app.get(), activateIgnoringOtherApps: Bool::YES];
     }
 
     // 1s UI timer: chip/progress/autosave (target = controller).
-    let timer: *mut Object = msg_send![class!(NSTimer),
-        scheduledTimerWithTimeInterval: 1.0f64 target: ui.ctl.get()
-        selector: sel!(jrTick:) userInfo: nil() repeats: YES];
+    let timer: *mut AnyObject = msg_send![class!(NSTimer),
+        scheduledTimerWithTimeInterval: 1.0f64, target: ui.ctl.get(), selector: sel!(jrTick:), userInfo: nil(), repeats: Bool::YES];
     ui.timer = Ptr(timer);
 
     apply_theme();
@@ -399,7 +390,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     show_login_or_library(false);
 }
 
-pub(crate) unsafe fn add_arranged(stack: *mut Object, v: *mut Object, _top: CGFloat, _pad: CGFloat) {
+pub(crate) unsafe fn add_arranged(stack: *mut AnyObject, v: *mut AnyObject, _top: CGFloat, _pad: CGFloat) {
     let _: () = msg_send![stack, addArrangedSubview: v];
 }
 
@@ -408,14 +399,14 @@ pub(crate) unsafe fn apply_theme() {
     // Self-test only: JELLYFAST_APPEARANCE=light|dark pins the appearance for screenshots.
     let forced = if crate::app::selftest::enabled() { std::env::var("JELLYFAST_APPEARANCE").ok() } else { None };
     let theme = forced.unwrap_or_else(|| ui.cfg.settings.theme.clone());
-    let appearance: *mut Object = match theme.as_str() {
+    let appearance: *mut AnyObject = match theme.as_str() {
         "light" => {
-            let a: *mut Object =
+            let a: *mut AnyObject =
                 msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameAqua")];
             a
         }
         "dark" => {
-            let a: *mut Object =
+            let a: *mut AnyObject =
                 msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameDarkAqua")];
             a
         }
@@ -429,51 +420,51 @@ pub(crate) unsafe fn build_menus() {
     crate::ui::shortcuts::build_menus_from_table();
 }
 
-pub(crate) unsafe fn separator() -> *mut Object {
+pub(crate) unsafe fn separator() -> *mut AnyObject {
     msg_send![class!(NSMenuItem), separatorItem]
 }
 
 // ---- Sidebar ------------------------------------------------------------
 /// Pin a view's height (arranged stack views have no autoresizing constraints).
-pub(crate) unsafe fn fix_height(v: *mut Object, h: f64) {
-    let _: () = msg_send![v, setTranslatesAutoresizingMaskIntoConstraints: NO];
-    let anchor: *mut Object = msg_send![v, heightAnchor];
-    let c: *mut Object = msg_send![anchor, constraintEqualToConstant: h];
-    let _: () = msg_send![c, setActive: YES];
+pub(crate) unsafe fn fix_height(v: *mut AnyObject, h: f64) {
+    let _: () = msg_send![v, setTranslatesAutoresizingMaskIntoConstraints: Bool::NO];
+    let anchor: *mut AnyObject = msg_send![v, heightAnchor];
+    let c: *mut AnyObject = msg_send![anchor, constraintEqualToConstant: h];
+    let _: () = msg_send![c, setActive: Bool::YES];
 }
 
 pub(crate) struct RowData {
-    bg: *mut Object,
+    bg: *mut AnyObject,
     selected: bool,
 }
-pub(crate) static ROW_CLASS: OnceLock<&'static Class> = OnceLock::new();
+pub(crate) static ROW_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 
 pub(crate) unsafe fn register_sidebar_row() {
-    let mut d = ClassDecl::new("JRSidebarRow", class!(NSView)).unwrap();
-    d.add_ivar::<*mut c_void>("jrRow");
-    d.add_method(sel!(isFlipped), row_flipped as extern "C" fn(&mut Object, Sel) -> BOOL);
-    d.add_method(sel!(mouseEntered:), row_enter as extern "C" fn(&mut Object, Sel, *mut Object));
-    d.add_method(sel!(mouseExited:), row_exit as extern "C" fn(&mut Object, Sel, *mut Object));
+    let mut d = ClassBuilder::new(c"JRSidebarRow", class!(NSView)).unwrap();
+    d.add_ivar::<*mut c_void>(c"jrRow");
+    d.add_method(sel!(isFlipped), row_flipped as extern "C" fn(*mut AnyObject, Sel) -> Bool);
+    d.add_method(sel!(mouseEntered:), row_enter as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    d.add_method(sel!(mouseExited:), row_exit as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
     ROW_CLASS.set(d.register()).ok();
 }
-extern "C" fn row_flipped(_t: &mut Object, _c: Sel) -> BOOL {
-    YES
+extern "C" fn row_flipped(_t: *mut AnyObject, _c: Sel) -> Bool {
+    Bool::YES
 }
-unsafe fn row_data(this: *mut Object) -> *mut RowData {
-    *(*this).get_ivar::<*mut c_void>("jrRow") as *mut RowData
+unsafe fn row_data(this: *mut AnyObject) -> *mut RowData {
+    *ivar_ptr::<*mut c_void>(&*this, c"jrRow") as *mut RowData
 }
 unsafe fn row_paint(rd: &RowData, hover: bool) {
     if rd.selected {
         let _: () = msg_send![rd.bg, setFillColor: color(C_FILL_SEL)];
-        let _: () = msg_send![rd.bg, setTransparent: NO];
+        let _: () = msg_send![rd.bg, setTransparent: Bool::NO];
     } else if hover {
         let _: () = msg_send![rd.bg, setFillColor: color(C_FILL_HOVER)];
-        let _: () = msg_send![rd.bg, setTransparent: NO];
+        let _: () = msg_send![rd.bg, setTransparent: Bool::NO];
     } else {
-        let _: () = msg_send![rd.bg, setTransparent: YES];
+        let _: () = msg_send![rd.bg, setTransparent: Bool::YES];
     }
 }
-extern "C" fn row_enter(this: &mut Object, _c: Sel, _e: *mut Object) {
+extern "C" fn row_enter(this: *mut AnyObject, _c: Sel, _e: *mut AnyObject) {
     unsafe {
         let rd = row_data(this);
         if !rd.is_null() {
@@ -481,7 +472,7 @@ extern "C" fn row_enter(this: &mut Object, _c: Sel, _e: *mut Object) {
         }
     }
 }
-extern "C" fn row_exit(this: &mut Object, _c: Sel, _e: *mut Object) {
+extern "C" fn row_exit(this: *mut AnyObject, _c: Sel, _e: *mut AnyObject) {
     unsafe {
         let rd = row_data(this);
         if !rd.is_null() {
@@ -489,34 +480,34 @@ extern "C" fn row_exit(this: &mut Object, _c: Sel, _e: *mut Object) {
         }
     }
 }
-pub(crate) unsafe fn row_set_selected(row: *mut Object, selected: bool) {
+pub(crate) unsafe fn row_set_selected(row: *mut AnyObject, selected: bool) {
     let rd = row_data(row);
     if !rd.is_null() {
         (*rd).selected = selected;
         row_paint(&*rd, false);
     }
 }
-pub(crate) unsafe fn row_free(row: *mut Object) {
+pub(crate) unsafe fn row_free(row: *mut AnyObject) {
     let rd = row_data(row);
     if !rd.is_null() {
         drop(Box::from_raw(rd));
-        (*row).set_ivar::<*mut c_void>("jrRow", std::ptr::null_mut());
+        *ivar_ptr::<*mut c_void>(&*row, c"jrRow") = std::ptr::null_mut();
     }
 }
 
 /// One 28 pt sidebar row: selection/hover pill, symbol, label, full-row hit button.
-pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, tag: NSInteger) -> *mut Object {
+pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, tag: NSInteger) -> *mut AnyObject {
     let w = SIDEBAR_W - 2. * SP3;
     let cls = *ROW_CLASS.get().unwrap();
-    let row: *mut Object = msg_send![cls, alloc];
-    let row: *mut Object = msg_send![row, initWithFrame: rect(0., 0., w, SIDEBAR_ROW_H)];
+    let row: *mut AnyObject = msg_send![cls, alloc];
+    let row: *mut AnyObject = msg_send![row, initWithFrame: rect(0., 0., w, SIDEBAR_ROW_H)];
     let bg = surface(rect(0., 0., w, SIDEBAR_ROW_H), C_FILL_SEL, R_ROW);
-    let _: () = msg_send![bg, setTransparent: YES];
+    let _: () = msg_send![bg, setTransparent: Bool::YES];
     set_autoresize(bg, RESIZE_W | RESIZE_H);
     add_sub(row, bg);
     let img = symbol(symbol_name, 15., Weight::Medium);
-    let iv: *mut Object = msg_send![class!(NSImageView), alloc];
-    let iv: *mut Object = autorel(msg_send![iv, initWithFrame: rect(SP2, 4., 20., 20.)]);
+    let iv: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let iv: *mut AnyObject = autorel(msg_send![iv, initWithFrame: rect(SP2, 4., 20., 20.)]);
     if !img.is_null() {
         let _: () = msg_send![iv, setImage: img];
         let _: () = msg_send![iv, setContentTintColor: color(C_ACCENT)];
@@ -526,21 +517,19 @@ pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, ta
     set_frame(l, rect(36., 6., w - 36. - SP2, 16.));
     set_autoresize(l, RESIZE_W);
     add_sub(row, l);
-    let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-        target: nil() action: action];
+    let btn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: nil(), action: action];
     let ui = UI.get_mut().unwrap();
     let _: () = msg_send![btn, setTarget: ui.ctl.get()];
-    let _: () = msg_send![btn, setBordered: NO];
+    let _: () = msg_send![btn, setBordered: Bool::NO];
     let _: () = msg_send![btn, setTag: tag];
     set_frame(btn, rect(0., 0., w, SIDEBAR_ROW_H));
     set_autoresize(btn, RESIZE_W | RESIZE_H);
     add_sub(row, btn);
     let rd = Box::into_raw(Box::new(RowData { bg, selected: false }));
-    (*row).set_ivar::<*mut c_void>("jrRow", rd as *mut c_void);
-    let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
-    let ta: *mut Object = msg_send![ta,
-        initWithRect: rect(0., 0., w, SIDEBAR_ROW_H)
-        options: (0x01usize | 0x80usize | 0x200usize) owner: row userInfo: nil()];
+    *ivar_ptr::<*mut c_void>(&*row, c"jrRow") = rd as *mut c_void;
+    let ta: *mut AnyObject = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut AnyObject = msg_send![ta,
+        initWithRect: rect(0., 0., w, SIDEBAR_ROW_H), options: (0x01usize | 0x80usize | 0x200usize), owner: row, userInfo: nil()];
     let _: () = msg_send![row, addTrackingArea: ta];
     autorel(ta);
     fix_height(row, SIDEBAR_ROW_H);
@@ -627,7 +616,7 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
 
     // Home sits above the library list.
     let home_row = sidebar_row("Home", "house", sel!(homeSelected:), -1);
-    let _: () = msg_send![stack, addView: home_row inGravity: 1isize];
+    let _: () = msg_send![stack, addView: home_row, inGravity: 1isize];
     ui.side_dyn.push(home_row);
     ui.home.row = Ptr(home_row);
     row_set_selected(home_row, ui.home.active);
@@ -636,7 +625,7 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
     if unified {
         // One big library: Browse, Search and Requests replace the library list.
         let browse = sidebar_row("Browse", "square.grid.2x2", sel!(browseSelected:), -1);
-        let _: () = msg_send![stack, addView: browse inGravity: 1isize];
+        let _: () = msg_send![stack, addView: browse, inGravity: 1isize];
         ui.side_dyn.push(browse);
         ui.browse_row = Ptr(browse);
         row_set_selected(browse, ui.browse_active);
@@ -645,21 +634,21 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
             ("Requests", "tray.full", sel!(openRequests:)),
         ] {
             let r = sidebar_row(title, symbol_name, action, -1);
-            let _: () = msg_send![stack, addView: r inGravity: 1isize];
+            let _: () = msg_send![stack, addView: r, inGravity: 1isize];
             ui.side_dyn.push(r);
         }
     }
     if !unified {
         // Library list (separate layout): a header, then one row per library.
         // Section header
-        let hdr_box: *mut Object = msg_send![class!(NSView), alloc];
-        let hdr_box: *mut Object = autorel(msg_send![hdr_box, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, 20.)]);
+        let hdr_box: *mut AnyObject = msg_send![class!(NSView), alloc];
+        let hdr_box: *mut AnyObject = autorel(msg_send![hdr_box, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, 20.)]);
         let hdr = label("Library", T_CAPTION_EM, C_TEXT3, ALIGN_LEFT);
         set_frame(hdr, rect(SP2, 2., SIDEBAR_W - 2. * SP3 - SP2, 16.));
         set_autoresize(hdr, RESIZE_W);
         add_sub(hdr_box, hdr);
         fix_height(hdr_box, 20.);
-        let _: () = msg_send![stack, addView: hdr_box inGravity: 1isize];
+        let _: () = msg_send![stack, addView: hdr_box, inGravity: 1isize];
         ui.side_dyn.push(hdr_box);
 
         for (i, (id, name, ct)) in views.iter().enumerate() {
@@ -672,7 +661,7 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
                 _ => "square.stack",
             };
             let row = sidebar_row(name, symbol_name, sel!(viewSelected:), i as NSInteger);
-            let _: () = msg_send![stack, addView: row inGravity: 1isize];
+            let _: () = msg_send![stack, addView: row, inGravity: 1isize];
             ui.rows.push((row, id.clone()));
             ui.side_dyn.push(row);
             row_set_selected(row, ui.selected_view == Some(i));
@@ -682,35 +671,35 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
     // Footer (bottom gravity): Request (separate layout only), hairline, user row.
     if !unified {
         let req = sidebar_row("Request…", "plus.magnifyingglass", sel!(openSeerr:), 0);
-        let _: () = msg_send![stack, addView: req inGravity: 3isize];
+        let _: () = msg_send![stack, addView: req, inGravity: 3isize];
         ui.side_dyn.push(req);
     }
     let hl = hairline(rect(0., 0., SIDEBAR_W - 2. * SP3, 1.));
     fix_height(hl, 1.);
-    let _: () = msg_send![stack, addView: hl inGravity: 3isize];
+    let _: () = msg_send![stack, addView: hl, inGravity: 3isize];
     ui.side_dyn.push(hl);
     let urow = user_row(&user);
-    let _: () = msg_send![stack, addView: urow inGravity: 3isize];
+    let _: () = msg_send![stack, addView: urow, inGravity: 3isize];
     ui.side_dyn.push(urow);
 }
 
-unsafe fn is_row(v: *mut Object) -> bool {
+unsafe fn is_row(v: *mut AnyObject) -> bool {
     let cls = *ROW_CLASS.get().unwrap();
-    let b: BOOL = msg_send![v, isKindOfClass: cls];
-    b == YES
+    let b: Bool = msg_send![v, isKindOfClass: cls];
+    b == Bool::YES
 }
 
 /// Avatar circle with the user's initial, the name, and a gear that opens Settings.
-unsafe fn user_row(user: &str) -> *mut Object {
+unsafe fn user_row(user: &str) -> *mut AnyObject {
     let w = SIDEBAR_W - 2. * SP3;
     let h = 36.;
-    let row: *mut Object = msg_send![class!(NSView), alloc];
-    let row: *mut Object = autorel(msg_send![row, initWithFrame: rect(0., 0., w, h)]);
+    let row: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let row: *mut AnyObject = autorel(msg_send![row, initWithFrame: rect(0., 0., w, h)]);
     let av = surface(rect(SP2, (h - 22.) / 2., 22., 22.), C_FILL_SEL, 11.);
     let initial: String = user.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
     let il = label(&initial, T_CAPTION_EM, C_TEXT, ALIGN_CENTER);
     set_frame(il, rect(0., 3., 22., 14.));
-    let avc: *mut Object = msg_send![av, contentView];
+    let avc: *mut AnyObject = msg_send![av, contentView];
     add_sub(avc, il);
     add_sub(row, av);
     let nl = label(user, T_BODY, C_TEXT, ALIGN_LEFT);
@@ -718,9 +707,8 @@ unsafe fn user_row(user: &str) -> *mut Object {
     set_autoresize(nl, RESIZE_W);
     add_sub(row, nl);
     let ui = UI.get_mut().unwrap();
-    let gear: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-        target: ui.ctl.get() action: sel!(showSettings:)];
-    let _: () = msg_send![gear, setBordered: NO];
+    let gear: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: sel!(showSettings:)];
+    let _: () = msg_send![gear, setBordered: Bool::NO];
     let gi = symbol("gearshape", 15., Weight::Medium);
     if !gi.is_null() {
         let _: () = msg_send![gear, setImage: gi];
@@ -739,21 +727,21 @@ unsafe fn user_row(user: &str) -> *mut Object {
 pub fn show_login_or_library(connected: bool) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let content: *mut Object = msg_send![ui.win.get(), contentView];
+        let content: *mut AnyObject = msg_send![ui.win.get(), contentView];
         crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
         set_hidden(ui.content_host.get(), !connected);
         set_hidden(ui.login_card.get(), connected);
         set_hidden(ui.bgfx.get(), connected || reduce_transparency());
         if connected {
-            let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
+            let _: Bool = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
         } else {
-            let _: () = msg_send![ui.login_btn.get(), setEnabled: YES];
+            let _: () = msg_send![ui.login_btn.get(), setEnabled: Bool::YES];
             set_text(ui.login_btn.get(), "Connect");
         }
     }
 }
 
-pub(crate) extern "C" fn toggle_api_key(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn toggle_api_key(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let key_mode = !is_hidden(ui.login_pass.get());
@@ -764,12 +752,12 @@ pub(crate) extern "C" fn toggle_api_key(_t: &mut Object, _c: Sel, _s: *mut Objec
             if key_mode { "Use a password instead" } else { "Use an API key instead" },
         );
         let f = if key_mode { ui.login_key.get() } else { ui.login_pass.get() };
-        let _: BOOL = msg_send![ui.win.get(), makeFirstResponder: f];
+        let _: Bool = msg_send![ui.win.get(), makeFirstResponder: f];
     }
 }
-pub(crate) unsafe fn is_hidden(v: *mut Object) -> bool {
-    let h: BOOL = msg_send![v, isHidden];
-    h == YES
+pub(crate) unsafe fn is_hidden(v: *mut AnyObject) -> bool {
+    let h: Bool = msg_send![v, isHidden];
+    h == Bool::YES
 }
 
 /// Neutral progress/info text on the login card (secondary colour).
@@ -791,7 +779,7 @@ pub fn login_error(msg: &str) {
         set_text(ui.login_err.get(), &clip_msg(msg, 140));
         set_label_color(ui.login_err.get(), C_DANGER);
         login_layout_status(false);
-        let _: () = msg_send![ui.login_btn.get(), setEnabled: YES];
+        let _: () = msg_send![ui.login_btn.get(), setEnabled: Bool::YES];
         set_text(ui.login_btn.get(), "Connect");
         set_busy(false);
     }
@@ -843,36 +831,36 @@ mod tests {
     }
 }
 
-unsafe fn color_a_black_fn(a: f64) -> *mut Object {
-    let b: *mut Object = msg_send![class!(NSColor), blackColor];
+unsafe fn color_a_black_fn(a: f64) -> *mut AnyObject {
+    let b: *mut AnyObject = msg_send![class!(NSColor), blackColor];
     msg_send![b, colorWithAlphaComponent: a]
 }
 
 // ---- Header band ----------------------------------------------------------------------
-pub(crate) static HEADER_CLASS: OnceLock<&'static Class> = OnceLock::new();
+pub(crate) static HEADER_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 pub(crate) unsafe fn register_header_class() {
-    let mut d = ClassDecl::new("JRHeaderView", class!(NSView)).unwrap();
-    d.add_method(sel!(layout), header_layout_cb as extern "C" fn(&mut Object, Sel));
+    let mut d = ClassBuilder::new(c"JRHeaderView", class!(NSView)).unwrap();
+    d.add_method(sel!(layout), header_layout_cb as extern "C" fn(*mut AnyObject, Sel));
     d.add_method(
         sel!(resizeSubviewsWithOldSize:),
-        header_resize_cb as extern "C" fn(&mut Object, Sel, NSSize),
+        header_resize_cb as extern "C" fn(*mut AnyObject, Sel, NSSize),
     );
     HEADER_CLASS.set(d.register()).ok();
 }
-extern "C" fn header_layout_cb(this: &mut Object, _c: Sel) {
+extern "C" fn header_layout_cb(this: *mut AnyObject, _c: Sel) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), layout];
         header_layout();
     }
 }
-extern "C" fn header_resize_cb(this: &mut Object, _c: Sel, old: NSSize) {
+extern "C" fn header_resize_cb(this: *mut AnyObject, _c: Sel, old: NSSize) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), resizeSubviewsWithOldSize: old];
         header_layout();
     }
 }
-unsafe fn text_w(v: *mut Object) -> f64 {
-    let cell: *mut Object = msg_send![v, cell];
+unsafe fn text_w(v: *mut AnyObject) -> f64 {
+    let cell: *mut AnyObject = msg_send![v, cell];
     let s: NSSize = msg_send![cell, cellSize];
     s.w.ceil()
 }

@@ -1,12 +1,10 @@
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use crate::*;
 use crate::jellyfin::models::*;
 use crate::platform::appkit::*;
 use crate::ui::theme::*;
-use objc::class;
-use objc::msg_send;
-use objc::runtime::{Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 use std::os::raw::c_void;
 
 // ---- Grid maths (pure; unit-tested) --------------------------------------------
@@ -60,30 +58,30 @@ fn placeholder_symbol(item_type: &str) -> &'static str {
 
 // ---- Poster grid ---------------------------------------------------------------
 pub(crate) struct CellData {
-    shadow: *mut Object,
-    dim: *mut Object,
-    circle: *mut Object,
-    play_icon: *mut Object,
+    shadow: *mut AnyObject,
+    dim: *mut AnyObject,
+    circle: *mut AnyObject,
+    play_icon: *mut AnyObject,
 }
 
-unsafe fn new_layer() -> *mut Object {
+unsafe fn new_layer() -> *mut AnyObject {
     msg_send![class!(CALayer), layer]
 }
-unsafe fn add_layer(parent: *mut Object, child: *mut Object) {
+unsafe fn add_layer(parent: *mut AnyObject, child: *mut AnyObject) {
     let _: () = msg_send![parent, addSublayer: child];
 }
-unsafe fn palette_symbol(name: &str, pt: f64, colors: &[*mut Object]) -> *mut Object {
-    let img: *mut Object =
-        msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name) accessibilityDescription: nil()];
+unsafe fn palette_symbol(name: &str, pt: f64, colors: &[*mut AnyObject]) -> *mut AnyObject {
+    let img: *mut AnyObject =
+        msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name), accessibilityDescription: nil()];
     if img.is_null() {
         return img;
     }
-    let base: *mut Object = msg_send![class!(NSImageSymbolConfiguration),
-        configurationWithPointSize: pt weight: Weight::Medium.value()];
-    let arr: *mut Object = msg_send![class!(NSArray), arrayWithObjects: colors.as_ptr() count: colors.len()];
-    let pal: *mut Object = msg_send![class!(NSImageSymbolConfiguration), configurationWithPaletteColors: arr];
-    let cfg: *mut Object = msg_send![base, configurationByApplyingConfiguration: pal];
-    let out: *mut Object = msg_send![img, imageWithSymbolConfiguration: cfg];
+    let base: *mut AnyObject = msg_send![class!(NSImageSymbolConfiguration),
+        configurationWithPointSize: pt, weight: Weight::Medium.value()];
+    let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObjects: colors.as_ptr(), count: colors.len()];
+    let pal: *mut AnyObject = msg_send![class!(NSImageSymbolConfiguration), configurationWithPaletteColors: arr];
+    let cfg: *mut AnyObject = msg_send![base, configurationByApplyingConfiguration: pal];
+    let out: *mut AnyObject = msg_send![img, imageWithSymbolConfiguration: cfg];
     if out.is_null() { img } else { out }
 }
 
@@ -114,7 +112,7 @@ pub fn grid_set_items(items: &[ListItem]) {
         gd.cells = cells;
         ui.grid_data = Some(gd);
         // Re-point the ivar users at the (same) box, then lay out.
-        let _: () = msg_send![grid, setNeedsLayout: YES];
+        let _: () = msg_send![grid, setNeedsLayout: Bool::YES];
     }
 }
 
@@ -122,7 +120,7 @@ pub fn grid_set_items(items: &[ListItem]) {
 /// One poster cell under `grid` for `it`. Clicks send `click` with `tag`; the caller
 /// positions it with `set_frame` and `layout_cell`.
 pub(crate) unsafe fn build_cell(
-    grid: *mut Object,
+    grid: *mut AnyObject,
     it: &ListItem,
     tag: NSInteger,
     click: Sel,
@@ -135,7 +133,7 @@ pub(crate) unsafe fn build_cell(
 /// Like `build_cell`, but the artwork is looked up and filled under `key`
 /// (Home's wide cards use their own key, so they never show poster art).
 pub(crate) unsafe fn build_cell_keyed(
-    grid: *mut Object,
+    grid: *mut AnyObject,
     it: &ListItem,
     tag: NSInteger,
     click: Sel,
@@ -145,8 +143,8 @@ pub(crate) unsafe fn build_cell_keyed(
 ) -> CellHandle {
     let ui = UI.get_mut().unwrap();
     let cell_cls = *CELL_CLASS.get().unwrap();
-    let container: *mut Object = msg_send![cell_cls, alloc];
-    let container: *mut Object = msg_send![container, initWithFrame: rect(0., 0., m.tile_w, m.cell_h)];
+    let container: *mut AnyObject = msg_send![cell_cls, alloc];
+    let container: *mut AnyObject = msg_send![container, initWithFrame: rect(0., 0., m.tile_w, m.cell_h)];
     let root = layer_of(container);
 
     // Shadow host (no masking) + clipped art layer.
@@ -158,7 +156,7 @@ pub(crate) unsafe fn build_cell_keyed(
     add_layer(root, host);
     let art = new_layer();
     set_corner(art, R_POSTER);
-    let _: () = msg_send![art, setMasksToBounds: YES];
+    let _: () = msg_send![art, setMasksToBounds: Bool::YES];
     let _: () = msg_send![art, setContentsGravity: ns("resizeAspectFill")];
     let _: () = msg_send![art, setContentsScale: scale];
     let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_SEL)];
@@ -172,7 +170,7 @@ pub(crate) unsafe fn build_cell_keyed(
     let track = new_layer();
     let _: () = msg_send![track, setCornerRadius: 1.5f64];
     let _: () = msg_send![track, setBackgroundColor: cg_black(0.45)];
-    let _: () = msg_send![track, setHidden: (frac <= 0.0) as objc::runtime::BOOL];
+    let _: () = msg_send![track, setHidden: Bool::new(frac <= 0.0)];
     add_layer(art, track);
     let fill = new_layer();
     let _: () = msg_send![fill, setCornerRadius: 1.5f64];
@@ -191,8 +189,8 @@ pub(crate) unsafe fn build_cell_keyed(
     add_layer(art, circle);
 
     // Placeholder glyph.
-    let glyph: *mut Object = msg_send![class!(NSImageView), alloc];
-    let glyph: *mut Object = msg_send![glyph, initWithFrame: rect(0., 0., 40., 40.)];
+    let glyph: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let glyph: *mut AnyObject = msg_send![glyph, initWithFrame: rect(0., 0., 40., 40.)];
     let gi = symbol(placeholder_symbol(&it.item_type), 28., Weight::Regular);
     if !gi.is_null() {
         let _: () = msg_send![glyph, setImage: gi];
@@ -201,8 +199,8 @@ pub(crate) unsafe fn build_cell_keyed(
     add_sub(container, glyph);
     autorel(glyph);
     // Play icon (above the circle).
-    let play: *mut Object = msg_send![class!(NSImageView), alloc];
-    let play: *mut Object = msg_send![play, initWithFrame: rect(0., 0., 24., 24.)];
+    let play: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let play: *mut AnyObject = msg_send![play, initWithFrame: rect(0., 0., 24., 24.)];
     let pi = symbol("play.fill", 18., Weight::Regular);
     if !pi.is_null() {
         let _: () = msg_send![play, setImage: pi];
@@ -212,8 +210,8 @@ pub(crate) unsafe fn build_cell_keyed(
     add_sub(container, play);
     autorel(play);
     // Watched badge.
-    let badge: *mut Object = msg_send![class!(NSImageView), alloc];
-    let badge: *mut Object = msg_send![badge, initWithFrame: rect(0., 0., 20., 20.)];
+    let badge: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let badge: *mut AnyObject = msg_send![badge, initWithFrame: rect(0., 0., 20., 20.)];
     let white = color(C_ON_MEDIA);
     let acc = color(C_ACCENT);
     let bimg = palette_symbol("checkmark.circle.fill", 16., &[white, acc]);
@@ -231,18 +229,17 @@ pub(crate) unsafe fn build_cell_keyed(
     add_sub(container, sub);
 
     // Click target over the whole cell.
-    let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-        target: ui.ctl.get() action: click];
-    let _: () = msg_send![btn, setBordered: NO];
+    let btn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: click];
+    let _: () = msg_send![btn, setBordered: Bool::NO];
     let _: () = msg_send![btn, setTag: tag];
     let _: () = msg_send![btn, setToolTip: ns(&it.name)];
     add_sub(container, btn);
     // Context menu.
-    let menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let menu: *mut Object = msg_send![menu, initWithTitle: ns(&it.name)];
+    let menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
+    let menu: *mut AnyObject = msg_send![menu, initWithTitle: ns(&it.name)];
     let id_ns = ns(&it.id);
     let played = it.user_data.as_ref().map(|u| u.played).unwrap_or(false);
-    let m0: *mut Object = menu_item("Play", click, "");
+    let m0: *mut AnyObject = menu_item("Play", click, "");
     let _: () = msg_send![m0, setTarget: ui.ctl.get()];
     let _: () = msg_send![m0, setTag: tag];
     let _: () = msg_send![menu, addItem: m0];
@@ -251,13 +248,13 @@ pub(crate) unsafe fn build_cell_keyed(
     } else {
         ("Mark as Watched", sel!(markWatched:))
     };
-    let m1: *mut Object = menu_item(t1, s1, "");
+    let m1: *mut AnyObject = menu_item(t1, s1, "");
     let _: () = msg_send![m1, setTarget: ui.ctl.get()];
     let _: () = msg_send![m1, setRepresentedObject: id_ns];
     let _: () = msg_send![menu, addItem: m1];
-    let sep: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
+    let sep: *mut AnyObject = msg_send![class!(NSMenuItem), separatorItem];
     let _: () = msg_send![menu, addItem: sep];
-    let m2: *mut Object = menu_item("Open in Jellyfin Web", sel!(openInWeb:), "");
+    let m2: *mut AnyObject = menu_item("Open in Jellyfin Web", sel!(openInWeb:), "");
     let _: () = msg_send![m2, setTarget: ui.ctl.get()];
     let _: () = msg_send![m2, setRepresentedObject: id_ns];
     let _: () = msg_send![menu, addItem: m2];
@@ -265,11 +262,10 @@ pub(crate) unsafe fn build_cell_keyed(
     autorel(menu);
 
     let cd = Box::into_raw(Box::new(CellData { shadow: host, dim, circle, play_icon: play }));
-    (*container).set_ivar::<*mut c_void>("jrCell", cd as *mut c_void);
-    let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
-    let ta: *mut Object = msg_send![ta,
-        initWithRect: rect(0., 0., m.tile_w, m.poster_h)
-        options: (0x01usize | 0x80usize | 0x200usize) owner: container userInfo: nil()];
+    *ivar_ptr::<*mut c_void>(&*container, c"jrCell") = cd as *mut c_void;
+    let ta: *mut AnyObject = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut AnyObject = msg_send![ta,
+        initWithRect: rect(0., 0., m.tile_w, m.poster_h), options: (0x01usize | 0x80usize | 0x200usize), owner: container, userInfo: nil()];
     let _: () = msg_send![container, addTrackingArea: ta];
     autorel(ta);
     let _: () = msg_send![grid, addSubview: container];
@@ -318,14 +314,14 @@ pub fn grid_set_skeleton(n: usize) {
         let dummy: ListItem = serde_json::from_value(serde_json::json!({"Id": "", "Name": ""})).unwrap();
         for _ in 0..n {
             let cell_cls = *CELL_CLASS.get().unwrap();
-            let container: *mut Object = msg_send![cell_cls, alloc];
-            let container: *mut Object = msg_send![container, initWithFrame: rect(0., 0., m.tile_w, m.cell_h)];
+            let container: *mut AnyObject = msg_send![cell_cls, alloc];
+            let container: *mut AnyObject = msg_send![container, initWithFrame: rect(0., 0., m.tile_w, m.cell_h)];
             let root = layer_of(container);
             let host = new_layer();
             add_layer(root, host);
             let art = new_layer();
             set_corner(art, R_POSTER);
-            let _: () = msg_send![art, setMasksToBounds: YES];
+            let _: () = msg_send![art, setMasksToBounds: Bool::YES];
             let _: () = msg_send![art, setContentsScale: scale];
             let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_SEL)];
             add_layer(host, art);
@@ -362,11 +358,11 @@ pub fn grid_set_skeleton(n: usize) {
         }
         tx_end();
         ui.grid_data = Some(gd);
-        let _: () = msg_send![grid, setNeedsLayout: YES];
+        let _: () = msg_send![grid, setNeedsLayout: Bool::YES];
     }
 }
 
-pub(crate) unsafe fn show_art(c: &mut CellHandle, img: *mut Object, animate: bool) {
+pub(crate) unsafe fn show_art(c: &mut CellHandle, img: *mut AnyObject, animate: bool) {
     let cg = cg_image(img);
     if cg.is_null() {
         return;
@@ -376,29 +372,29 @@ pub(crate) unsafe fn show_art(c: &mut CellHandle, img: *mut Object, animate: boo
     } else {
         tx_begin_instant();
     }
-    let _: () = msg_send![c.art, setContents: cg];
+    let _: () = msg_send![c.art, setContents: cg as *mut AnyObject];
     tx_end();
     set_hidden(c.glyph, true);
 }
 
 /// Free the per-cell hover box and null the ivar (cell may outlive removal briefly).
-pub(crate) unsafe fn free_cell_data(container: *mut Object) {
-    let cd = *(*container).get_ivar::<*mut c_void>("jrCell") as *mut CellData;
+pub(crate) unsafe fn free_cell_data(container: *mut AnyObject) {
+    let cd = *ivar_ptr::<*mut c_void>(&*container, c"jrCell") as *mut CellData;
     if !cd.is_null() {
         drop(Box::from_raw(cd));
-        (*container).set_ivar::<*mut c_void>("jrCell", std::ptr::null_mut());
+        *ivar_ptr::<*mut c_void>(&*container, c"jrCell") = std::ptr::null_mut();
     }
 }
 
-pub(crate) extern "C" fn cell_layout(this: &mut Object, _cmd: Sel) {
+pub(crate) extern "C" fn cell_layout(this: *mut AnyObject, _cmd: Sel) {
     // Geometry is owned by grid_layout; the cell only forwards to NSView.
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), layout];
     }
 }
 
-unsafe fn hover(this: &mut Object, on: bool) {
-    let cd = *(*this).get_ivar::<*mut c_void>("jrCell") as *mut CellData;
+unsafe fn hover(this: *mut AnyObject, on: bool) {
+    let cd = *ivar_ptr::<*mut c_void>(&*this, c"jrCell") as *mut CellData;
     if cd.is_null() {
         return;
     }
@@ -416,15 +412,15 @@ unsafe fn hover(this: &mut Object, on: bool) {
     let _: () = msg_send![cd.dim, setOpacity: o];
     let _: () = msg_send![cd.circle, setOpacity: o];
     tx_end();
-    let anim: *mut Object = msg_send![cd.play_icon, animator];
+    let anim: *mut AnyObject = msg_send![cd.play_icon, animator];
     anim_begin(if on { M_FAST } else { M_STD }, timing_ease_out());
     let _: () = msg_send![anim, setAlphaValue: if on { 1.0f64 } else { 0.0f64 }];
     anim_end();
 }
-pub(crate) extern "C" fn cell_hover(this: &mut Object, _cmd: Sel, _ev: *mut Object) {
+pub(crate) extern "C" fn cell_hover(this: *mut AnyObject, _cmd: Sel, _ev: *mut AnyObject) {
     unsafe { hover(this, true) }
 }
-pub(crate) extern "C" fn cell_unhover(this: &mut Object, _cmd: Sel, _ev: *mut Object) {
+pub(crate) extern "C" fn cell_unhover(this: *mut AnyObject, _cmd: Sel, _ev: *mut AnyObject) {
     unsafe { hover(this, false) }
 }
 
@@ -455,13 +451,13 @@ pub(crate) unsafe fn layout_cell(c: &CellHandle, m: &Metrics) {
     }
 }
 
-pub(crate) extern "C" fn grid_layout(this: &mut Object, _cmd: Sel) {
+pub(crate) extern "C" fn grid_layout(this: *mut AnyObject, _cmd: Sel) {
     unsafe {
-        let data = *(*this).get_ivar::<*mut c_void>("jrData") as *mut GridData;
+        let data = *ivar_ptr::<*mut c_void>(&*this, c"jrData") as *mut GridData;
         if data.is_null() {
             return;
         }
-        let b = bounds_of(this as *mut Object);
+        let b = bounds_of(this);
         let w = b.size.w.max(200.0);
         let d = &mut *data;
         let m = grid_metrics(w, d.ratio);
@@ -478,22 +474,22 @@ pub(crate) extern "C" fn grid_layout(this: &mut Object, _cmd: Sel) {
         let rows = (d.cells.len() + m.cols - 1) / m.cols;
         let content_h = SP2 + rows as f64 * (m.cell_h + GRID_ROW_GAP);
         if (content_h - b.size.h).abs() > 1.0 {
-            let _: () = msg_send![this as *mut Object, setFrameSize: size(b.size.w, content_h)];
+            let _: () = msg_send![this, setFrameSize: size(b.size.w, content_h)];
         }
     }
 }
-pub(crate) extern "C" fn grid_set_frame(this: &mut Object, _cmd: Sel, s: NSSize) {
+pub(crate) extern "C" fn grid_set_frame(this: *mut AnyObject, _cmd: Sel, s: NSSize) {
     unsafe {
         // Forward to NSView's setFrameSize:, then request a layout pass.
         let _: () = msg_send![super(this, class!(NSView)), setFrameSize: s];
-        let _: () = msg_send![this, setNeedsLayout: YES];
+        let _: () = msg_send![this, setNeedsLayout: Bool::YES];
     }
 }
 /// Dynamic colours on layers are resolved once; re-resolve when the appearance flips.
-pub(crate) extern "C" fn grid_appearance_changed(this: &mut Object, _cmd: Sel) {
+pub(crate) extern "C" fn grid_appearance_changed(this: *mut AnyObject, _cmd: Sel) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), viewDidChangeEffectiveAppearance];
-        let data = *(*this).get_ivar::<*mut c_void>("jrData") as *mut GridData;
+        let data = *ivar_ptr::<*mut c_void>(&*this, c"jrData") as *mut GridData;
         if data.is_null() {
             return;
         }
@@ -549,9 +545,9 @@ pub fn tint_clamp(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
 
 /// Average an 8x8 sample grid of the encoded image and clamp it to a tint (h, s, b).
 unsafe fn artwork_tint(bytes: &[u8]) -> Option<(f64, f64, f64)> {
-    let data: *mut Object = msg_send![class!(NSData),
-        dataWithBytes: bytes.as_ptr() length: bytes.len() as NSUInteger];
-    let rep: *mut Object = msg_send![class!(NSBitmapImageRep), imageRepWithData: data];
+    let data: *mut AnyObject = msg_send![class!(NSData),
+        dataWithBytes: bytes.as_ptr() as *const std::ffi::c_void, length: bytes.len() as NSUInteger];
+    let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), imageRepWithData: data];
     if rep.is_null() {
         return None;
     }
@@ -560,17 +556,17 @@ unsafe fn artwork_tint(bytes: &[u8]) -> Option<(f64, f64, f64)> {
     if w < 1 || h < 1 {
         return None;
     }
-    let srgb: *mut Object = msg_send![class!(NSColorSpace), sRGBColorSpace];
+    let srgb: *mut AnyObject = msg_send![class!(NSColorSpace), sRGBColorSpace];
     let (mut r, mut g, mut b, mut n) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for iy in 0..8 {
         for ix in 0..8 {
             let x = ((ix * 2 + 1) * w / 16).min(w - 1);
             let y = ((iy * 2 + 1) * h / 16).min(h - 1);
-            let c: *mut Object = msg_send![rep, colorAtX: x y: y];
+            let c: *mut AnyObject = msg_send![rep, colorAtX: x, y: y];
             if c.is_null() {
                 continue;
             }
-            let c: *mut Object = msg_send![c, colorUsingColorSpace: srgb];
+            let c: *mut AnyObject = msg_send![c, colorUsingColorSpace: srgb];
             if c.is_null() {
                 continue;
             }
@@ -594,13 +590,13 @@ pub fn poster_ready(key: u64, bytes: &[u8]) {
             Some(u) => u,
             None => return,
         };
-        let data: *mut Object = msg_send![class!(NSData),
-            dataWithBytes: bytes.as_ptr() length: bytes.len() as NSUInteger];
+        let data: *mut AnyObject = msg_send![class!(NSData),
+            dataWithBytes: bytes.as_ptr() as *const std::ffi::c_void, length: bytes.len() as NSUInteger];
         if data.is_null() {
             return;
         }
-        let img: *mut Object = msg_send![class!(NSImage), alloc];
-        let img: *mut Object = msg_send![img, initWithData: data];
+        let img: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let img: *mut AnyObject = msg_send![img, initWithData: data];
         if img.is_null() {
             return; // undecodable bytes: the placeholder stays
         }
@@ -731,7 +727,7 @@ pub(crate) unsafe fn kb_move(delta: isize) {
     } else {
         (cur + delta).rem_euclid(n)
     };
-    let cells: Vec<*mut Object> = gd.cells.iter().map(|c| c.container).collect();
+    let cells: Vec<*mut AnyObject> = gd.cells.iter().map(|c| c.container).collect();
     if cur >= 0 && cur < n {
         let prev = cells[cur as usize];
         hover(&mut *prev, false);
@@ -739,7 +735,7 @@ pub(crate) unsafe fn kb_move(delta: isize) {
     let c = cells[next as usize];
     hover(&mut *c, true);
     let b: NSRect = msg_send![c, bounds];
-    let _: BOOL = msg_send![c, scrollRectToVisible: b];
+    let _: Bool = msg_send![c, scrollRectToVisible: b];
     KB_FOCUS.store(next, std::sync::atomic::Ordering::Relaxed);
 }
 

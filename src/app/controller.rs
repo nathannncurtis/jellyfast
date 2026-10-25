@@ -6,9 +6,6 @@ use crate::app::messages::UiCmd;
 use crate::ui::shell::*;
 use crate::ui::library::*;
 use crate::ui::settings::*;
-use objc::msg_send;
-use objc::runtime::{BOOL, NO, Object, Sel, YES};
-use objc::{sel, sel_impl};
 
 /// Drain the MainMsg queue on the main thread; called via on_main.
 pub(crate) fn drain_main() {

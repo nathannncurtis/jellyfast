@@ -3,17 +3,14 @@
 //! content area (library stays visible) and shrinks `lib_scroll` by `NOW_BAR_H`.
 //! Audio plays through the same AVPlayer as video; `player_host` is never shown.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::messages::PlaybackStart;
 use crate::platform::appkit::*;
 use crate::ui::theme::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, Object, Sel, NO, YES};
-use objc::{sel, sel_impl};
 use std::sync::OnceLock;
 
-static BAR_CLASS: OnceLock<&'static Class> = OnceLock::new();
+static BAR_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 
 const ART: f64 = 48.;
 const TEXT_X: f64 = 76.;
@@ -81,22 +78,21 @@ impl NowBar {
 }
 
 pub(crate) unsafe fn register_nowbar_class() {
-    let mut d = ClassDecl::new("JRNowBar", class!(NSView)).unwrap();
-    d.add_method(sel!(layout), bar_layout as extern "C" fn(&mut Object, Sel));
+    let mut d = ClassBuilder::new(c"JRNowBar", class!(NSView)).unwrap();
+    d.add_method(sel!(layout), bar_layout as extern "C" fn(*mut AnyObject, Sel));
     BAR_CLASS.set(d.register()).ok();
 }
-extern "C" fn bar_layout(this: &mut Object, _c: Sel) {
+extern "C" fn bar_layout(this: *mut AnyObject, _c: Sel) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), layout];
         relayout();
     }
 }
 
-unsafe fn icon_button(name: &str, pt: f64, tip: &str, action: Sel) -> *mut Object {
+unsafe fn icon_button(name: &str, pt: f64, tip: &str, action: Sel) -> *mut AnyObject {
     let ui = UI.get_mut().unwrap();
-    let b: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-        target: ui.ctl.get() action: action];
-    let _: () = msg_send![b, setBordered: NO];
+    let b: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: action];
+    let _: () = msg_send![b, setBordered: Bool::NO];
     let img = symbol(name, pt, Weight::Medium);
     if !img.is_null() {
         let _: () = msg_send![b, setImage: img];
@@ -106,26 +102,26 @@ unsafe fn icon_button(name: &str, pt: f64, tip: &str, action: Sel) -> *mut Objec
     let _: () = msg_send![b, setToolTip: ns(tip)];
     b
 }
-unsafe fn slider(action: Sel, continuous: bool) -> *mut Object {
+unsafe fn slider(action: Sel, continuous: bool) -> *mut AnyObject {
     let ui = UI.get_mut().unwrap();
-    let s: *mut Object = msg_send![class!(NSSlider), alloc];
-    let s: *mut Object = msg_send![s, initWithFrame: rect(0., 0., 100., 16.)];
+    let s: *mut AnyObject = msg_send![class!(NSSlider), alloc];
+    let s: *mut AnyObject = msg_send![s, initWithFrame: rect(0., 0., 100., 16.)];
     let _: () = msg_send![s, setMinValue: 0.0f64];
     let _: () = msg_send![s, setMaxValue: 1.0f64];
     let _: () = msg_send![s, setControlSize: 1usize]; // small
-    let _: () = msg_send![s, setContinuous: if continuous { YES } else { NO }];
+    let _: () = msg_send![s, setContinuous: if continuous { Bool::YES } else { Bool::NO }];
     let _: () = msg_send![s, setTarget: ui.ctl.get()];
     let _: () = msg_send![s, setAction: action];
     autorel(s)
 }
 
 /// Build the bar (hidden) at the bottom of `content_host`.
-pub(crate) unsafe fn build(content_host: *mut Object, b: NSRect) {
+pub(crate) unsafe fn build(content_host: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
     let w = b.size.w - SIDEBAR_W;
     let cls = *BAR_CLASS.get().unwrap();
-    let bar: *mut Object = msg_send![cls, alloc];
-    let bar: *mut Object = msg_send![bar, initWithFrame: rect(SIDEBAR_W, 0., w, NOW_BAR_H)];
+    let bar: *mut AnyObject = msg_send![cls, alloc];
+    let bar: *mut AnyObject = msg_send![bar, initWithFrame: rect(SIDEBAR_W, 0., w, NOW_BAR_H)];
     set_autoresize(bar, RESIZE_W | MARGIN_MAXY);
     set_hidden(bar, true);
     add_sub(content_host, bar);
@@ -133,9 +129,9 @@ pub(crate) unsafe fn build(content_host: *mut Object, b: NSRect) {
     let full = rect(0., 0., w, NOW_BAR_H);
 
     // tint wash behind the material
-    let wash: *mut Object = msg_send![class!(NSView), alloc];
-    let wash: *mut Object = autorel(msg_send![wash, initWithFrame: full]);
-    let _: () = msg_send![wash, setWantsLayer: YES];
+    let wash: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let wash: *mut AnyObject = autorel(msg_send![wash, initWithFrame: full]);
+    let _: () = msg_send![wash, setWantsLayer: Bool::YES];
     set_autoresize(wash, RESIZE_W | RESIZE_H);
     add_sub(bar, wash);
     let blur = vev(MAT_HEADER, BLEND_WITHIN);
@@ -147,20 +143,20 @@ pub(crate) unsafe fn build(content_host: *mut Object, b: NSRect) {
     add_sub(bar, hl);
 
     // artwork: a standalone layer (aspect fill, rounded) plus a placeholder glyph
-    let art: *mut Object = msg_send![class!(NSView), alloc];
-    let art: *mut Object = autorel(msg_send![art, initWithFrame: rect(SP4, (NOW_BAR_H - ART) / 2., ART, ART)]);
-    let _: () = msg_send![art, setWantsLayer: YES];
-    let al: *mut Object = msg_send![class!(CALayer), layer];
+    let art: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let art: *mut AnyObject = autorel(msg_send![art, initWithFrame: rect(SP4, (NOW_BAR_H - ART) / 2., ART, ART)]);
+    let _: () = msg_send![art, setWantsLayer: Bool::YES];
+    let al: *mut AnyObject = msg_send![class!(CALayer), layer];
     let _: () = msg_send![al, setFrame: rect(0., 0., ART, ART)];
     set_corner(al, R_THUMB);
-    let _: () = msg_send![al, setMasksToBounds: YES];
+    let _: () = msg_send![al, setMasksToBounds: Bool::YES];
     let _: () = msg_send![al, setContentsGravity: ns("resizeAspectFill")];
     let _: () = msg_send![al, setBackgroundColor: cg_white(0.10)];
     let root = layer_of(art);
     let _: () = msg_send![root, addSublayer: al];
     add_sub(bar, art);
-    let glyph: *mut Object = msg_send![class!(NSImageView), alloc];
-    let glyph: *mut Object = autorel(msg_send![glyph, initWithFrame: rect(10., 10., 28., 28.)]);
+    let glyph: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let glyph: *mut AnyObject = autorel(msg_send![glyph, initWithFrame: rect(10., 10., 28., 28.)]);
     let gi = symbol("music.note", 20., Weight::Medium);
     if !gi.is_null() {
         let _: () = msg_send![glyph, setImage: gi];
@@ -191,8 +187,8 @@ pub(crate) unsafe fn build(content_host: *mut Object, b: NSRect) {
     add_sub(bar, remain);
 
     // volume + close
-    let vi: *mut Object = msg_send![class!(NSImageView), alloc];
-    let vi: *mut Object = autorel(msg_send![vi, initWithFrame: rect(0., 0., 16., 16.)]);
+    let vi: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let vi: *mut AnyObject = autorel(msg_send![vi, initWithFrame: rect(0., 0., 16., 16.)]);
     let vimg = symbol("speaker.wave.2", 13., Weight::Medium);
     if !vimg.is_null() {
         let _: () = msg_send![vi, setImage: vimg];
@@ -224,8 +220,8 @@ pub(crate) unsafe fn build(content_host: *mut Object, b: NSRect) {
     relayout();
 }
 
-unsafe fn cg_white(alpha: f64) -> *mut Object {
-    let c: *mut Object = msg_send![class!(NSColor), colorWithWhite: 1.0f64 alpha: alpha];
+unsafe fn cg_white(alpha: f64) -> *mut CGColor {
+    let c: *mut AnyObject = msg_send![class!(NSColor), colorWithWhite: 1.0f64, alpha: alpha];
     msg_send![c, CGColor]
 }
 
@@ -302,9 +298,8 @@ unsafe fn set_fast(on: bool) {
     if !ui.timer.get().is_null() {
         let _: () = msg_send![ui.timer.get(), invalidate];
     }
-    let t: *mut Object = msg_send![class!(NSTimer),
-        scheduledTimerWithTimeInterval: if on { 0.25f64 } else { 1.0f64 } target: ui.ctl.get()
-        selector: sel!(jrTick:) userInfo: nil() repeats: YES];
+    let t: *mut AnyObject = msg_send![class!(NSTimer),
+        scheduledTimerWithTimeInterval: if on { 0.25f64 } else { 1.0f64 }, target: ui.ctl.get(), selector: sel!(jrTick:), userInfo: nil(), repeats: Bool::YES];
     ui.timer = Ptr(t);
 }
 
@@ -368,8 +363,8 @@ unsafe fn apply_art() {
     let img = key.and_then(|k| ui.poster_cache.get(&k).copied()).unwrap_or(nil());
     let (h, s, b) = key.and_then(|k| ui.tint_cache.get(&k).copied()).unwrap_or((0., 0., 0.20));
     tx_begin(M_STD);
-    let c: *mut Object = msg_send![class!(NSColor), colorWithHue: h saturation: s brightness: b alpha: 0.35f64];
-    let cgc: *mut Object = msg_send![c, CGColor];
+    let c: *mut AnyObject = msg_send![class!(NSColor), colorWithHue: h, saturation: s, brightness: b, alpha: 0.35f64];
+    let cgc: *mut CGColor = msg_send![c, CGColor];
     let wl = layer_of(ui.now.wash.get());
     let _: () = msg_send![wl, setBackgroundColor: cgc];
     let _: () = msg_send![ui.now.art_layer.get(), setContents: img];
@@ -421,7 +416,7 @@ pub(crate) unsafe fn update() {
 }
 
 // ---- actions --------------------------------------------------------------------------------------
-pub(crate) extern "C" fn restart(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn restart(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if ui.playing.is_none() {
@@ -432,13 +427,13 @@ pub(crate) extern "C" fn restart(_t: &mut Object, _c: Sel, _s: *mut Object) {
         update();
     }
 }
-pub(crate) extern "C" fn skip(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn skip(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         crate::platform::avkit::seek_by(10.0);
         update();
     }
 }
-pub(crate) extern "C" fn scrub(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn scrub(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let dur = match ui.playing.as_ref() {
@@ -453,14 +448,14 @@ pub(crate) extern "C" fn scrub(_t: &mut Object, _c: Sel, sender: *mut Object) {
         let _: () = msg_send![ui.player.get(), seekToTime: tm];
     }
 }
-pub(crate) extern "C" fn volume(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn volume(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let v: f64 = msg_send![sender, doubleValue];
         let v = v.clamp(0.0, 1.0);
         let _: () = msg_send![ui.player.get(), setVolume: v as f32];
         // Persist on mouse-up only (not on every drag event).
-        let ev: *mut Object = msg_send![ui.app.get(), currentEvent];
+        let ev: *mut AnyObject = msg_send![ui.app.get(), currentEvent];
         let ty: NSUInteger = if ev.is_null() { 2 } else { msg_send![ev, type] };
         if ty != 6 {
             ui.cfg.volume = v;

@@ -4,15 +4,12 @@
 //! plain views inside a flipped document view of an NSScrollView, rebuilt on
 //! every state change (result sets are small). All state lives in `Ui.seerr`.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::messages::*;
 use crate::platform::appkit::*;
 use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
 use crate::ui::theme::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -31,9 +28,9 @@ pub struct SeerrUi {
     pub empty_title: Ptr,
     pub empty_body: Ptr,
     /// Thumbnails in the current rows: (poster_path, art view, placeholder glyph).
-    pub thumbs: Vec<(String, *mut Object, *mut Object)>,
+    pub thumbs: Vec<(String, *mut AnyObject, *mut AnyObject)>,
     /// Decoded poster images by poster_path (owned, +1).
-    pub images: HashMap<String, *mut Object>,
+    pub images: HashMap<String, *mut AnyObject>,
     pub requests_mode: bool,
     pub results: Vec<SeerrResult>,
     pub results_loaded: bool,
@@ -42,7 +39,7 @@ pub struct SeerrUi {
     /// (media_type, tmdb_id, title) of requests sent and not yet answered.
     pub inflight: Vec<(String, u64, String)>,
     /// Row views currently inside `doc` (the superview owns them).
-    pub rows: Vec<*mut Object>,
+    pub rows: Vec<*mut AnyObject>,
     // Settings sheet widgets
     pub s_on: Ptr,
     pub s_url: Ptr,
@@ -209,44 +206,44 @@ fn clip(s: &str, n: usize) -> String {
 
 // ---- Classes ----------------------------------------------------------------
 
-extern "C" fn yes(_t: &mut Object, _c: Sel) -> BOOL {
-    YES
+extern "C" fn yes(_t: *mut AnyObject, _c: Sel) -> Bool {
+    Bool::YES
 }
 
 /// Hover: the row's background box is transparent unless the pointer is inside.
-fn row_hover(this: &mut Object, on: bool) {
+fn row_hover(this: *mut AnyObject, on: bool) {
     unsafe {
-        let bg = *this.get_ivar::<*mut c_void>("jrBg") as *mut Object;
+        let bg = *ivar_ptr::<*mut c_void>(&*this, c"jrBg") as *mut AnyObject;
         if !bg.is_null() {
-            let _: () = msg_send![bg, setTransparent: (!on) as BOOL];
+            let _: () = msg_send![bg, setTransparent: Bool::new(!on)];
         }
     }
 }
-extern "C" fn row_enter(this: &mut Object, _c: Sel, _e: *mut Object) {
+extern "C" fn row_enter(this: *mut AnyObject, _c: Sel, _e: *mut AnyObject) {
     row_hover(this, true);
 }
-extern "C" fn row_exit(this: &mut Object, _c: Sel, _e: *mut Object) {
+extern "C" fn row_exit(this: *mut AnyObject, _c: Sel, _e: *mut AnyObject) {
     row_hover(this, false);
 }
 
 pub(crate) unsafe fn register_seerr_classes() {
-    let mut d = ClassDecl::new("JRFlipView", class!(NSView)).unwrap();
-    d.add_method(sel!(isFlipped), yes as extern "C" fn(&mut Object, Sel) -> BOOL);
+    let mut d = ClassBuilder::new(c"JRFlipView", class!(NSView)).unwrap();
+    d.add_method(sel!(isFlipped), yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
     d.register();
-    let mut r = ClassDecl::new("JRSeerrRow", class!(NSView)).unwrap();
-    r.add_ivar::<*mut c_void>("jrBg");
-    r.add_method(sel!(isFlipped), yes as extern "C" fn(&mut Object, Sel) -> BOOL);
-    r.add_method(sel!(mouseEntered:), row_enter as extern "C" fn(&mut Object, Sel, *mut Object));
-    r.add_method(sel!(mouseExited:), row_exit as extern "C" fn(&mut Object, Sel, *mut Object));
+    let mut r = ClassBuilder::new(c"JRSeerrRow", class!(NSView)).unwrap();
+    r.add_ivar::<*mut c_void>(c"jrBg");
+    r.add_method(sel!(isFlipped), yes as extern "C" fn(*mut AnyObject, Sel) -> Bool);
+    r.add_method(sel!(mouseEntered:), row_enter as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    r.add_method(sel!(mouseExited:), row_exit as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
     r.register();
 }
 
-unsafe fn class_view(name: &[u8], frame: NSRect) -> *mut Object {
-    let cls = objc::runtime::objc_getClass(name.as_ptr() as *const std::os::raw::c_char);
-    let v: *mut Object = msg_send![cls as *mut Object, alloc];
+unsafe fn class_view(name: &[u8], frame: NSRect) -> *mut AnyObject {
+    let cls = AnyClass::get(std::ffi::CStr::from_bytes_with_nul(name).expect("NUL-terminated class name")).expect("class registered");
+    let v: *mut AnyObject = msg_send![cls, alloc];
     msg_send![v, initWithFrame: frame] // +1; caller autorels after add
 }
-unsafe fn flip_view(frame: NSRect) -> *mut Object {
+unsafe fn flip_view(frame: NSRect) -> *mut AnyObject {
     class_view(b"JRFlipView\0", frame)
 }
 
@@ -255,28 +252,28 @@ unsafe fn flip_view(frame: NSRect) -> *mut Object {
 const STATE_W: f64 = 360.;
 
 pub struct StateParts {
-    pub host: *mut Object,
-    pub icon: *mut Object,
-    pub title: *mut Object,
-    pub body: *mut Object,
-    pub btn: *mut Object,
+    pub host: *mut AnyObject,
+    pub icon: *mut AnyObject,
+    pub title: *mut AnyObject,
+    pub body: *mut AnyObject,
+    pub btn: *mut AnyObject,
 }
 
 /// Symbol, title, body (and optionally a button) stacked and centred in `frame`.
 unsafe fn make_state(frame: NSRect, with_btn: bool) -> StateParts {
     let ui = UI.get_mut().unwrap();
-    let host: *mut Object = msg_send![class!(NSView), alloc];
-    let host: *mut Object = msg_send![host, initWithFrame: frame];
+    let host: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let host: *mut AnyObject = msg_send![host, initWithFrame: frame];
     set_autoresize(host, RESIZE_W | RESIZE_H);
     let ih = 40. + SP3 + 28. + SP2 + 36. + if with_btn { SP4 + 28. } else { 0. };
-    let inner: *mut Object = autorel(msg_send![class!(NSView), alloc]);
-    let inner: *mut Object = msg_send![inner, initWithFrame: rect(
+    let inner: *mut AnyObject = autorel(msg_send![class!(NSView), alloc]);
+    let inner: *mut AnyObject = msg_send![inner, initWithFrame: rect(
         ((frame.size.w - STATE_W) / 2.).floor(), ((frame.size.h - ih) / 2.).floor(), STATE_W, ih)];
     set_autoresize(inner, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
     add_sub(host, inner);
     let mut y = ih - 40.;
-    let icon: *mut Object = msg_send![class!(NSImageView), alloc];
-    let icon: *mut Object = autorel(msg_send![icon, initWithFrame: rect((STATE_W - 40.) / 2., y, 40., 40.)]);
+    let icon: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let icon: *mut AnyObject = autorel(msg_send![icon, initWithFrame: rect((STATE_W - 40.) / 2., y, 40., 40.)]);
     let _: () = msg_send![icon, setContentTintColor: color(C_TEXT3)];
     add_sub(inner, icon);
     y -= SP3 + 28.;
@@ -290,8 +287,7 @@ unsafe fn make_state(frame: NSRect, with_btn: bool) -> StateParts {
     let mut btn = std::ptr::null_mut();
     if with_btn {
         y -= SP4 + 28.;
-        btn = msg_send![class!(NSButton), buttonWithTitle: ns("Open Settings…")
-            target: ui.ctl.get() action: sel!(showSettings:)];
+        btn = msg_send![class!(NSButton), buttonWithTitle: ns("Open Settings…"), target: ui.ctl.get(), action: sel!(showSettings:)];
         set_frame(btn, rect((STATE_W - 140.) / 2., y, 140., 28.));
         add_sub(inner, btn);
     }
@@ -321,17 +317,16 @@ const STATUS_H: f64 = 16.0;
 
 unsafe fn build_window() {
     let ui = UI.get_mut().unwrap();
-    let w: *mut Object = msg_send![jr_window_class(), alloc];
-    let w: *mut Object = msg_send![w,
-        initWithContentRect: rect(0., 0., 680., 680.)
-        styleMask: (1 | 2 | 8 | (1 << 15)) as NSUInteger backing: 2usize defer: NO];
+    let w: *mut AnyObject = msg_send![jr_window_class(), alloc];
+    let w: *mut AnyObject = msg_send![w,
+        initWithContentRect: rect(0., 0., 680., 680.), styleMask: (1 | 2 | 8 | (1 << 15)) as NSUInteger, backing: 2usize, defer: Bool::NO];
     let _: () = msg_send![w, setTitle: ns("Request Movies & Shows")];
-    let _: () = msg_send![w, setTitlebarAppearsTransparent: YES];
+    let _: () = msg_send![w, setTitlebarAppearsTransparent: Bool::YES];
     let _: () = msg_send![w, setTitleVisibility: 1isize];
-    let _: () = msg_send![w, setReleasedWhenClosed: NO];
+    let _: () = msg_send![w, setReleasedWhenClosed: Bool::NO];
     let _: () = msg_send![w, setMinSize: size(520., 420.)];
     place_window(w);
-    let c: *mut Object = msg_send![w, contentView];
+    let c: *mut AnyObject = msg_send![w, contentView];
     let b = bounds_of(c);
     let hdr_w = b.size.w - 2. * SP6;
 
@@ -342,13 +337,12 @@ unsafe fn build_window() {
 
     // Header, measured from the top below the reserved title band.
     let mut top = TITLEBAR_H;
-    let labels: *mut Object = msg_send![class!(NSMutableArray), array];
+    let labels: *mut AnyObject = msg_send![class!(NSMutableArray), array];
     for t in ["Search", "My Requests"] {
         let _: () = msg_send![labels, addObject: ns(t)];
     }
-    let tabs: *mut Object = msg_send![class!(NSSegmentedControl),
-        segmentedControlWithLabels: labels trackingMode: 0i64
-        target: ui.ctl.get() action: sel!(seerrTab:)];
+    let tabs: *mut AnyObject = msg_send![class!(NSSegmentedControl),
+        segmentedControlWithLabels: labels, trackingMode: 0i64, target: ui.ctl.get(), action: sel!(seerrTab:)];
     let _: () = msg_send![tabs, setControlSize: 3isize];
     let _: () = msg_send![tabs, setSelectedSegment: 0isize];
     let tw = 240.;
@@ -357,12 +351,12 @@ unsafe fn build_window() {
     add_sub(c, tabs);
     top += SEG_H + SP3;
 
-    let sf: *mut Object = msg_send![class!(NSSearchField), alloc];
-    let sf: *mut Object = msg_send![sf, initWithFrame: rect(SP6, b.size.h - top - FIELD_H, hdr_w, FIELD_H)];
+    let sf: *mut AnyObject = msg_send![class!(NSSearchField), alloc];
+    let sf: *mut AnyObject = msg_send![sf, initWithFrame: rect(SP6, b.size.h - top - FIELD_H, hdr_w, FIELD_H)];
     let _: () = msg_send![sf, setControlSize: 3isize];
     let _: () = msg_send![sf.cell(), setPlaceholderString: ns("Search movies and shows")];
     let _: () = msg_send![sf, setDelegate: ui.ctl.get()]; // controlTextDidChange: -> SeerrSearch
-    let _: () = msg_send![sf, setSendsWholeSearchString: NO];
+    let _: () = msg_send![sf, setSendsWholeSearchString: Bool::NO];
     set_autoresize(sf, RESIZE_W | MARGIN_MINY);
     add_sub(c, sf);
     autorel(sf);
@@ -374,10 +368,10 @@ unsafe fn build_window() {
     add_sub(c, st);
     top += STATUS_H + SP2;
 
-    let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: rect(0., 0., b.size.w, b.size.h - top)];
-    let _: () = msg_send![sc, setHasVerticalScroller: YES];
-    let _: () = msg_send![sc, setDrawsBackground: NO];
+    let sc: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+    let sc: *mut AnyObject = msg_send![sc, initWithFrame: rect(0., 0., b.size.w, b.size.h - top)];
+    let _: () = msg_send![sc, setHasVerticalScroller: Bool::YES];
+    let _: () = msg_send![sc, setDrawsBackground: Bool::NO];
     let _: () = msg_send![sc, setBorderType: 0usize];
     set_autoresize(sc, RESIZE_W | RESIZE_H);
     let doc = flip_view(rect(0., 0., b.size.w, 10.));
@@ -451,13 +445,13 @@ pub fn open_window() {
         let w = ui.seerr.win.get();
         let _: () = msg_send![w, makeKeyAndOrderFront: nil()];
         if is_configured(&ui.cfg.settings) {
-            let _: BOOL = msg_send![w, makeFirstResponder: ui.seerr.search.get()];
+            let _: Bool = msg_send![w, makeFirstResponder: ui.seerr.search.get()];
         }
     }
 }
 
 /// Sidebar "Requests" (unified layout): the Seerr window on its "My requests" tab.
-pub(crate) extern "C" fn open_requests(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn open_requests(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     open_window();
     unsafe { select_mode(true) }
 }
@@ -474,7 +468,7 @@ pub(crate) unsafe fn set_status(msg: &str, err: bool) {
 // ---- Rows -------------------------------------------------------------------
 
 /// (text colour, fill) for a pill role; fill is the role colour at 16% alpha.
-unsafe fn pill_colors(role: &str) -> (Col, *mut Object) {
+unsafe fn pill_colors(role: &str) -> (Col, *mut AnyObject) {
     let base = match role {
         "ok" => C_OK,
         "warn" => C_WARN,
@@ -485,49 +479,49 @@ unsafe fn pill_colors(role: &str) -> (Col, *mut Object) {
 }
 
 /// Rounded status pill (NSBox, radius 10) with its caption; returns (box, width).
-unsafe fn make_pill(text: &str, role: &str) -> (*mut Object, f64) {
+unsafe fn make_pill(text: &str, role: &str) -> (*mut AnyObject, f64) {
     let (tc, fill) = pill_colors(role);
     let l = label(text, T_CAPTION_EM, tc, ALIGN_CENTER);
-    let cell: *mut Object = msg_send![l, cell];
+    let cell: *mut AnyObject = msg_send![l, cell];
     let sz: NSSize = msg_send![cell, cellSize];
     let w = (sz.w.ceil() + 2. * SP2 + 2.).min(PILL_MAX_W);
     let b = surface(rect(0., 0., w, PILL_H), C_FILL_SEL, PILL_H / 2.);
     let _: () = msg_send![b, setFillColor: fill];
-    let cv: *mut Object = msg_send![b, contentView];
+    let cv: *mut AnyObject = msg_send![b, contentView];
     set_frame(l, rect(SP2, 3., w - 2. * SP2, 14.));
     add_sub(cv, l);
     (b, w)
 }
 
-unsafe fn make_spinner(frame: NSRect) -> *mut Object {
-    let sp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
-    let sp: *mut Object = autorel(msg_send![sp, initWithFrame: frame]);
+unsafe fn make_spinner(frame: NSRect) -> *mut AnyObject {
+    let sp: *mut AnyObject = msg_send![class!(NSProgressIndicator), alloc];
+    let sp: *mut AnyObject = autorel(msg_send![sp, initWithFrame: frame]);
     let _: () = msg_send![sp, setStyle: 1usize]; // spinning
     let _: () = msg_send![sp, setControlSize: 1usize];
-    let _: () = msg_send![sp, setIndeterminate: YES];
+    let _: () = msg_send![sp, setIndeterminate: Bool::YES];
     let _: () = msg_send![sp, startAnimation: nil()];
     sp
 }
 
 /// Placeholder (fill + glyph) with the poster layer on top; registers the thumb for later images.
-unsafe fn make_thumb(row: *mut Object, spec: &RowSpec) {
+unsafe fn make_thumb(row: *mut AnyObject, spec: &RowSpec) {
     let ui = UI.get_mut().unwrap();
     let f = rect(SP6, (ROW_H - THUMB_H) / 2., THUMB_W, THUMB_H);
     let ph = surface(f, C_FILL_SEL, R_THUMB);
     add_sub(row, ph);
-    let glyph: *mut Object = msg_send![class!(NSImageView), alloc];
-    let glyph: *mut Object = autorel(msg_send![glyph, initWithFrame: rect(f.origin.x + 10., f.origin.y + 20., 20., 20.)]);
+    let glyph: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let glyph: *mut AnyObject = autorel(msg_send![glyph, initWithFrame: rect(f.origin.x + 10., f.origin.y + 20., 20., 20.)]);
     let img = symbol(spec.glyph, 16., Weight::Regular);
     if !img.is_null() {
         let _: () = msg_send![glyph, setImage: img];
     }
     let _: () = msg_send![glyph, setContentTintColor: color(C_TEXT3)];
     add_sub(row, glyph);
-    let art: *mut Object = msg_send![class!(NSView), alloc];
-    let art: *mut Object = autorel(msg_send![art, initWithFrame: f]);
+    let art: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let art: *mut AnyObject = autorel(msg_send![art, initWithFrame: f]);
     let layer = layer_of(art);
     set_corner(layer, R_THUMB);
-    let _: () = msg_send![layer, setMasksToBounds: YES];
+    let _: () = msg_send![layer, setMasksToBounds: Bool::YES];
     let _: () = msg_send![layer, setContentsGravity: ns("resizeAspectFill")];
     add_sub(row, art);
     if let Some(p) = &spec.poster {
@@ -537,7 +531,7 @@ unsafe fn make_thumb(row: *mut Object, spec: &RowSpec) {
         }
     }
 }
-unsafe fn apply_thumb(art: *mut Object, glyph: *mut Object, img: *mut Object, animate: bool) {
+unsafe fn apply_thumb(art: *mut AnyObject, glyph: *mut AnyObject, img: *mut AnyObject, animate: bool) {
     let cg = cg_image(img);
     if cg.is_null() {
         return;
@@ -547,27 +541,26 @@ unsafe fn apply_thumb(art: *mut Object, glyph: *mut Object, img: *mut Object, an
     } else {
         tx_begin_instant();
     }
-    let layer: *mut Object = msg_send![art, layer];
-    let _: () = msg_send![layer, setContents: cg];
+    let layer: *mut AnyObject = msg_send![art, layer];
+    let _: () = msg_send![layer, setContents: cg as *mut AnyObject];
     tx_end();
     set_hidden(glyph, true);
 }
 
-unsafe fn make_row(i: usize, spec: &RowSpec, width: f64, requesting: bool) -> *mut Object {
+unsafe fn make_row(i: usize, spec: &RowSpec, width: f64, requesting: bool) -> *mut AnyObject {
     let ui = UI.get_mut().unwrap();
     let row = class_view(b"JRSeerrRow\0", rect(0., i as f64 * ROW_H, width, ROW_H));
     set_autoresize(row, RESIZE_W);
 
     // Hover background (transparent until the pointer is inside).
     let bg = surface(rect(SP3, 0., width - 2. * SP3, ROW_H), C_FILL_HOVER, R_ROW);
-    let _: () = msg_send![bg, setTransparent: YES];
+    let _: () = msg_send![bg, setTransparent: Bool::YES];
     set_autoresize(bg, RESIZE_W);
     add_sub(row, bg);
-    (*row).set_ivar::<*mut c_void>("jrBg", bg as *mut c_void);
-    let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
-    let ta: *mut Object = msg_send![ta,
-        initWithRect: rect(0., 0., width, ROW_H)
-        options: (0x01usize | 0x80usize | 0x200usize) owner: row userInfo: nil()];
+    *ivar_ptr::<*mut c_void>(&*row, c"jrBg") = bg as *mut c_void;
+    let ta: *mut AnyObject = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut AnyObject = msg_send![ta,
+        initWithRect: rect(0., 0., width, ROW_H), options: (0x01usize | 0x80usize | 0x200usize), owner: row, userInfo: nil()];
     let _: () = msg_send![row, addTrackingArea: ta];
     autorel(ta);
 
@@ -585,9 +578,8 @@ unsafe fn make_row(i: usize, spec: &RowSpec, width: f64, requesting: bool) -> *m
     }
     if spec.can_request {
         let bx = left - BTN_W;
-        let btn: *mut Object = msg_send![class!(NSButton),
-            buttonWithTitle: ns(if requesting { "Requesting…" } else { "Request" })
-            target: ui.ctl.get() action: sel!(seerrRequest:)];
+        let btn: *mut AnyObject = msg_send![class!(NSButton),
+            buttonWithTitle: ns(if requesting { "Requesting…" } else { "Request" }), target: ui.ctl.get(), action: sel!(seerrRequest:)];
         let _: () = msg_send![btn, setBezelStyle: 1isize];
         let _: () = msg_send![btn, setControlSize: 1isize];
         let plus = symbol("plus", 11., Weight::Medium);
@@ -596,7 +588,7 @@ unsafe fn make_row(i: usize, spec: &RowSpec, width: f64, requesting: bool) -> *m
             let _: () = msg_send![btn, setImagePosition: 7isize]; // leading
         }
         let _: () = msg_send![btn, setTag: i as NSInteger];
-        let _: () = msg_send![btn, setEnabled: (!requesting) as BOOL];
+        let _: () = msg_send![btn, setEnabled: Bool::new(!requesting)];
         set_frame(btn, rect(bx, (ROW_H - 22.) / 2., BTN_W, 22.));
         set_autoresize(btn, MARGIN_MINX);
         add_sub(row, btn);
@@ -680,13 +672,13 @@ pub(crate) fn on_poster(path: String, bytes: &[u8]) {
             Some(u) => u,
             None => return,
         };
-        let data: *mut Object = msg_send![class!(NSData),
-            dataWithBytes: bytes.as_ptr() length: bytes.len() as NSUInteger];
+        let data: *mut AnyObject = msg_send![class!(NSData),
+            dataWithBytes: bytes.as_ptr() as *const std::ffi::c_void, length: bytes.len() as NSUInteger];
         if data.is_null() {
             return;
         }
-        let img: *mut Object = msg_send![class!(NSImage), alloc];
-        let img: *mut Object = msg_send![img, initWithData: data];
+        let img: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let img: *mut AnyObject = msg_send![img, initWithData: data];
         if img.is_null() {
             return; // undecodable: the placeholder stays
         }
@@ -709,18 +701,18 @@ pub(crate) fn on_poster(path: String, bytes: &[u8]) {
 pub(crate) unsafe fn thumb_has_image(path: &str) -> Option<bool> {
     let ui = UI.get().unwrap();
     let (_, art, _) = ui.seerr.thumbs.iter().find(|(p, _, _)| p == path)?;
-    let layer: *mut Object = msg_send![*art, layer];
-    let c: *mut Object = msg_send![layer, contents];
+    let layer: *mut AnyObject = msg_send![*art, layer];
+    let c: *mut AnyObject = msg_send![layer, contents];
     Some(!c.is_null())
 }
 
 // ---- Actions ----------------------------------------------------------------
 
-pub(crate) extern "C" fn open_seerr(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn open_seerr(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     open_window();
 }
 
-pub(crate) extern "C" fn seerr_tab(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn seerr_tab(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let seg: NSInteger = msg_send![sender, selectedSegment];
         select_mode(seg == 1);
@@ -762,7 +754,7 @@ pub(crate) unsafe fn search_changed() {
     rebuild();
 }
 
-pub(crate) extern "C" fn seerr_request(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn seerr_request(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
@@ -775,9 +767,9 @@ pub(crate) extern "C" fn seerr_request(_t: &mut Object, _c: Sel, sender: *mut Ob
         }
         ui.seerr.inflight.push((r.media_type.clone(), r.tmdb_id, r.title.clone()));
         // Update the clicked button in place (never remove a control from inside its own action).
-        let _: () = msg_send![sender, setEnabled: NO];
+        let _: () = msg_send![sender, setEnabled: Bool::NO];
         let _: () = msg_send![sender, setTitle: ns("Requesting…")];
-        let row: *mut Object = msg_send![sender, superview];
+        let row: *mut AnyObject = msg_send![sender, superview];
         let bf = frame_of(sender);
         if !row.is_null() {
             let sp = make_spinner(rect(bf.origin.x - SP2 - SPIN, bf.origin.y + (bf.size.h - SPIN) / 2., SPIN, SPIN));
@@ -862,7 +854,7 @@ pub(crate) unsafe fn apply_mode() {
     }
 }
 
-pub(crate) extern "C" fn seerr_mode_changed(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn seerr_mode_changed(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { apply_mode() }
 }
 
