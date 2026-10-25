@@ -219,6 +219,9 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(state, sbtn);
     ui.state_btn = Ptr(sbtn);
 
+    // --- Now-playing bar (audio), on top of the library ---
+    crate::ui::nowbar::build(content_host, b);
+
     // --- Player host (AVKit) + chrome ---
     let pcls = *crate::ui::player::PLAYER_HOST_CLASS.get().unwrap();
     let ph: *mut Object = msg_send![pcls, alloc];

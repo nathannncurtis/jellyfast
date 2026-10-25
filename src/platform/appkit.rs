@@ -360,6 +360,8 @@ pub struct Ui {
     pub selected_view: Option<usize>,
     pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
+    pub now: crate::ui::nowbar::NowBar,
+    pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
 unsafe impl Send for Ui {}
 // SAFETY: raw pointers above are dereferenced only on the main thread.
@@ -496,6 +498,10 @@ pub(crate) unsafe fn register_classes() {
             (sel!(jrBackdropOff:), crate::ui::player::backdrop_off as Extern0),
             (sel!(togglePlaybackInfo:), crate::ui::player::toggle_info as Extern0),
             (sel!(jrRetry:), retry_now as Extern0),
+            (sel!(jrNowRestart:), crate::ui::nowbar::restart as Extern0),
+            (sel!(jrNowSkip:), crate::ui::nowbar::skip as Extern0),
+            (sel!(jrNowScrub:), crate::ui::nowbar::scrub as Extern0),
+            (sel!(jrNowVolume:), crate::ui::nowbar::volume as Extern0),
         ] {
             d.add_method(s, f);
         }
@@ -507,6 +513,7 @@ pub(crate) unsafe fn register_classes() {
     register_sidebar_row();
     register_header_class();
     crate::ui::player::register_player_classes();
+    crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
     {
         let mut d = ClassDecl::new("JRGridView", class!(NSView)).unwrap();
@@ -1110,6 +1117,8 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         selected_view: None,
         side_dyn: vec![],
         cur_title: String::new(),
+        now: crate::ui::nowbar::NowBar::new(),
+        tint_cache: HashMap::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
     let _ = UI.set(ui);
