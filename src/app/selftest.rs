@@ -149,7 +149,9 @@ fn steps() -> Vec<Step> {
         ("settings: open+cancel", s_settings_cancel, 600),
         ("settings: open+save", s_settings_save, 600),
         ("playback: start", s_play_start, 2500),
-        ("playback: chrome", s_play_chrome, 100),
+        // The start-up fade-in of the bars runs for M_FAST (0.12 s) and alphaValue reads
+        // mid-animation, so the delay after the chrome step must clear it before the bar checks.
+        ("playback: chrome", s_play_chrome, 400),
         ("player bar: layout + audit", s_player_bar, 100),
         ("player bar: buttons, menus, hover", s_player_bar_buttons, 300),
         ("player bar: auto-hide arm (4 s idle)", s_pb_hide_arm, 4000),
