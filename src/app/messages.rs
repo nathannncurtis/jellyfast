@@ -1,5 +1,6 @@
 use crate::config::{Config, LayoutMode};
 use crate::jellyfin::models::ListItem;
+use crate::jellyfin::segments::{NextUp, Segment};
 use crate::seerr::models::{SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
 use serde::{Deserialize, Serialize};
@@ -240,6 +241,13 @@ pub struct PlaybackStart {
     pub episode_number: Option<u32>,
     /// Movies: production year (`ProductionYear`).
     pub production_year: Option<u32>,
+    /// Skip-button ranges (intro, recap, preview, outro, commercial). Empty when the
+    /// server has none or the lookup failed.
+    pub segments: Vec<Segment>,
+    /// Episodes: the show's id, which keys the per-show "skip intros" setting.
+    pub series_id: Option<String>,
+    /// Episodes: the next episode in series order, when there is one.
+    pub next_up: Option<NextUp>,
 }
 
 impl PlaybackStart {
@@ -327,7 +335,7 @@ pub struct DetailPerson {
     pub image_key: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub theme: String, // "system" | "light" | "dark"
@@ -350,6 +358,32 @@ pub struct Settings {
     /// Show the playback-info panel (time, resolution, bitrate, method) over the video.
     #[serde(default)]
     pub show_stats: bool,
+    /// Play the next episode of a show when this one ends (Up Next countdown).
+    #[serde(default = "default_true")]
+    pub autoplay_next: bool,
+    /// Skip intros automatically for shows with no setting of their own.
+    #[serde(default)]
+    pub skip_intros_default: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            theme: String::new(),
+            max_bitrate_kbps: 0,
+            subtitle_lang: default_sub_lang(),
+            audio_lang: String::new(),
+            seerr_enabled: false,
+            seerr_url: String::new(),
+            seerr_username: String::new(),
+            show_stats: false,
+            autoplay_next: true,
+            skip_intros_default: false,
+        }
+    }
+}
+fn default_true() -> bool {
+    true
 }
 fn default_sub_lang() -> String {
     String::new()
@@ -365,6 +399,17 @@ mod tests {
         assert_eq!((s.theme.as_str(), s.max_bitrate_kbps, s.subtitle_lang.as_str()), ("", 0, ""));
         let s: Settings = serde_json::from_str(r#"{"theme":"dark","max_bitrate_kbps":5000,"extra":1}"#).unwrap();
         assert_eq!((s.theme.as_str(), s.max_bitrate_kbps), ("dark", 5000));
+    }
+
+    #[test]
+    fn autoplay_defaults_on_and_skip_default_off() {
+        assert!(Settings::default().autoplay_next);
+        assert!(!Settings::default().skip_intros_default);
+        // Old config files have neither key: autoplay stays on, skip stays off.
+        let s: Settings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert!(s.autoplay_next && !s.skip_intros_default);
+        let s: Settings = serde_json::from_str(r#"{"autoplay_next":false,"skip_intros_default":true}"#).unwrap();
+        assert!(!s.autoplay_next && s.skip_intros_default);
     }
 
     #[test]
@@ -393,6 +438,9 @@ mod tests {
             season_number: season,
             episode_number: episode,
             production_year: year,
+            segments: Vec::new(),
+            series_id: None,
+            next_up: None,
         }
     }
 

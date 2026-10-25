@@ -109,6 +109,18 @@ pub(crate) unsafe fn build_settings_window() {
     row(&mut place, &mut top, "Audio language", audio_f, 24., 160.);
     help(&mut place, &mut top, "Leave empty to use the file's default.");
     ui.s_audio_lang = Ptr(audio_f);
+    top += SP3;
+    let ap: *mut Object = msg_send![class!(NSButton), checkboxWithTitle: ns("Autoplay next episode") target: nil() action: nil()];
+    put(&mut place, ap, CTRL_X, top + (ROW_H - 18.) / 2., CTRL_W, 18.);
+    top += ROW_H;
+    ui.s_autoplay = Ptr(ap);
+    help(&mut place, &mut top, "Plays the next episode of a show when this one ends, after an Up Next countdown.");
+    top += SP3;
+    let sk: *mut Object = msg_send![class!(NSButton), checkboxWithTitle: ns("Skip intros by default") target: nil() action: nil()];
+    put(&mut place, sk, CTRL_X, top + (ROW_H - 18.) / 2., CTRL_W, 18.);
+    top += ROW_H;
+    ui.s_skip_default = Ptr(sk);
+    help(&mut place, &mut top, "Applies to shows without their own setting, which is changed on the show's page or with the Skip Intro button.");
 
     section(&mut place, &mut top, "Appearance", false);
     let th = popup(&["System", "Light", "Dark"]);
@@ -229,6 +241,8 @@ pub(crate) unsafe fn settings_fill(cfg: &Config) {
         _ => 5,
     };
     let _: () = msg_send![ui.s_quality.get(), selectItemAtIndex: q_idx as NSInteger];
+    let _: () = msg_send![ui.s_autoplay.get(), setState: cfg.settings.autoplay_next as NSInteger];
+    let _: () = msg_send![ui.s_skip_default.get(), setState: cfg.settings.skip_intros_default as NSInteger];
     let t_idx = match cfg.settings.theme.as_str() {
         "light" => 1usize,
         "dark" => 2,

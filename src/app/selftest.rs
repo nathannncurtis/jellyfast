@@ -16,6 +16,7 @@ use crate::platform::appkit::*;
 use crate::platform::avkit::*;
 use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
+use crate::jellyfin::segments::{NextUp, Segment, SegmentKind};
 use std::sync::Mutex;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use crate::ui::library::poster_key;
@@ -240,6 +241,28 @@ fn steps() -> Vec<Step> {
         ("playback: server down/up/error", s_play_net, 500),
         ("playback: replace item", s_play_start, 1500),
         ("playback: stop", s_play_stop, 200),
+        ("skip: intro button inside a segment", s_skip_show, 700),
+        ("skip: button shown, audit (intro)", s_skip_audit, 50),
+        ("skip: clicking seeks to the segment end", s_skip_click, 800),
+        ("skip: click landed at the segment end", s_skip_click_check, 100),
+        ("skip: S key, intro start", s_skip_key_start, 700),
+        ("skip: S key seeks past the intro", s_skip_key, 900),
+        ("skip: S key landed past the intro", s_skip_key_check, 100),
+        ("skip: per-show auto-skip, start", s_skip_series_start, 700),
+        ("skip: per-show auto-skip toggles and persists", s_skip_series_on, 800),
+        ("skip: auto-skip on the next intro of that show", s_skip_series_auto, 800),
+        ("skip: per-show auto-skip off again", s_skip_series_off, 100),
+        ("up next: card near the end", s_upnext_card, 5000),
+        ("up next: card audit and Play Now", s_upnext_play, 300),
+        ("up next: next episode, title updated", s_upnext_next, 300),
+        ("up next: cancel keeps the episode alone", s_upnext_cancel, 5000),
+        ("up next: cancel, then the end stops", s_upnext_cancel_check, 2200),
+        ("up next: cancel end check", s_upnext_cancel_end, 100),
+        ("up next: countdown to the end starts next", s_upnext_end, 6800),
+        ("up next: end started next episode", s_upnext_end_check, 300),
+        ("up next: stop after autoplay", s_upnext_stop, 200),
+        ("settings: autoplay and skip default controls", s_settings_skip_controls, 100),
+        ("detail: series skip toggle persists", s_detail_skip_toggle, 300),
         ("audio: start (now-playing bar)", s_audio_start, 1500),
         ("audio: bar layout + audit", s_audio_bar, 100),
         ("audio: stop", s_audio_stop, 200),
@@ -347,7 +370,10 @@ fn playback(resume: f64, run: f64) -> MainMsg {
         season_number: None,
         episode_number: None,
         production_year: None,
-    })
+    segments: Vec::new(),
+    series_id: None,
+    next_up: None,
+})
 }
 fn state_check(what: &str, ok: bool) {
     log(&format!("  check {}: {}", what, if ok { "ok" } else { "FAILED" }));
@@ -1997,7 +2023,10 @@ fn s_audit_player() {
         season_number: None,
         episode_number: None,
         production_year: None,
-    }));
+    segments: Vec::new(),
+    series_id: None,
+    next_up: None,
+}));
     unsafe {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.show_stats = true;
@@ -2200,7 +2229,10 @@ fn s_player_header() {
         season_number: Some(12),
         episode_number: Some(105),
         production_year: Some(2001),
-    }));
+    segments: Vec::new(),
+    series_id: None,
+    next_up: None,
+}));
     unsafe {
         let ui = UI.get_mut().unwrap();
         let t = read_field(ui.top_title.get());
@@ -2226,7 +2258,10 @@ fn s_player_header() {
         season_number: None,
         episode_number: None,
         production_year: Some(1999),
-    }));
+    segments: Vec::new(),
+    series_id: None,
+    next_up: None,
+}));
     unsafe {
         let ui = UI.get_mut().unwrap();
         state_check("movie header: title", read_field(ui.top_title.get()) == "Fake Movie");
@@ -2274,7 +2309,10 @@ fn audio_start(title: &str, artist: &str) -> MainMsg {
         season_number: None,
         episode_number: None,
         production_year: None,
-    })
+    segments: Vec::new(),
+    series_id: None,
+    next_up: None,
+})
 }
 fn s_audio_start() {
     // Colourful artwork so the tint wash is a real colour.
@@ -2366,6 +2404,226 @@ fn s_fullscreen() {
         });
     });
 }
+// ---- skip buttons, Up Next and autoplay -------------------------------------------------------
+fn playback_ext(item: &str, title: &str, resume: f64, run: f64, segs: Vec<Segment>, series: Option<&str>, next: Option<NextUp>) -> MainMsg {
+    MainMsg::PlaybackReady(PlaybackStart {
+        url: video_url(),
+        item_id: item.into(),
+        title: title.into(),
+        subtitle: None,
+        resume_secs: resume,
+        method: PlaybackMethod::DirectPlay,
+        run_time_secs: run,
+        image_key: None,
+        media_kind: MediaKind::Video,
+        series_name: series.map(|_| "Mock Show".to_string()),
+        season_number: series.map(|_| 1),
+        episode_number: series.map(|_| 2),
+        // Movies carry a year, as real ones do; the header then always has a subtitle line.
+        production_year: if series.is_none() { Some(2024) } else { None },
+        segments: segs,
+        series_id: series.map(str::to_string),
+        next_up: next,
+    })
+}
+/// Intro from the start to `end` seconds (the 6 s self-test clip).
+fn intro_to(end: f64) -> Vec<Segment> {
+    vec![Segment { kind: SegmentKind::Intro, start: 0.0, end }]
+}
+fn mock_next() -> NextUp {
+    NextUp { id: "ep-next".into(), name: "The Next One".into(), season: Some(1), number: Some(3), image_key: None }
+}
+fn in_segment_pos() -> f64 {
+    unsafe { crate::ui::skip::position() }
+}
+// The overlay is driven by its 0.25 s timer, so every check on it runs a step after the change.
+fn s_skip_show() {
+    handle_main(playback_ext("skip-1", "Intro Test", 1.5, 6.0, intro_to(4.5), None, None));
+}
+fn s_skip_audit() {
+    unsafe {
+        state_check("skip: button shown inside the intro", crate::ui::skip::button_visible());
+        state_check("skip: label is Skip Intro", crate::ui::skip::button_label() == "Skip Intro");
+    }
+    audit_both("skip button");
+}
+fn s_skip_click() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let btn = ui.skip.button.get();
+        let _: () = msg_send![btn, performClick: nil()];
+    }
+}
+fn s_skip_click_check() {
+    unsafe {
+        let p = in_segment_pos();
+        state_check(&format!("skip: click seeked to the end (at {:.2}s)", p), p >= 4.3 && p <= 5.5);
+        state_check("skip: button hides after the skip", !crate::ui::skip::button_visible());
+    }
+}
+fn s_skip_key_start() {
+    handle_main(playback_ext("skip-2", "Intro Key", 1.5, 6.0, intro_to(4.5), None, None));
+}
+fn s_skip_key() {
+    unsafe {
+        state_check("skip: button up for the S key case", crate::ui::skip::button_visible());
+        act(sel!(skipSegment:), nil());
+    }
+}
+fn s_skip_key_check() {
+    unsafe {
+        let p = in_segment_pos();
+        state_check(&format!("skip: S key seeked past the intro (at {:.2}s)", p), p >= 4.3);
+    }
+}
+fn s_skip_series_start() {
+    handle_main(playback_ext("skip-3", "Auto Test", 1.5, 6.0, intro_to(4.5), Some("show-auto"), None));
+    unsafe {
+        state_check("skip: per-show off by default", !crate::ui::skip::auto_skip_on());
+    }
+}
+fn s_skip_series_on() {
+    unsafe {
+        state_check("skip: button up before turning it on", crate::ui::skip::button_visible());
+        act(sel!(jrToggleSeriesSkip:), nil());
+    }
+}
+fn s_skip_series_auto() {
+    unsafe {
+        state_check("skip: per-show on after toggle", crate::ui::skip::auto_skip_on());
+        state_check("skip: toggle persisted for the show", crate::config::skip_intros_for("show-auto", false));
+        let p = in_segment_pos();
+        state_check(&format!("skip: toggle inside the intro skipped it (at {:.2}s)", p), p >= 4.3);
+    }
+    handle_main(playback_ext("skip-4", "Auto Next Time", 1.5, 6.0, intro_to(4.5), Some("show-auto"), None));
+}
+fn s_skip_series_off() {
+    unsafe {
+        state_check("skip: auto-skipped on the next playback", in_segment_pos() >= 4.3);
+        let toast = read_field(UI.get().unwrap().chip_label.get());
+        state_check(&format!("skip: 'Skipped intro' toast ({})", toast), toast.contains("Skipped intro"));
+        state_check("skip: no button after auto-skip", !crate::ui::skip::button_visible());
+        act(sel!(jrToggleSeriesSkip:), nil());
+        state_check("skip: per-show off persisted", !crate::config::skip_intros_for("show-auto", true));
+    }
+}
+fn s_upnext_card() {
+    handle_main(playback_ext("ep-cur", "Current Episode", 0.0, 6.0, Vec::new(), Some("show-next"), Some(mock_next())));
+}
+fn s_upnext_play() {
+    unsafe {
+        state_check("up next: card shown near the end", crate::ui::skip::card_visible());
+        let text = crate::ui::skip::card_text();
+        state_check(&format!("up next: card names the next episode ({})", text), text.contains("The Next One") && text.contains("Playing in"));
+        state_check("up next: no skip button on a plain episode", !crate::ui::skip::button_visible());
+    }
+    audit_both("up next card");
+    unsafe {
+        act(sel!(jrUpNextPlay:), nil());
+    }
+    let cmds = take_cmds();
+    let asked = cmds.iter().any(|c| matches!(c, UiCmd::Play { item_id } if item_id == "ep-next"));
+    let stopped = cmds.iter().any(|c| matches!(c, UiCmd::Stopped { item_id, .. } if item_id == "ep-cur"));
+    let marked = cmds.iter().any(|c| matches!(c, UiCmd::MarkPlayed { item_id, played: true } if item_id == "ep-cur"));
+    state_check("up next: Play Now asks for the next episode", asked);
+    state_check("up next: current episode stopped and marked watched", stopped && marked);
+}
+fn s_upnext_next() {
+    handle_main(playback_ext("ep-next", "The Next One", 0.0, 6.0, Vec::new(), Some("show-next"), None));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("up next: player title updated", read_field(ui.top_title.get()) == "The Next One");
+        state_check("up next: now playing the next episode", ui.playing.as_ref().map(|p| p.item_id.as_str()) == Some("ep-next"));
+        state_check("up next: card gone", !crate::ui::skip::card_visible());
+    }
+}
+fn s_upnext_cancel() {
+    handle_main(playback_ext("ep-c", "Cancel Test", 0.0, 6.0, Vec::new(), Some("show-next"), Some(mock_next())));
+}
+fn s_upnext_cancel_check() {
+    unsafe {
+        state_check("up next: card up before cancel", crate::ui::skip::card_visible());
+        act(sel!(jrUpNextCancel:), nil());
+        state_check("up next: cancel hides the card", !crate::ui::skip::card_visible());
+    }
+    let cmds = take_cmds();
+    state_check("up next: cancel sends no Play", !cmds.iter().any(|c| matches!(c, UiCmd::Play { .. })));
+}
+fn s_upnext_cancel_end() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("up next: cancelled episode ends and leaves the player", ui.playing.is_none());
+    }
+    let cmds = take_cmds();
+    state_check("up next: cancelled episode is marked watched at the end", cmds.iter().any(|c| matches!(c, UiCmd::MarkPlayed { item_id, played: true } if item_id == "ep-c")));
+}
+fn s_upnext_end() {
+    handle_main(playback_ext("ep-e", "End Test", 0.0, 6.0, Vec::new(), Some("show-next"), Some(mock_next())));
+}
+fn s_upnext_end_check() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("up next: still in the player at the end", ui.playing.is_some());
+    }
+    let cmds = take_cmds();
+    state_check("up next: reaching the end asks for the next episode", cmds.iter().any(|c| matches!(c, UiCmd::Play { item_id } if item_id == "ep-next")));
+    handle_main(playback_ext("ep-next", "The Next One", 0.0, 6.0, Vec::new(), Some("show-next"), None));
+}
+fn s_upnext_stop() {
+    unsafe { act(sel!(stopPlayback:), nil()) }
+}
+fn s_settings_skip_controls() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let mut c = ui.cfg.clone();
+        c.settings.autoplay_next = false;
+        c.settings.skip_intros_default = true;
+        crate::ui::settings::settings_fill(&c);
+        let a: NSInteger = msg_send![ui.s_autoplay.get(), state];
+        let s: NSInteger = msg_send![ui.s_skip_default.get(), state];
+        state_check("settings: autoplay checkbox reflects the setting", a == 0);
+        state_check("settings: skip-by-default checkbox reflects the setting", s == 1);
+        crate::ui::settings::settings_fill(&ui.cfg.clone());
+        let a: NSInteger = msg_send![ui.s_autoplay.get(), state];
+        state_check("settings: autoplay checkbox back to on", a == 1);
+    }
+}
+unsafe fn find_titled(v: *mut Object, title: &str) -> *mut Object {
+    if is_kind(v, class!(NSButton)) {
+        let t: *mut Object = msg_send![v, title];
+        if to_str(t) == title {
+            return v;
+        }
+    }
+    let subs: *mut Object = msg_send![v, subviews];
+    let n: usize = msg_send![subs, count];
+    for i in 0..n {
+        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let found = find_titled(c, title);
+        if !found.is_null() {
+            return found;
+        }
+    }
+    nil()
+}
+fn s_detail_skip_toggle() {
+    handle_main(MainMsg::DetailLoaded(Box::new(detail_view(true))));
+    unsafe {
+        let cb = find_titled(detail_host(), "Skip intros automatically");
+        state_check("detail: series page has the skip toggle", !cb.is_null());
+        if cb.is_null() {
+            return;
+        }
+        let _: () = msg_send![cb, performClick: nil()];
+        let on: NSInteger = msg_send![cb, state];
+        state_check("detail: toggle saved for the show", crate::config::skip_intros_for("detail-series", false) == (on != 0));
+        let _: () = msg_send![cb, performClick: nil()];
+        let on: NSInteger = msg_send![cb, state];
+        state_check("detail: toggle back, saved again", crate::config::skip_intros_for("detail-series", true) == (on != 0));
+    }
+    crate::ui::detail::hide();
+}
+
 fn s_play_to_end() {
     // Wait for the stop from step above to settle, then play from near the end.
     unsafe { act(sel!(stopPlayback:), nil()) }

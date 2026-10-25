@@ -1,6 +1,9 @@
 use super::*;
 use std::fs;
 
+pub mod series;
+pub use series::{set_skip_intros, skip_intros_for, SeriesPrefs};
+
 
 pub const APP_DIR_NAME: &str = "Jellyfast";
 pub const KEYCHAIN_SERVICE: &str = "to.nathancurtis.jellyfast";

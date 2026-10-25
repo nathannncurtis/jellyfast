@@ -158,6 +158,8 @@ pub struct FullItem {
     pub item_type: String,
     #[serde(rename = "SeriesName", default)]
     pub series_name: Option<String>,
+    #[serde(rename = "SeriesId", default)]
+    pub series_id: Option<String>,
     #[serde(rename = "ParentIndexNumber", default)]
     pub season: Option<u32>,
     #[serde(rename = "IndexNumber", default)]
@@ -322,6 +324,17 @@ impl Episode {
     pub fn has_image(&self) -> bool {
         self.image_tags.as_ref().map(|t| t.primary.is_some()).unwrap_or(false)
     }
+}
+
+/// One range from GET /MediaSegments/{itemId} (Jellyfin 10.10+). Ticks, not seconds.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MediaSegment {
+    #[serde(rename = "Type", default)]
+    pub segment_type: String,
+    #[serde(rename = "StartTicks", default)]
+    pub start_ticks: i64,
+    #[serde(rename = "EndTicks", default)]
+    pub end_ticks: i64,
 }
 
 /// The `{ "Items": [...] }` envelope most Jellyfin list endpoints return.
