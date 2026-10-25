@@ -150,6 +150,10 @@ fn steps() -> Vec<Step> {
         ("settings: open+save", s_settings_save, 600),
         ("playback: start", s_play_start, 2500),
         ("playback: chrome", s_play_chrome, 100),
+        ("player bar: layout + audit", s_player_bar, 100),
+        ("player bar: buttons, menus, hover", s_player_bar_buttons, 300),
+        ("player bar: auto-hide arm (4 s idle)", s_pb_hide_arm, 4000),
+        ("player bar: auto-hide check", s_pb_hide_check, 50),
         ("playback: controls", s_play_controls, 300),
         ("playback: subtitle/audio cycle", s_play_cycle, 2300),
         ("playback: toast hides itself", s_toast_hidden, 50),
@@ -1081,7 +1085,7 @@ fn s_play_chrome() {
         let name: *mut Object = msg_send![ap, name];
         state_check("player chrome is dark", to_str(name) == "NSAppearanceNameDarkAqua");
         let cs: isize = msg_send![ui.avview.get(), controlsStyle];
-        state_check("AVKit controls are floating", cs == 2);
+        state_check("AVKit controls are off (controlsStyle none)", cs == 0);
         state_check("toast hidden when empty", !player::toast_visible());
         let ip: BOOL = msg_send![ui.info_panel.get(), isHidden];
         state_check("playback info hidden by default", ip == YES);
@@ -1131,6 +1135,136 @@ fn s_audit_player() {
         crate::ui::player::apply_info_visibility();
         crate::ui::player::toast("Subtitles: Off", Some("captions.bubble"), false);
         audit("player/toast-short");
+    }
+}
+fn s_player_bar() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let bar = ui.pbar.bar.get();
+        state_check("player bar built", !bar.is_null());
+        let host = bounds_of(ui.player_host.get());
+        let f = frame_of(bar);
+        state_check("player bar spans the full width", f.origin.x.abs() < 0.5 && (f.size.w - host.size.w).abs() < 0.5);
+        state_check("player bar sits at the bottom", f.origin.y.abs() < 0.5 && (f.size.h - crate::ui::theme::PLAYER_CTRL_H).abs() < 0.5);
+        let cs: isize = msg_send![ui.avview.get(), controlsStyle];
+        state_check("controlsStyle is none (0)", cs == 0);
+        state_check("player bar shown at start", ui.bar_shown && crate::ui::playerbar::visible());
+        state_check("player bar: elapsed and remaining filled",
+            read_field(ui.pbar.elapsed.get()).contains(':') && read_field(ui.pbar.remain.get()).starts_with('-'));
+    }
+    audit_both("player bar");
+}
+fn s_player_bar_buttons() {
+    use crate::ui::playerbar as pb;
+    unsafe {
+        let (play, back, fwd, mute, subs, audio, speed, pip, full) = {
+            let p = &UI.get().unwrap().pbar;
+            (p.play, p.back, p.fwd, p.mute, p.subs, p.audio, p.speed, p.pip, p.full)
+        };
+        // Every button is wired to its action on the controller.
+        for (b, sel, name) in [
+            (play, sel!(playPause:), "play"),
+            (back, sel!(seekBack:), "back 10s"),
+            (fwd, sel!(seekFwd:), "forward 10s"),
+            (mute, sel!(mute:), "mute"),
+            (subs, sel!(showSubtitleMenu:), "subtitles"),
+            (audio, sel!(showAudioMenu:), "audio"),
+            (speed, sel!(showSpeedMenu:), "speed"),
+            (pip, sel!(togglePiP:), "picture in picture"),
+            (full, sel!(fullscreen:), "full screen"),
+        ] {
+            let a: objc::runtime::Sel = msg_send![b.get(), action];
+            state_check(&format!("button {} wired", name), a == sel);
+        }
+        // Play/pause: one press flips the rate, the next flips it back.
+        let r0: f32 = msg_send![UI.get().unwrap().player.get(), rate];
+        act(sel!(playPause:), play.get());
+        let r1: f32 = msg_send![UI.get().unwrap().player.get(), rate];
+        state_check("play button toggles playback", (r0 > 0.0) != (r1 > 0.0));
+        act(sel!(playPause:), play.get());
+        // Mute toggles.
+        let m0: BOOL = msg_send![UI.get().unwrap().player.get(), isMuted];
+        act(sel!(mute:), mute.get());
+        let m1: BOOL = msg_send![UI.get().unwrap().player.get(), isMuted];
+        state_check("mute button toggles mute", m0 != m1);
+        act(sel!(mute:), mute.get());
+        // Back and forward run without touching anything else.
+        act(sel!(seekFwd:), fwd.get());
+        act(sel!(seekBack:), back.get());
+        // Subtitle and audio menus list Off plus every track.
+        act(sel!(showSubtitleMenu:), subs.get());
+        let want_subs = UI.get().unwrap().sub_opts.len() + 1;
+        state_check("subtitle menu lists Off and each track", UI.get().unwrap().pbar.last_menu_items == want_subs);
+        act(sel!(showAudioMenu:), audio.get());
+        let want_audio = UI.get().unwrap().audio_opts.len() + 1;
+        state_check("audio menu lists Off and each track", UI.get().unwrap().pbar.last_menu_items == want_audio);
+        if !UI.get().unwrap().sub_opts.is_empty() {
+            act(sel!(pickTrack:), tagged_button(0));
+            state_check("subtitle menu item Off selects no track", UI.get().unwrap().sel_sub == 0);
+        }
+        // Speed menu: six rates, and a picked rate reaches the player.
+        act(sel!(showSpeedMenu:), speed.get());
+        state_check("speed menu lists six rates", UI.get().unwrap().pbar.last_menu_items == 6);
+        act(sel!(setSpeed:), tagged_button(150));
+        let d: f32 = msg_send![UI.get().unwrap().player.get(), defaultRate];
+        state_check("speed pick sets the default rate", (d - 1.5).abs() < 0.01);
+        act(sel!(setSpeed:), tagged_button(100));
+        // Volume slider drives the player.
+        let vol = UI.get().unwrap().pbar.vol.get();
+        let _: () = msg_send![vol, setDoubleValue: 0.4f64];
+        act(sel!(jrNowVolume:), vol);
+        let v: f32 = msg_send![UI.get().unwrap().player.get(), volume];
+        state_check("player bar volume drives the player", (v - 0.4).abs() < 0.01);
+        let _: () = msg_send![vol, setDoubleValue: 1.0f64];
+        act(sel!(jrNowVolume:), vol);
+        // Hover tooltip shows the time under the pointer and goes away again.
+        pb::set_hover(Some(0.5));
+        let tip = UI.get().unwrap().pbar.tip.get();
+        let th: BOOL = msg_send![tip, isHidden];
+        state_check("hover tooltip shows", th == NO && read_field(UI.get().unwrap().pbar.tip_label.get()).contains(':'));
+        pb::set_hover(None);
+        let th: BOOL = msg_send![tip, isHidden];
+        state_check("hover tooltip hides", th == YES);
+        // Scrubber seek moves the played fraction.
+        pb::seek_frac(0.25);
+        state_check("scrubber seek sets the fraction", (UI.get().unwrap().pbar.frac - 0.25).abs() < 1e-6);
+        act(sel!(playPause:), play.get());
+        act(sel!(playPause:), play.get());
+    }
+}
+/// Starts the idle clock with the video playing from the start; the next step waits past the timeout.
+fn s_pb_hide_arm() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _ = pb_seek_start();
+        show_bars_now();
+        state_check("auto-hide: bar shown on activity", ui.bar_shown);
+    }
+}
+unsafe fn pb_seek_start() -> bool {
+    let ui = UI.get().unwrap();
+    if ui.playing.is_none() {
+        return false;
+    }
+    let tm = crate::platform::appkit::CMTimeMakeWithSeconds(0.0, 600);
+    let _: () = msg_send![ui.player.get(), seekToTime: tm];
+    let _: () = msg_send![ui.player.get(), setRate: 1.0f32];
+    true
+}
+fn show_bars_now() {
+    unsafe { crate::ui::player::show_bars() }
+}
+fn s_pb_hide_check() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("auto-hide: video still playing during idle", ui.playing.as_ref().map(|p| !p.paused).unwrap_or(false));
+        state_check("auto-hide: top bar hidden after 2.5 s idle", !ui.bar_shown);
+        state_check("auto-hide: player bar faded out", !crate::ui::playerbar::visible());
+        let ta: f64 = msg_send![ui.top_bar.get(), alphaValue];
+        state_check("auto-hide: top bar alpha 0", ta < 0.05);
+        // Pointer movement brings both back.
+        show_bars_now();
+        state_check("show on mouse move: bars back", ui.bar_shown);
     }
 }
 fn s_play_controls() {

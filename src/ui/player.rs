@@ -61,8 +61,9 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     let _: () = msg_send![ph, addTrackingArea: ta];
     autorel(ta);
 
-    // AVKit's own floating scrubber is the transport; media keys / Control Centre via now-playing.
-    let _: () = msg_send![avv, setControlsStyle: 2isize];
+    // AVKit's own controls are off: the custom transport bar (ui::playerbar) is the transport.
+    // Media keys / Control Centre still work through now-playing.
+    let _: () = msg_send![avv, setControlsStyle: 0isize];
     let _: () = msg_send![avv, setUpdatesNowPlayingInfoCenter: YES];
 
     // ---- top bar (gradient) ----
@@ -100,6 +101,9 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     set_autoresize(ts, RESIZE_W);
     add_sub(bar, ts);
     ui.top_sub = Ptr(ts);
+
+    // ---- bottom transport bar (scrubber, buttons, menus) ----
+    crate::ui::playerbar::build(ph, b);
 
     // ---- toast ----
     let chip = vev(MAT_HUD, BLEND_WITHIN);
@@ -181,6 +185,14 @@ pub(crate) unsafe fn show_bars() {
     if !ui.bar_shown {
         ui.bar_shown = true;
         fade(ui.top_bar.get(), 1.0, M_FAST);
+        fade_transport(1.0, M_FAST);
+    }
+}
+/// The bottom transport bar fades together with the top bar.
+unsafe fn fade_transport(to: f64, d: f64) {
+    let ui = UI.get().unwrap();
+    if !ui.pbar.bar.get().is_null() {
+        fade(ui.pbar.bar.get(), to, d);
     }
 }
 pub(crate) unsafe fn hide_bars_if_idle() {
@@ -193,12 +205,13 @@ pub(crate) unsafe fn hide_bars_if_idle() {
         return;
     }
     if ui.bar_shown {
-        if let Some(t) = ui.last_mouse {
-            if t.elapsed().as_secs_f64() >= M_IDLE_HIDE {
-                ui.bar_shown = false;
-                fade(ui.top_bar.get(), 0.0, M_STD);
-                let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: YES];
-            }
+        // No pointer movement yet this playback counts as idle from now.
+        let t = *ui.last_mouse.get_or_insert_with(std::time::Instant::now);
+        if t.elapsed().as_secs_f64() >= M_IDLE_HIDE {
+            ui.bar_shown = false;
+            fade(ui.top_bar.get(), 0.0, M_STD);
+            fade_transport(0.0, M_STD);
+            let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: YES];
         }
     }
 }

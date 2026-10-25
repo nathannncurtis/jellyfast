@@ -361,6 +361,7 @@ pub struct Ui {
     pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
     pub now: crate::ui::nowbar::NowBar,
+    pub pbar: crate::ui::playerbar::PlayerBar,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
 unsafe impl Send for Ui {}
@@ -503,6 +504,11 @@ pub(crate) unsafe fn register_classes() {
             (sel!(jrNowSkip:), crate::ui::nowbar::skip as Extern0),
             (sel!(jrNowScrub:), crate::ui::nowbar::scrub as Extern0),
             (sel!(jrNowVolume:), crate::ui::nowbar::volume as Extern0),
+            (sel!(showSubtitleMenu:), crate::ui::playerbar::show_sub_menu as Extern0),
+            (sel!(showAudioMenu:), crate::ui::playerbar::show_audio_menu as Extern0),
+            (sel!(showSpeedMenu:), crate::ui::playerbar::show_speed_menu as Extern0),
+            (sel!(pickTrack:), crate::ui::playerbar::pick_track as Extern0),
+            (sel!(togglePiP:), crate::ui::playerbar::toggle_pip as Extern0),
         ] {
             d.add_method(s, f);
         }
@@ -514,6 +520,7 @@ pub(crate) unsafe fn register_classes() {
     register_sidebar_row();
     register_header_class();
     crate::ui::player::register_player_classes();
+    crate::ui::playerbar::register_playerbar_classes();
     crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
     {
@@ -1133,6 +1140,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         side_dyn: vec![],
         cur_title: String::new(),
         now: crate::ui::nowbar::NowBar::new(),
+        pbar: crate::ui::playerbar::PlayerBar::new(),
         tint_cache: HashMap::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
@@ -1204,6 +1212,18 @@ unsafe impl objc::Encode for NSEdgeInsets {
 unsafe impl objc::Encode for CMTime {
     fn encode() -> objc::Encoding {
         unsafe { objc::Encoding::from_str("{?=qiIq}") }
+    }
+}
+/// CMTimeRange: start then duration, each a CMTime (returned by NSValue's CMTimeRangeValue).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CMTimeRange {
+    pub start: CMTime,
+    pub duration: CMTime,
+}
+unsafe impl objc::Encode for CMTimeRange {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{?={?=qiIq}{?=qiIq}}") }
     }
 }
 

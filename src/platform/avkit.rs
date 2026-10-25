@@ -72,6 +72,7 @@ pub(crate) extern "C" fn tick(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
             return;
         }
         crate::ui::nowbar::update(); // every tick (0.25 s while the bar shows)
+        crate::ui::playerbar::update(); // video transport bar, same cadence
         if !crate::ui::nowbar::slow_due() {
             return;
         }
@@ -346,16 +347,36 @@ pub(crate) unsafe fn cycle(which: usize) {
     }
     // Index 0 == "Off" (nil selection); 1.. = options.
     let next = (cur + 1) % (opts + 1);
-    let opt = if next == 0 { nil() } else { if which == 0 { ui.sub_opts[next - 1] } else { ui.audio_opts[next - 1] } };
+    set_track(which, next);
+}
+/// Selects track `idx` of the subtitle (`which` 0) or audio (`which` 1) group: 0 is Off, i+1 is option i.
+/// Shared by the keyboard cycle and the transport bar's menus.
+pub(crate) unsafe fn set_track(which: usize, idx: usize) {
+    let ui = UI.get_mut().unwrap();
+    let (group, count) = if which == 0 {
+        (ui.sub_group, ui.sub_opts.len())
+    } else {
+        (ui.audio_group, ui.audio_opts.len())
+    };
+    if group.is_null() || idx > count {
+        return;
+    }
+    let opt = if idx == 0 {
+        nil()
+    } else if which == 0 {
+        ui.sub_opts[idx - 1]
+    } else {
+        ui.audio_opts[idx - 1]
+    };
     let _: () = msg_send![ui.pitem.get(), selectMediaOption: opt inMediaSelectionGroup: group];
     if which == 0 {
-        ui.sel_sub = next;
+        ui.sel_sub = idx;
     } else {
-        ui.sel_audio = next;
+        ui.sel_audio = idx;
     }
     crate::ui::player::toast(
         &format!("{}: {}", if which == 0 { "Subtitles" } else { "Audio" },
-            if next == 0 { "Off".to_string() } else {
+            if idx == 0 { "Off".to_string() } else {
                 to_str(msg_send![opt, displayName])
             }),
         Some(if which == 0 { "captions.bubble" } else { "speaker.wave.2" }),
@@ -477,6 +498,7 @@ pub fn start_playback(ps: &PlaybackStart) {
             crate::ui::player::toast("", None, false);
             ui.bar_shown = false;
             crate::ui::player::show_bars();
+            crate::ui::playerbar::on_start();
             crate::ui::player::apply_info_visibility();
             {
                 use crate::ui::theme::*;
