@@ -1,0 +1,50 @@
+name: Import the signing certificate
+description: Imports a Developer ID certificate into a temporary keychain for codesign. Used by ci.yml and release.yml.
+inputs:
+  p12:
+    description: Base64 of the .p12 file
+    required: false
+  password:
+    description: Password of the .p12 file
+    required: false
+  identity:
+    description: "Signing identity, such as Developer ID Application: Name (TEAMID)"
+    required: false
+outputs:
+  keychain:
+    description: Path of the temporary keychain, empty when no certificate was imported
+    value: ${{ steps.import.outputs.keychain }}
+  identity:
+    description: The signing identity, empty when no certificate was imported
+    value: ${{ steps.import.outputs.identity }}
+runs:
+  using: composite
+  steps:
+    - name: Import
+      id: import
+      shell: bash
+      env:
+        APPLE_CERT_P12: ${{ inputs.p12 }}
+        APPLE_CERT_PASSWORD: ${{ inputs.password }}
+        APPLE_SIGN_IDENTITY: ${{ inputs.identity }}
+      run: |
+        if [ -z "$APPLE_CERT_P12" ] || [ -z "$APPLE_SIGN_IDENTITY" ]; then
+          echo "::warning::No signing certificate is set, so the app is signed ad hoc."
+          exit 0
+        fi
+        keychain=$RUNNER_TEMP/sign.keychain-db
+        pass=$(openssl rand -hex 16)
+        security create-keychain -p "$pass" "$keychain"
+        security set-keychain-settings -lut 3600 "$keychain"
+        security unlock-keychain -p "$pass" "$keychain"
+        printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+        security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+        rm "$RUNNER_TEMP/cert.p12"
+        # The certificate chains to Apple's developer authority, which a fresh keychain may not hold.
+        curl -fsSL https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer -o "$RUNNER_TEMP/wwdr.cer" && security import "$RUNNER_TEMP/wwdr.cer" -k "$keychain" || true
+        curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/devid.cer" && security import "$RUNNER_TEMP/devid.cer" -k "$keychain" || true
+        security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" > /dev/null
+        # shellcheck disable=SC2046
+        security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+        echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+        echo "identity=$APPLE_SIGN_IDENTITY" >> "$GITHUB_OUTPUT"
