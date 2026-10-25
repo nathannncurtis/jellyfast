@@ -364,6 +364,11 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 let msg = save_seerr(&mut cfg, enabled, &url, &username, password, api_key).await;
                 let _ = main_tx.send(msg);
             }
+            UiCmd::SaveLibraries { order, hidden } => {
+                cfg.library_order = order;
+                cfg.hidden_libraries = hidden;
+                crate::config::save_config(&cfg);
+            }
             UiCmd::SaveSettings { settings, reconnect } => {
                 seerr = None;
                 cfg.settings = settings;
