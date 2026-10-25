@@ -11,7 +11,7 @@
 #                   Unset or empty: ad-hoc signing ("-"), which is enough to run locally.
 #   KEYCHAIN        keychain holding the identity (optional)
 #   BUNDLE_ID       CFBundleIdentifier (default to.nathancurtis.jellyfast)
-#   APP_NAME        display name and .app name (default: the Cargo package name)
+#   APP_NAME        display name and .app name (default: Jellyfast)
 #   MIN_MACOS       LSMinimumSystemVersion (default 14.0)
 #   CARGO_TARGET_DIR  honoured as usual
 #
@@ -36,7 +36,7 @@ meta=$(cargo metadata --no-deps --format-version 1)
 bin=$(jq -r '[.packages[0].targets[] | select(.kind | index("bin")) | .name][0]' <<<"$meta")
 version=$(jq -r '.packages[0].version' <<<"$meta")
 target_dir=$(jq -r '.target_directory' <<<"$meta")
-app_name=${APP_NAME:-$(jq -r '.packages[0].name' <<<"$meta")}
+app_name=${APP_NAME:-Jellyfast}
 bundle_id=${BUNDLE_ID:-to.nathancurtis.jellyfast}
 min_macos=${MIN_MACOS:-14.0}
 identity=${SIGN_IDENTITY:--}
