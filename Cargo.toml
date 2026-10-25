@@ -11,7 +11,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-security-framework = "2"             # Keychain (thin binding to Security.framework)
+security-framework = "3"             # Keychain (thin binding to Security.framework)
 
 [profile.release]
 lto = true
