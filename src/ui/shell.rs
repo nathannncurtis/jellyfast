@@ -736,6 +736,17 @@ unsafe fn user_row(user: &str) -> *mut Object {
 }
 
 // ---- View switching ------------------------------------------------------
+/// Connecting state for the login card: only shown once a connect (typed
+/// credentials, or a resumed remembered session) is really under way.
+pub fn login_connecting(url: &str) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
+        set_text(ui.login_btn.get(), "Connecting…");
+    }
+    login_status(&format!("Connecting to {}…", host_of(url)));
+}
+
 pub fn show_login_or_library(connected: bool) {
     unsafe {
         let ui = UI.get_mut().unwrap();

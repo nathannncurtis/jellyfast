@@ -965,9 +965,7 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
             login_error("Enter your username and password, or use an API key.");
             return;
         }
-        let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
-        set_text(ui.login_btn.get(), "Connecting…");
-        login_status(&format!("Connecting to {}…", host_of(&url)));
+        login_connecting(&url);
         let remember_state: isize = msg_send![ui.login_remember.get(), state];
         let _ = ui.ui_tx.send(UiCmd::Connect {
             url,
@@ -1021,14 +1019,8 @@ pub(crate) extern "C" fn search_now(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn app_did_finish_launch(_t: &mut Object, _c: Sel, _n: *mut Object) {
     unsafe {
         build_window_and_ui();
-        let ui = UI.get_mut().unwrap();
-        // If a server + token are stored, the worker is already auto-connecting;
-        // reflect that state in the login card.
-        if let Some(u) = ui.cfg.server_url.clone() {
-            login_status(&format!("Connecting to {}…", host_of(&u)));
-            let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
-            set_text(ui.login_btn.get(), "Connecting…");
-        }
+        // No connecting state here: a saved server URL alone is not a session. The
+        // worker reports `MainMsg::Resuming` if it really resumes one.
         crate::app::controller::drain_main(); // anything queued before launch
         if crate::app::selftest::enabled() {
             crate::app::selftest::start();
