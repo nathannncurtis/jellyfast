@@ -51,6 +51,10 @@ pub struct Config {
     /// Library view ids the user hid from the sidebar.
     #[serde(default)]
     pub hidden_libraries: Vec<String>,
+    /// Header sort popup choice: the Jellyfin `SortBy` key (see `app::library_query::SORT_CHOICES`).
+    /// `None` means Name.
+    #[serde(default)]
+    pub sort_by: Option<String>,
 }
 
 fn default_remember_me() -> bool {
@@ -72,6 +76,7 @@ impl Default for Config {
             remember_me: default_remember_me(),
             library_order: Vec::new(),
             hidden_libraries: Vec::new(),
+            sort_by: None,
             layout_mode: None,
         }
     }

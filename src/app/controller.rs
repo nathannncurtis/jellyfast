@@ -84,6 +84,8 @@ pub(crate) fn handle_main(msg: MainMsg) {
             set_text(ui.header_title.get(), &title);
             set_hidden(ui.lib_back.get(), !can_go_back);
             set_busy(false);
+            // The sort popup orders libraries, Browse and filter results; not album tracks.
+            set_hidden(ui.sort_popup.get(), !ui.sort_applies);
             set_count(&count_label(&items), false);
             if items.is_empty() {
                 let q = read_field(ui.search.get());

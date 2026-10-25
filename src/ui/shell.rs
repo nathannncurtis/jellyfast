@@ -145,7 +145,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     let pop: *mut Object = msg_send![class!(NSPopUpButton), alloc];
     let pop: *mut Object = msg_send![pop, initWithFrame: rect(0., 0., 120., 24.) pullsDown: NO];
     let arr: *mut Object = msg_send![class!(NSMutableArray), array];
-    for t in ["Name", "Date Added", "Rating", "Last Played"] {
+    for (t, _, _) in crate::app::library_query::SORT_CHOICES {
         let _: () = msg_send![arr, addObject: ns(t)];
     }
     let _: () = msg_send![pop, addItemsWithTitles: arr];
@@ -157,6 +157,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(header, pop);
     autorel(pop);
     ui.sort_popup = Ptr(pop);
+    sync_sort_popup();
 
     // Grid scroll view
     let grid_area = rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h - TITLEBAR_H - HEADER_H - SP3);
@@ -963,11 +964,19 @@ pub(crate) unsafe fn show_state(symbol_name: &str, title: &str, body: &str, retr
     set_hidden(ui.status_label.get(), false);
 }
 
+/// Show the saved sort choice in the header popup (on launch, and whenever it changes).
+pub(crate) unsafe fn sync_sort_popup() {
+    let ui = UI.get_mut().unwrap();
+    let index = crate::app::library_query::sort_index(ui.cfg.sort_by.as_deref());
+    let _: () = msg_send![ui.sort_popup.get(), selectItemAtIndex: index as isize];
+}
+
 /// Called when a load begins. `first` = a different view (skeleton), otherwise keep
 /// what is on screen and spin in the header.
 pub(crate) unsafe fn begin_load(first: bool) {
     crate::ui::home::leave();
     let ui = UI.get_mut().unwrap();
+    ui.sort_applies = true;
     hide_state();
     if first || ui.items.is_empty() {
         ui.items.clear();

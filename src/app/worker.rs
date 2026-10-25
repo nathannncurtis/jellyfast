@@ -1,6 +1,7 @@
 use crate::*;
 use std::collections::VecDeque;
 use crate::app::messages::*;
+use crate::app::library_query::{browse_query, filter_query, library_query};
 use crate::jellyfin::client::JellyfinClient;
 use crate::jellyfin::models::{DetailItem, Episode, Person, Season};
 use crate::jellyfin::urls::{build_art_url, build_image_url};
@@ -73,19 +74,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     let res = if live {
                         c.livetv_channels().await.map(|v| (name.clone(), v))
                     } else {
-                        let sort = sort_from_popup(&cfg);
-                        let mut q = crate::jellyfin::models::ItemQuery {
-                            parent_id: Some(view_id.clone()),
-                            ..Default::default()
-                        };
-                        q.sort_by = sort.0;
-                        q.sort_order = sort.1;
-                        match collection_type.as_deref() {
-                            Some("movies") => q.types = Some("Movie".into()),
-                            Some("tvshows") => q.types = Some("Series".into()),
-                            Some("music") => q.types = Some("MusicAlbum".into()),
-                            _ => {}
-                        }
+                        let q = library_query(&view_id, collection_type.as_deref(), cfg.sort_by.as_deref());
                         c.items(&q).await.map(|v| (name.clone(), v))
                     };
                     match res {
@@ -106,13 +95,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             UiCmd::LoadBrowse => {
                 if let Some(c) = &client {
                     // Movies and series together; no ParentId, so Jellyfin searches every library.
-                    let sort = sort_from_popup(&cfg);
-                    let q = crate::jellyfin::models::ItemQuery {
-                        types: Some("Movie,Series".into()),
-                        sort_by: sort.0,
-                        sort_order: sort.1,
-                        ..Default::default()
-                    };
+                    let q = browse_query(cfg.sort_by.as_deref());
                     match c.items(&q).await {
                         Ok(items) => {
                             fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
@@ -133,38 +116,39 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 // write from here could clobber fields the UI changed since startup.
                 cfg.layout_mode = Some(mode);
             }
-            UiCmd::Search { q } => {
+            UiCmd::SetSort { sort_by } => {
+                // Same as SetLayoutMode: the UI saved the choice; keep the worker's copy in step.
+                cfg.sort_by = Some(sort_by);
+            }
+            UiCmd::Search { q, parent_id, types } => {
                 // Debounce: wait, then keep only the newest search.
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                let mut latest = q;
+                let mut latest = (q, parent_id, types);
                 let mut held = Vec::new();
                 while let Ok(c2) = rx.try_recv() {
                     match c2 {
-                        UiCmd::Search { q } => latest = q,
+                        UiCmd::Search { q, parent_id, types } => latest = (q, parent_id, types),
+                        // A sort change made during the wait applies to this search.
+                        UiCmd::SetSort { sort_by } => cfg.sort_by = Some(sort_by),
                         other => held.push(other),
                     }
                 }
                 // Non-search commands drained above run after this search, in arrival order.
                 backlog.extend(held);
-                if let Some(c) = &client {
-                    if !latest.trim().is_empty() {
-                        let mut qy = crate::jellyfin::models::ItemQuery {
-                            search: Some(latest.clone()),
-                            ..Default::default()
-                        };
-                        qy.limit = 100;
-                        match c.items(&qy).await {
-                            Ok(items) => {
-                                fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
-                                let _ = main_tx.send(MainMsg::ItemsLoaded {
-                                    title: format!("Results for “{}”", latest),
-                                    items,
-                                    can_go_back: true,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
-                            }
+                let (q, parent_id, types) = latest;
+                let query = filter_query(&q, parent_id.as_deref(), types.as_deref(), cfg.sort_by.as_deref());
+                if let (Some(c), Some(qy)) = (&client, query) {
+                    match c.items(&qy).await {
+                        Ok(items) => {
+                            fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
+                            let _ = main_tx.send(MainMsg::ItemsLoaded {
+                                title: format!("Results for “{}”", q.trim()),
+                                items,
+                                can_go_back: true,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
                         }
                     }
                 }
@@ -748,14 +732,6 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-pub(crate) fn sort_from_popup(cfg: &Config) -> (String, String) {
-    // The popup index is not directly visible to the worker; settings could
-    // carry it — for now we honor the UI default (SortName) and read the
-    // popup choice through the settings struct when modularized.
-    let _ = cfg;
-    ("SortName".into(), "Ascending".into())
 }
 
 pub(crate) async fn connect_cmd(
@@ -2041,7 +2017,7 @@ mod tests {
     #[tokio::test]
     async fn search_single_query() {
         let (_e, m, mut h) = connected().await;
-        h.send(UiCmd::Search { q: "matrix".into() });
+        h.send(UiCmd::Search { q: "matrix".into(), parent_id: None, types: None });
         let (title, names, back) = items_of(h.next().await);
         assert_eq!(title, "Results for “matrix”");
         assert_eq!(names, vec!["Found matrix"]);
@@ -2054,7 +2030,7 @@ mod tests {
     #[tokio::test]
     async fn blank_search_makes_no_request() {
         let (_e, m, mut h) = connected().await;
-        h.send(UiCmd::Search { q: "   ".into() });
+        h.send(UiCmd::Search { q: "   ".into(), parent_id: None, types: None });
         assert!(h.drain_via_probe().await.is_empty());
         assert!(m.find("GET", "/Users/u1/Items").is_empty());
     }
@@ -2062,10 +2038,10 @@ mod tests {
     #[tokio::test]
     async fn search_debounce_keeps_newest_and_preserves_order() {
         let (_e, m, mut h) = connected().await;
-        h.send(UiCmd::Search { q: "a".into() });
-        h.send(UiCmd::Search { q: "ab".into() });
+        h.send(UiCmd::Search { q: "a".into(), parent_id: None, types: None });
+        h.send(UiCmd::Search { q: "ab".into(), parent_id: None, types: None });
         h.send(UiCmd::Episodes { series_id: "sr1".into(), series_name: "Show One".into() });
-        h.send(UiCmd::Search { q: "abc".into() });
+        h.send(UiCmd::Search { q: "abc".into(), parent_id: None, types: None });
         h.send(UiCmd::Tracks { album_id: "al1".into(), album_name: "Album One".into() });
         h.send(UiCmd::ProbeServer);
         // Search result first, then the held commands in arrival order.
@@ -2088,9 +2064,9 @@ mod tests {
     #[tokio::test]
     async fn search_after_search_each_runs_when_spaced_out() {
         let (_e, m, mut h) = connected().await;
-        h.send(UiCmd::Search { q: "one".into() });
+        h.send(UiCmd::Search { q: "one".into(), parent_id: None, types: None });
         assert_eq!(items_of(h.next().await).0, "Results for “one”");
-        h.send(UiCmd::Search { q: "two".into() });
+        h.send(UiCmd::Search { q: "two".into(), parent_id: None, types: None });
         assert_eq!(items_of(h.next().await).0, "Results for “two”");
         assert_eq!(m.find("GET", "/Users/u1/Items").len(), 2);
     }
@@ -2099,7 +2075,7 @@ mod tests {
     async fn search_error_reports_playback_error() {
         let (_e, m, mut h) = connected().await;
         m.cfg.lock().unwrap().items_status = Some(503);
-        h.send(UiCmd::Search { q: "x".into() });
+        h.send(UiCmd::Search { q: "x".into(), parent_id: None, types: None });
         match h.next().await {
             MainMsg::PlaybackError(e) => assert!(e.contains("HTTP 503"), "{e}"),
             o => panic!("{:?}", o),

@@ -141,6 +141,7 @@ fn steps() -> Vec<Step> {
         ("shortcuts: grid focus (Tab, Return enabled)", s_shortcuts_grid, 50),
         ("shortcuts: help window", s_shortcuts_help, 150),
         ("sort/search/refresh/back", s_nav_actions, 50),
+        ("sort + filter: order, filter, clear", s_sort_filter, 50),
         ("mark watched / open web", s_misc_actions, 50),
         ("detail: movie (long strings, art, actions)", s_detail_movie, 150),
         ("detail: resize relayout, back", s_detail_resize, 150),
@@ -1065,7 +1066,7 @@ fn s_debounce_done() {
     state_check("exactly one Search after the debounce", search_cmds(&cmds) == 1);
     state_check(
         "debounced Search carries the last text",
-        cmds.iter().any(|c| matches!(c, UiCmd::Search { q } if q == "abc")),
+        cmds.iter().any(|c| matches!(c, UiCmd::Search { q, .. } if q == "abc")),
     );
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -1112,6 +1113,181 @@ fn s_nav_actions() {
         act(sel!(refresh:), nil());
         act(sel!(goBack:), nil());
         act(sel!(signOut:), nil());
+    }
+}
+/// Three movies. Name order starts with Alpha; Date Added (year as the stand-in date,
+/// newest first) starts with Charlie.
+fn sort_fixture() -> Vec<ListItem> {
+    [("Alpha", 2001), ("Bravo", 1999), ("Charlie", 2010)]
+        .iter()
+        .map(|(name, year)| {
+            let mut it = item(&format!("m-{}", name), name, "Movie", false, 0, 6_000_000_000);
+            it.year = Some(*year);
+            it
+        })
+        .collect()
+}
+/// Stands in for Jellyfin: applies the SearchTerm, SortBy and SortOrder the UI-side
+/// query carries, so the grid shows what the server would return for that query.
+fn fake_server(items: &[ListItem], q: &crate::jellyfin::models::ItemQuery) -> Vec<ListItem> {
+    let needle = q.search.as_deref().map(str::to_lowercase);
+    let mut out: Vec<ListItem> = items
+        .iter()
+        .filter(|i| needle.as_ref().map_or(true, |n| i.name.to_lowercase().contains(n)))
+        .cloned()
+        .collect();
+    match q.sort_by.as_str() {
+        "DateCreated" => out.sort_by_key(|i| i.year),
+        _ => out.sort_by(|a, b| a.name.cmp(&b.name)),
+    }
+    if q.sort_order == "Descending" {
+        out.reverse();
+    }
+    out
+}
+fn grid_names() -> Vec<String> {
+    unsafe { UI.get_mut().unwrap().items.iter().map(|i| i.name.clone()).collect() }
+}
+fn header_count_text() -> String {
+    unsafe { read_field(UI.get_mut().unwrap().header_count.get()) }
+}
+fn cfg_sort() -> Option<String> {
+    unsafe { UI.get_mut().unwrap().cfg.sort_by.clone() }
+}
+fn last_set_sort(cmds: &[UiCmd]) -> Option<String> {
+    cmds.iter().rev().find_map(|c| match c {
+        UiCmd::SetSort { sort_by } => Some(sort_by.clone()),
+        _ => None,
+    })
+}
+fn last_search(cmds: &[UiCmd]) -> Option<(String, Option<String>, Option<String>)> {
+    cmds.iter().rev().find_map(|c| match c {
+        UiCmd::Search { q, parent_id, types } => Some((q.clone(), parent_id.clone(), types.clone())),
+        _ => None,
+    })
+}
+fn has_load_view(cmds: &[UiCmd], id: &str) -> bool {
+    cmds.iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == id))
+}
+/// Pick a popup row and fire its action, as a click does.
+fn pick_sort(index: isize) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: () = msg_send![ui.sort_popup.get(), selectItemAtIndex: index];
+    }
+    unsafe { act(sel!(sortChanged:), nil()) };
+}
+/// Put `text` in the filter field and fire the (debounced) search now.
+fn type_filter(text: &str) {
+    unsafe {
+        set_text(UI.get_mut().unwrap().search.get(), text);
+        act(sel!(jrSearchNow:), nil());
+    }
+}
+fn s_sort_filter() {
+    use crate::app::library_query::{filter_query, library_query};
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let saved_sort = ui.cfg.sort_by.clone();
+        let saved_stack = ui.mode_stack.clone();
+        crate::ui::home::leave();
+        ui.browse_active = false;
+        ui.mode_stack = vec![("lib-movies".into(), "Movies".into(), Some("movies".into()))];
+        take_cmds();
+
+        let fixture = sort_fixture();
+        send_items("Movies", fake_server(&fixture, &library_query("lib-movies", Some("movies"), None)), false);
+        state_check("sort: starts in Name order", grid_names().first().map(String::as_str) == Some("Alpha"));
+
+        // Date Added: the choice reaches the worker and the library reloads.
+        pick_sort(1);
+        let cmds = take_cmds();
+        let by = last_set_sort(&cmds);
+        state_check("sort: popup choice sent to the worker", by.as_deref() == Some("DateCreated"));
+        state_check("sort: library reloads", has_load_view(&cmds, "lib-movies"));
+        state_check("sort: choice saved in config", cfg_sort().as_deref() == Some("DateCreated"));
+        send_items("Movies", fake_server(&fixture, &library_query("lib-movies", Some("movies"), by.as_deref())), false);
+        state_check("sort: first item changes Alpha -> Charlie", grid_names().first().map(String::as_str) == Some("Charlie"));
+        state_check("sort: count unchanged", header_count_text() == "3 movies");
+
+        // Filter: typing searches inside this library and the grid shows only the matches.
+        type_filter("l");
+        let cmds = take_cmds();
+        let (q, parent, types) = last_search(&cmds).unwrap_or_default();
+        state_check("filter: Search sent with the text", q == "l");
+        state_check(
+            "filter: scoped to this library",
+            parent.as_deref() == Some("lib-movies") && types.as_deref() == Some("Movie"),
+        );
+        let fq = filter_query(&q, parent.as_deref(), types.as_deref(), cfg_sort().as_deref());
+        send_items("Results for “l”", fake_server(&fixture, &fq.unwrap()), true);
+        state_check("filter: visible count drops 3 -> 2", grid_names() == ["Charlie", "Alpha"]);
+        state_check("filter: header count follows", header_count_text() == "2 movies");
+
+        // Sorting while filtered keeps the filter and re-orders the matches.
+        pick_sort(0);
+        let cmds = take_cmds();
+        let (q, parent, types) = last_search(&cmds).unwrap_or_default();
+        state_check("sort with a filter: filter still applied", q == "l" && last_set_sort(&cmds).as_deref() == Some("SortName"));
+        let fq = filter_query(&q, parent.as_deref(), types.as_deref(), cfg_sort().as_deref());
+        send_items("Results for “l”", fake_server(&fixture, &fq.unwrap()), true);
+        state_check("sort with a filter: Name order (Alpha first)", grid_names() == ["Alpha", "Charlie"]);
+
+        // Clearing the field restores the library in the chosen order.
+        type_filter("");
+        let cmds = take_cmds();
+        state_check("clear: library reloads, no Search", last_search(&cmds).is_none() && has_load_view(&cmds, "lib-movies"));
+        send_items("Movies", fake_server(&fixture, &library_query("lib-movies", Some("movies"), cfg_sort().as_deref())), false);
+        state_check("clear: all items back", grid_names().len() == 3 && header_count_text() == "3 movies");
+
+        // Back from filter results clears the field and shows the library again.
+        type_filter("x");
+        take_cmds();
+        act(sel!(goBack:), nil());
+        let cmds = take_cmds();
+        state_check(
+            "back from filter results: field cleared and library reloaded",
+            read_field(UI.get_mut().unwrap().search.get()).is_empty() && has_load_view(&cmds, "lib-movies"),
+        );
+
+        // Switching library clears the filter text.
+        type_filter("l");
+        take_cmds();
+        if !UI.get_mut().unwrap().views.is_empty() {
+            crate::platform::appkit::select_view(0);
+            state_check(
+                "switching library clears the filter",
+                read_field(UI.get_mut().unwrap().search.get()).is_empty(),
+            );
+        } else {
+            log("  (no libraries connected; library switch check skipped)");
+        }
+        take_cmds();
+
+        // Album tracks are not sorted: the popup is hidden over them and back for libraries.
+        ui.sort_applies = false;
+        send_items("Album", items_of("Audio", 2), true);
+        let pop: *mut Object = UI.get_mut().unwrap().sort_popup.get();
+        let hidden: BOOL = msg_send![pop, isHidden];
+        state_check("album tracks hide the sort popup", hidden == YES);
+        UI.get_mut().unwrap().sort_applies = true;
+        send_items("Movies", fixture.clone(), false);
+        let hidden: BOOL = msg_send![pop, isHidden];
+        state_check("library shows the sort popup", hidden == NO);
+
+        // Relaunch: the popup opens on the saved choice.
+        UI.get_mut().unwrap().cfg.sort_by = Some("DatePlayed".into());
+        crate::ui::shell::sync_sort_popup();
+        let idx: isize = msg_send![pop, indexOfSelectedItem];
+        state_check("popup shows the saved choice (Last Played)", idx == 3);
+
+        // Put the saved state back.
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.sort_by = saved_sort;
+        ui.mode_stack = saved_stack;
+        crate::config::save_config_keeping_session(&ui.cfg);
+        crate::ui::shell::sync_sort_popup();
+        take_cmds();
     }
 }
 fn s_shortcuts_menu() {
