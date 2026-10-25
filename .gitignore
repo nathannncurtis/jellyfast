@@ -1,2 +1,4 @@
 target/
 *.app/
+dist/
+.target-ci/

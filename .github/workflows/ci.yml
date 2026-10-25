@@ -1,0 +1,195 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    if: github.repository == 'nathannncurtis/jellyfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      app: ${{ steps.f.outputs.app }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: f
+        with:
+          filters: |
+            app:
+              - 'src/**'
+              - 'assets/**'
+              - 'tools/**'
+              - 'scripts/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+
+  rules:
+    if: github.repository == 'nathannncurtis/jellyfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Range
+        id: range
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = 0000000000000000000000000000000000000000 ]; then BASE="$HEAD~1"; fi
+          echo "range=$BASE..$HEAD" >> "$GITHUB_OUTPUT"
+      - name: Workflow rules
+        run: bash .github/scripts/rules.sh "${{ steps.range.outputs.range }}"
+      - name: Secrets
+        run: |
+          tag=v8.30.1; v=${tag#v}
+          curl -sSL -o gl.tgz "https://github.com/gitleaks/gitleaks/releases/download/v$v/gitleaks_${v}_linux_x64.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gl.tgz" | sha256sum -c -
+          mkdir gl && tar -xzf gl.tgz -C gl
+          ./gl/gitleaks git --redact --no-banner --log-opts="${{ steps.range.outputs.range }}" .
+
+  # The app links AppKit and AVKit through the raw objc crate, so it builds only on macOS.
+  # The #[ignore]d live tests need real servers and stay ignored.
+  test:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: test-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: test-${{ runner.os }}-${{ runner.arch }}-
+      - run: cargo test --locked
+
+  # Dependency advisories for Cargo.lock. Fails on CVSS 7.0 and above.
+  audit:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: OSV-Scanner
+        run: |
+          tag=v2.7.0; v=${tag#v}
+          curl -sSL -o osv-scanner "https://github.com/google/osv-scanner/releases/download/v$v/osv-scanner_linux_amd64"
+          echo "160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+          mkdir -p reports
+          ./osv-scanner scan source --lockfile Cargo.lock --format json --output-file reports/osv.json || true
+          n=$(jq '[.results[]?.packages[]?.groups[]? | select((.max_severity | tonumber? // 0) >= 7)] | length' reports/osv.json)
+          jq -r '.results[]?.packages[]? | .package.name as $p | .groups[]? | select((.max_severity | tonumber? // 0) >= 7) | "\($p) \(.ids | join(",")) \(.max_severity)"' reports/osv.json
+          [ "$n" -eq 0 ]
+
+  # Builds the universal .app with scripts/bundle.sh. A pull request (including from a fork)
+  # is signed ad hoc. A push to master is signed with the Developer ID certificate and
+  # notarized when the secrets exist; with no secrets it falls back to ad hoc.
+  bundle:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: bundle-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: bundle-${{ runner.os }}-${{ runner.arch }}-
+      - name: Import the signing certificate
+        id: cert
+        if: github.event_name == 'push'
+        env:
+          APPLE_CERT_P12: ${{ secrets.MAC_DEVID_P12 || secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.MAC_DEVID_P12 && secrets.MAC_DEVID_P12_PASSWORD || secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGN_IDENTITY: ${{ secrets.MAC_DEVID_IDENTITY || secrets.APPLE_SIGN_IDENTITY }}
+        run: |
+          if [ -z "$APPLE_CERT_P12" ] || [ -z "$APPLE_SIGN_IDENTITY" ]; then
+            echo "::warning::No signing certificate is set, so the app is signed ad hoc."
+            exit 0
+          fi
+          keychain=$RUNNER_TEMP/sign.keychain-db
+          pass=$(openssl rand -hex 16)
+          security create-keychain -p "$pass" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$pass" "$keychain"
+          printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          # The certificate chains to Apple's developer authority, which a fresh keychain may not hold.
+          curl -fsSL https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer -o "$RUNNER_TEMP/wwdr.cer" && security import "$RUNNER_TEMP/wwdr.cer" -k "$keychain" || true
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/devid.cer" && security import "$RUNNER_TEMP/devid.cer" -k "$keychain" || true
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" > /dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+          echo "identity=$APPLE_SIGN_IDENTITY" >> "$GITHUB_OUTPUT"
+      - name: Build and sign the app
+        env:
+          SIGN_IDENTITY: ${{ steps.cert.outputs.identity }}
+          KEYCHAIN: ${{ steps.cert.outputs.keychain }}
+        run: scripts/bundle.sh --universal --out dist
+      - name: Notarize
+        if: steps.cert.outputs.identity != '' && startsWith(steps.cert.outputs.identity, 'Developer ID')
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          if [ -z "$ASC_KEY_P8" ]; then
+            echo "::warning::No App Store Connect key is set, so the app is signed but not notarized."
+            exit 0
+          fi
+          scripts/notarize.sh dist/*.app
+      - name: Remove the signing keychain
+        if: always() && steps.cert.outputs.keychain != ''
+        run: security delete-keychain "${{ steps.cert.outputs.keychain }}"
+      - name: Check the bundle
+        run: |
+          app=$(ls -d dist/*.app)
+          codesign -dv --verbose=2 "$app" 2>&1 | grep -E 'Identifier|TeamIdentifier|Authority|flags|Signature'
+          lipo -archs "$app/Contents/MacOS/"*
+          plutil -p "$app/Contents/Info.plist"
+      - name: Zip
+        run: |
+          app=$(ls -d dist/*.app)
+          ditto -c -k --keepParent "$app" "dist/$(basename "$app" .app)-macos-universal.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-macos-universal
+          path: dist/*.zip
+          if-no-files-found: error
+
+  ci-ok:
+    needs: [changes, rules, test, audit, bundle]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed or was skipped
+        run: |
+          [ "${{ contains(needs.*.result, 'failure') }}" = false ] && [ "${{ contains(needs.*.result, 'cancelled') }}" = false ]
