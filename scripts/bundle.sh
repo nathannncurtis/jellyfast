@@ -44,6 +44,7 @@ identity=${SIGN_IDENTITY:--}
 app="$out/$app_name.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp assets/icon/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 
 if [ "$universal" = 1 ]; then
   for t in aarch64-apple-darwin x86_64-apple-darwin; do
@@ -64,6 +65,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>$app_name</string>
   <key>CFBundleDisplayName</key><string>$app_name</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>$bin</string>
   <key>CFBundleIdentifier</key><string>$bundle_id</string>
   <key>CFBundlePackageType</key><string>APPL</string>
