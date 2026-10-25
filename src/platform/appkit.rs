@@ -929,6 +929,10 @@ pub(crate) extern "C" fn mark_unwatched(_t: &mut Object, _c: Sel, sender: *mut O
     }
 }
 pub(crate) extern "C" fn open_in_web(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    // The self-test sets fake server URLs; never open a real browser tab for them.
+    if std::env::var_os("JELLYFAST_SELFTEST").is_some() {
+        return;
+    }
     unsafe {
         let ui = UI.get_mut().unwrap();
         let ro: *mut Object = msg_send![sender, representedObject];

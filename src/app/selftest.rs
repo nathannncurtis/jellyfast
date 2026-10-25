@@ -1434,7 +1434,7 @@ fn s_misc_actions() {
         let mi: *mut Object = msg_send![class!(NSMenuItem), new];
         let _: () = msg_send![mi, setRepresentedObject: ns("Movie-1")];
         act(sel!(markWatched:), mi);
-        act(sel!(openInWeb:), mi); // no server_url configured -> no browser launch
+        act(sel!(openInWeb:), mi); // open_in_web never launches a browser in self-test mode
         let _: *mut Object = msg_send![mi, autorelease];
     }
 }
