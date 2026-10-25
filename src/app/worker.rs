@@ -481,8 +481,11 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
         return Err("Seerr URL is not set. Add it in Settings.".into());
     }
     let url = crate::jellyfin::urls::normalize_base_url(raw).map_err(|e| format!("Invalid Seerr URL: {}", e))?;
+    // The cache is only valid for the same server AND the same sign-in mode and
+    // account; SaveSeerr also clears it, so a changed password is picked up there.
+    let account = (!user.is_empty()).then_some(user.as_str());
     if let Some(c) = cache {
-        if c.base == url {
+        if c.base == url && c.account() == account {
             return Ok(c.clone());
         }
     }
@@ -531,20 +534,28 @@ async fn save_seerr(
         crate::config::save_config(cfg);
         return MainMsg::SeerrStatus { ok: true, message: "Seerr is turned off.".into() };
     }
-    let n = match crate::jellyfin::urls::normalize_base_url(trimmed) {
+    let typed = match crate::jellyfin::urls::normalize_base_url(trimmed) {
         Ok(n) => n,
         Err(e) => return fail(format!("Invalid Seerr URL: {}", e)),
     };
-    let client = if use_login {
-        let Some(pw) = pw_in.clone().or_else(|| crate::config::load_seerr_login(&n)) else {
+    // Never send the password or API key over plain http: when the server
+    // redirects http to https, save and use the https address. Secrets saved
+    // under the address as typed are still found.
+    let n = crate::seerr::client::https_upgrade(&typed).await.unwrap_or_else(|| typed.clone());
+    // The secret actually used (typed now, or saved under the address as typed)
+    // is what gets stored under the saved address on success.
+    let (client, login_pw, api_key) = if use_login {
+        let saved = || crate::config::load_seerr_login(&n).or_else(|| crate::config::load_seerr_login(&typed));
+        let Some(pw) = pw_in.clone().or_else(saved) else {
             return fail("Enter your Seerr password (the one you use to sign in with your Jellyfin account).".into());
         };
-        SeerrClient::with_login(&n, &user, &pw)
+        (SeerrClient::with_login(&n, &user, &pw), Some(pw), None)
     } else {
-        let Some(key) = key_in.clone().or_else(|| crate::config::load_seerr_key(&n)) else {
+        let saved = || crate::config::load_seerr_key(&n).or_else(|| crate::config::load_seerr_key(&typed));
+        let Some(key) = key_in.clone().or_else(saved) else {
             return fail("Enter your Seerr API key (Seerr > Settings > General), or sign in with your Jellyfin account.".into());
         };
-        SeerrClient::new(&n, &key)
+        (SeerrClient::new(&n, &key), None, Some(key))
     };
     let client = match client {
         Ok(c) => c,
@@ -552,11 +563,10 @@ async fn save_seerr(
     };
     match client.verify().await {
         Ok((st, me)) => {
-            if use_login {
-                if let Some(p) = &pw_in {
-                    crate::config::store_seerr_login(&n, p);
-                }
-            } else if let Some(k) = &key_in {
+            if let Some(p) = &login_pw {
+                crate::config::store_seerr_login(&n, p);
+            }
+            if let Some(k) = &api_key {
                 crate::config::store_seerr_key(&n, k);
             }
             cfg.settings.seerr_enabled = true;

@@ -95,6 +95,29 @@ fn check(code: u16, body: &str, what: &str) -> Result<(), SeerrError> {
     }
 }
 
+/// For a plain `http://` address that the server redirects to https on the same
+/// host, returns that https base (path kept). Sends one unauthenticated GET
+/// /api/v1/status with redirects turned off, so the password or API key is
+/// never sent in cleartext before the upgrade. `None` when there is nothing to
+/// upgrade or the probe fails; the normal flow then reports the real error.
+pub async fn https_upgrade(base: &str) -> Option<String> {
+    let host_and_path = base.trim().trim_end_matches('/').strip_prefix("http://")?;
+    let host = host_and_path.split('/').next()?;
+    let probe = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let r = probe.get(format!("http://{}/api/v1/status", host_and_path)).send().await.ok()?;
+    if !r.status().is_redirection() {
+        return None;
+    }
+    let loc = r.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+    let loc_host = loc.strip_prefix("https://")?.split('/').next()?;
+    (loc_host == host).then(|| format!("https://{}", host_and_path))
+}
+
 #[derive(Clone)]
 enum Auth {
     Key(String),
@@ -120,6 +143,14 @@ impl SeerrClient {
             .build()
             .map_err(|e| SeerrError::Network(e.to_string()))?;
         Ok(Self { http, base, auth })
+    }
+
+    /// Jellyfin username in login mode; `None` in API-key mode.
+    pub fn account(&self) -> Option<&str> {
+        match &self.auth {
+            Auth::Login { username, .. } => Some(username.as_str()),
+            Auth::Key(_) => None,
+        }
     }
 
     /// API-key mode.
@@ -225,7 +256,15 @@ impl SeerrClient {
             }
         };
         match check(code, &body, what) {
-            Err(SeerrError::Auth(m)) if matches!(self.auth, Auth::Login { .. }) => Err(SeerrError::Login(format!("not permitted ({})", m))),
+            // Still refused after a fresh sign-in: a 403 means this account may not
+            // do that (permission or quota), which is not a sign-in failure. A 401
+            // means the session itself was not accepted.
+            Err(SeerrError::Auth(m)) if matches!(self.auth, Auth::Login { .. }) => Err(if code == 403 {
+                let m = if m.starts_with("invalid API key") { "your Seerr account is not allowed to do this".to_string() } else { m };
+                SeerrError::Api(403, m)
+            } else {
+                SeerrError::Login(format!("the session was not accepted ({})", m))
+            }),
             r => r.map(|_| body),
         }
     }
@@ -683,11 +722,45 @@ mod tests {
         st.deny_login.store(false, std::sync::atomic::Ordering::SeqCst);
         // a genuine permission error (403 even with a fresh session) is reported after one relogin
         match c.request("movie", 997).await.unwrap_err() {
-            SeerrError::Login(msg) => assert!(msg.contains("quota"), "{}", msg),
+            SeerrError::Api(403, msg) => assert!(msg.contains("quota"), "{}", msg),
             e => panic!("{:?}", e),
         }
         assert_eq!(m.find("POST", "/api/v1/request").len(), 2);
         assert_eq!(logins(&m).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn login_permission_403_is_not_reported_as_sign_in_failure() {
+        let (m, _st) = login_mock().await;
+        let c = SeerrClient::with_login(&m.url(), "nathan", "pw").unwrap();
+        let err = c.request("movie", 997).await.unwrap_err();
+        assert!(matches!(err, SeerrError::Api(403, _)), "{:?}", err);
+        assert!(!err.to_string().contains("sign-in"), "{}", err);
+        // a refused session (401 with a fresh login) is still a sign-in problem
+        let m2 = start(|r| if r.path == "/api/v1/status" { default_route(r) } else { Resp::text(401, "") }).await;
+        let e2 = SeerrClient::with_login(&m2.url(), "a", "b").unwrap().search("x", 1).await.unwrap_err();
+        assert!(matches!(e2, SeerrError::Login(_)), "{:?}", e2);
+    }
+
+    #[tokio::test]
+    async fn https_upgrade_only_for_same_host_https_redirect() {
+        // 308 to https on the same host -> upgraded base (path kept)
+        let m = start(|r| {
+            let h = r.headers.get("host").cloned().unwrap_or_default();
+            Resp::text(308, "").with_header("Location", &format!("https://{}/api/v1/status", h))
+        })
+        .await;
+        let host = &m.url()["http://".len()..];
+        assert_eq!(https_upgrade(&m.url()).await, Some(format!("https://{}", host)));
+        assert_eq!(https_upgrade(&format!("{}/", m.url())).await, Some(format!("https://{}", host)));
+        // redirect to a different host is never followed for credentials
+        let other = start(|_| Resp::text(308, "").with_header("Location", "https://evil.example/api/v1/status")).await;
+        assert_eq!(https_upgrade(&other.url()).await, None);
+        // plain answer, https input, and unreachable servers do not upgrade
+        let plain = start(default_route).await;
+        assert_eq!(https_upgrade(&plain.url()).await, None);
+        assert_eq!(https_upgrade("https://127.0.0.1:1").await, None);
+        assert_eq!(https_upgrade("http://127.0.0.1:1").await, None);
     }
 
     #[tokio::test]
@@ -724,6 +797,14 @@ mod tests {
             panic!("set SEERR_LIVE_URL, SEERR_LIVE_USER and SEERR_LIVE_PASS_FILE");
         };
         let pass = std::fs::read_to_string(&pf).expect("password file");
+        // Plain http is upgraded before any password is sent; https must not be rewritten.
+        match https_upgrade(&url).await {
+            Some(_) => println!("note: plain http address redirects to https (the app now saves the https form)"),
+            None => println!("note: no http->https upgrade for this address"),
+        }
+        if url.starts_with("https://") {
+            assert!(https_upgrade(&url).await.is_none());
+        }
         let c = SeerrClient::with_login(&url, &user, pass.trim_end_matches(['\r', '\n'])).unwrap();
 
         let st = c.status().await.expect("status");
