@@ -421,7 +421,7 @@ mod tests {
     fn poster_url_uses_the_seerr_image_proxy() {
         assert_eq!(poster_url("http://s:5055", "/a.jpg"), "http://s:5055/imageproxy/tmdb/t/p/w92/a.jpg");
         assert_eq!(poster_url("http://s:5055/", "a.jpg"), "http://s:5055/imageproxy/tmdb/t/p/w92/a.jpg");
-        assert!(!poster_url("http://s", "/a.jpg").contains("image.tmdb.org"));
+        assert!(!poster_url("http://s", "/a.jpg").contains("tmdb.org"));
     }
 
     #[tokio::test]

@@ -1221,7 +1221,7 @@ fn seerr_result(media: &str, id: u64, title: &str, year: Option<u16>, a: Availab
         tmdb_id: id,
         title: title.into(),
         year,
-        poster_path: None,
+        poster_path: if id == 11 || id == 22 { Some(format!("/p{}.jpg", id)) } else { None },
         overview: "overview".into(),
         availability: a,
         request_status: None,
@@ -1258,21 +1258,60 @@ fn sheet_open() -> bool {
         crate::platform::appkit::settings_open()
     }
 }
+/// Direct subviews of `row` that are an instance of `cls` and satisfy `pred`.
+unsafe fn seerr_subviews(row: *mut Object, cls: &str, pred: &dyn Fn(*mut Object) -> bool) -> usize {
+    let c = objc::runtime::objc_getClass(format!("{}\0", cls).as_ptr() as *const std::os::raw::c_char) as *mut Object;
+    let subs: *mut Object = msg_send![row, subviews];
+    let n: usize = msg_send![subs, count];
+    let mut k = 0;
+    for i in 0..n {
+        let v: *mut Object = msg_send![subs, objectAtIndex: i];
+        let is: BOOL = msg_send![v, isKindOfClass: c];
+        if is == YES && pred(v) {
+            k += 1;
+        }
+    }
+    k
+}
 /// Number of rows in the Seerr list that carry a Request button.
 fn seerr_button_rows() -> usize {
+    unsafe {
+        let ui = UI.get().unwrap();
+        ui.seerr.rows.iter().filter(|r| seerr_subviews(**r, "NSButton", &|_| true) > 0).count()
+    }
+}
+/// Status pills (NSBox with corner radius 10) across all rows.
+fn seerr_pills() -> usize {
     unsafe {
         let ui = UI.get().unwrap();
         ui.seerr
             .rows
             .iter()
-            .filter(|r| {
-                let subs: *mut Object = msg_send![**r, subviews];
-                let n: usize = msg_send![subs, count];
-                n == 5 // title, sub, badge, button, separator
+            .map(|r| {
+                seerr_subviews(*r, "NSBox", &|b| {
+                    let rad: f64 = msg_send![b, cornerRadius];
+                    (rad - 10.).abs() < 0.01
+                })
             })
-            .count()
+            .sum()
     }
 }
+fn seerr_row_heights_ok() -> bool {
+    unsafe {
+        let ui = UI.get().unwrap();
+        ui.seerr.rows.iter().all(|r| (frame_of(*r).size.h - 76.).abs() < 0.01)
+    }
+}
+fn seerr_empty_shown() -> Option<(String, String)> {
+    unsafe {
+        let ui = UI.get().unwrap();
+        if seerr_hidden(ui.seerr.empty.get()) {
+            return None;
+        }
+        Some((read_field(ui.seerr.empty_title.get()), read_field(ui.seerr.empty_body.get())))
+    }
+}
+const TEST_PNG: [u8; 75] = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 6, 8, 6, 0, 0, 0, 228, 57, 63, 117, 0, 0, 0, 18, 73, 68, 65, 84, 120, 156, 99, 56, 97, 99, 243, 31, 25, 51, 208, 66, 0, 0, 182, 120, 53, 233, 148, 150, 172, 5, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
 fn seerr_status_text() -> String {
     unsafe { read_field(UI.get().unwrap().seerr.status.get()) }
 }
@@ -1310,7 +1349,11 @@ fn s_seerr_enabled() {
         check_offscreen("seerr window");
         state_check("hint hidden when configured", seerr_hidden(ui.seerr.hint.get()));
         state_check("search visible", !seerr_hidden(ui.seerr.search.get()));
-        state_check("empty state row", ui.seerr.rows.len() == 1);
+        state_check("no rows", ui.seerr.rows.is_empty());
+        state_check(
+            "hint state: search prompt",
+            seerr_empty_shown().map(|(_, b)| b == "Search for a movie or show to request.") == Some(true),
+        );
     }
 }
 fn s_seerr_results() {
@@ -1319,6 +1362,17 @@ fn s_seerr_results() {
         let ui = UI.get().unwrap();
         state_check("7 rows", ui.seerr.rows.len() == 7);
         state_check("2 request buttons (NotRequested only)", seerr_button_rows() == 2);
+        state_check("rows are 76 tall", seerr_row_heights_ok());
+        state_check("a pill per row", seerr_pills() == 7);
+        state_check("empty state hidden with rows", seerr_empty_shown().is_none());
+        state_check("thumbnail waits for the poster", unsafe { crate::ui::seerr::thumb_has_image("/p11.jpg") } == Some(false));
+    }
+    // The worker would fetch these through the Seerr server; fake its reply (no network).
+    handle_main(MainMsg::SeerrPoster { path: "/p11.jpg".into(), bytes: TEST_PNG.to_vec() });
+    handle_main(MainMsg::SeerrPoster { path: "/bad.jpg".into(), bytes: vec![1, 2, 3] });
+    unsafe {
+        state_check("thumbnail image set after poster reply", crate::ui::seerr::thumb_has_image("/p11.jpg") == Some(true));
+        state_check("other thumbnail still a placeholder", crate::ui::seerr::thumb_has_image("/p22.jpg") == Some(false));
     }
     audit("seerr results");
 }
@@ -1408,7 +1462,7 @@ fn s_seerr_requests_tab() {
         let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 1isize];
         act(sel!(seerrTab:), ui.seerr.tabs.get());
         state_check("SeerrRequests emitted", matches!(take_cmds().as_slice(), [UiCmd::SeerrRequests]));
-        state_check("loading row", ui.seerr.rows.len() == 1);
+        state_check("loading: no rows, no empty state", ui.seerr.rows.is_empty() && seerr_empty_shown().is_none());
         handle_main(MainMsg::SeerrRequestList(vec![
             seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending),
             seerr_request_item(2, "Two", RequestStatus::Approved, Availability::Processing),
@@ -1419,9 +1473,14 @@ fn s_seerr_requests_tab() {
         ]));
         state_check("6 request rows", ui.seerr.rows.len() == 6);
         state_check("no request buttons in My requests", seerr_button_rows() == 0);
+        state_check("a pill per request row", seerr_pills() == 6);
         audit("seerr my requests");
         handle_main(MainMsg::SeerrRequestList(vec![]));
-        state_check("empty requests -> 1 info row", ui.seerr.rows.len() == 1);
+        state_check(
+            "empty requests state",
+            ui.seerr.rows.is_empty()
+                && seerr_empty_shown() == Some(("No requests yet".into(), "You haven't requested anything yet.".into())),
+        );
         handle_main(MainMsg::SeerrRequestList(vec![seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending)]));
         // typing in the search field jumps back to the search tab
         set_text(ui.seerr.search.get(), "x");
@@ -1444,7 +1503,7 @@ fn s_seerr_requests_tab() {
 fn s_seerr_resize() {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        for (w, h) in [(460.0, 360.0), (900.0, 800.0), (620.0, 640.0)] {
+        for (w, h) in [(520.0, 420.0), (900.0, 800.0), (680.0, 680.0)] {
             let _: () = msg_send![ui.seerr.win.get(), setContentSize: size(w, h)];
             let _: () = msg_send![ui.seerr.win.get(), displayIfNeeded];
             let _: () = msg_send![ui.seerr.doc.get(), layoutSubtreeIfNeeded];
@@ -1472,10 +1531,14 @@ fn s_seerr_empty() {
         let ui = UI.get_mut().unwrap();
         set_text(ui.seerr.search.get(), "zzzz");
         handle_main(MainMsg::SeerrResults(vec![]));
-        state_check("no results -> 1 info row", ui.seerr.rows.len() == 1 && seerr_button_rows() == 0);
+        state_check(
+            "no results state",
+            ui.seerr.rows.is_empty()
+                && seerr_empty_shown() == Some(("No results".into(), "No matches for “zzzz”.".into())),
+        );
         set_text(ui.seerr.search.get(), "");
         handle_main(MainMsg::SeerrResults(vec![]));
-        state_check("blank -> 1 info row", ui.seerr.rows.len() == 1);
+        state_check("blank search state", ui.seerr.rows.is_empty() && seerr_empty_shown().map(|t| t.0) == Some("Find a title".into()));
         take_cmds();
     }
 }
