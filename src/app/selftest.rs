@@ -98,6 +98,7 @@ fn steps() -> Vec<Step> {
         ("login: empty connect", s_login_empty, 50),
         ("audit: login (long strings)", s_audit_login, 100),
         ("login: filled connect", s_login_filled, 50),
+        ("login: remember me checkbox", s_login_remember, 50),
         ("connect error", s_connect_error, 50),
         ("connected (views + livetv)", s_connected, 100),
         ("connected again (sidebar rebuild)", s_connected, 100),
@@ -611,6 +612,26 @@ fn s_login_filled() {
         act(sel!(connectClicked:), nil());
         set_text(ui.login_key.get(), "key");
         act(sel!(connectClicked:), nil());
+    }
+}
+fn s_login_remember() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let saved: isize = if ui.cfg.remember_me { 1 } else { 0 };
+        let st: isize = msg_send![ui.login_remember.get(), state];
+        state_check("remember me checkbox reflects saved preference", st == saved);
+        set_text(ui.login_url.get(), "http://127.0.0.1:1");
+        set_text(ui.login_user.get(), "me");
+        set_text(ui.login_pass.get(), "pw");
+        let _: () = msg_send![ui.login_remember.get(), setState: 1isize];
+        act(sel!(connectClicked:), nil());
+        let on = take_cmds().iter().any(|c| matches!(c, UiCmd::Connect { remember: true, .. }));
+        state_check("checked remember me sends remember=true", on);
+        let _: () = msg_send![ui.login_remember.get(), setState: 0isize];
+        act(sel!(connectClicked:), nil());
+        let off = take_cmds().iter().any(|c| matches!(c, UiCmd::Connect { remember: false, .. }));
+        state_check("unchecked remember me sends remember=false", off);
+        let _: () = msg_send![ui.login_remember.get(), setState: saved];
     }
 }
 fn s_connect_error() {

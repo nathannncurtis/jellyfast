@@ -252,7 +252,7 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // --- Login card ---
     let card_w = 380.;
-    let card_h = 416.;
+    let card_h = 416. + 18. + SP3; // + "Remember me" row
     let card = surface(
         rect(b.size.w / 2. - card_w / 2., b.size.h / 2. - card_h / 2., card_w, card_h),
         C_CARD,
@@ -322,7 +322,19 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(cv, tog);
     ui.login_toggle = Ptr(tog);
 
-    let btn_top = tog_top + 18. + SP5;
+    // "Remember me" checkbox, checked from the saved preference (default on).
+    let rem_top = tog_top + 18. + SP3;
+    let rem: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Remember me")
+        target: nil() action: nil()];
+    let _: () = msg_send![rem, setButtonType: 3usize]; // NSSwitchButton (checkbox)
+    let _: () = msg_send![rem, setControlSize: 0usize]; // regular
+    let _: () = msg_send![rem, setFont: font(T_CALLOUT)];
+    let _: () = msg_send![rem, setState: if ui.cfg.remember_me { 1isize } else { 0isize }];
+    set_frame(rem, rect(inner_x - 4., top(rem_top, 18.), 200., 18.));
+    add_sub(cv, rem);
+    ui.login_remember = Ptr(rem);
+
+    let btn_top = rem_top + 18. + SP5;
     let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Connect")
         target: ui.ctl.get() action: sel!(connectClicked:)];
     let _: () = msg_send![btn, setBezelStyle: 1isize]; // push

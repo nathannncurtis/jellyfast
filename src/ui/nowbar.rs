@@ -464,7 +464,7 @@ pub(crate) extern "C" fn volume(_t: &mut Object, _c: Sel, sender: *mut Object) {
         let ty: NSUInteger = if ev.is_null() { 2 } else { msg_send![ev, type] };
         if ty != 6 {
             ui.cfg.volume = v;
-            crate::config::save_config(&ui.cfg);
+            crate::config::save_config_keeping_session(&ui.cfg);
         }
     }
 }

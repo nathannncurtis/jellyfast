@@ -17,8 +17,13 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     let poster_dir = crate::config::cache_dir().join("posters");
     let _ = std::fs::create_dir_all(&poster_dir);
 
-    // Silent auto-connect from persisted server + keychain token.
-    if let (Some(url), Some(uid)) = (cfg.server_url.clone(), cfg.user_id.clone()) {
+    // Silent auto-connect from persisted server + keychain token, only when
+    // "Remember me" was on. Otherwise nothing may persist: drop any leftover token.
+    if !cfg.remember_me {
+        if let Some(url) = cfg.server_url.clone() {
+            crate::config::delete_token(&url);
+        }
+    } else if let (Some(url), Some(uid)) = (cfg.server_url.clone(), cfg.user_id.clone()) {
         if let Some(token) = crate::config::load_token(&url) {
             match crate::jellyfin::client::JellyfinClient::new(&url, token.clone(), uid.clone(), &cfg.device_id) {
                 Ok(c) => match connect_flow(&c, &cfg.username.clone().unwrap_or_else(|| uid.clone()), &main_tx).await {
@@ -52,8 +57,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
         };
         match cmd {
             UiCmd::QuitSaving => { /* marker no-op (see sys note); real saves happen on terminate */ }
-            UiCmd::Connect { url, username, password, api_key } => {
-                match connect_cmd(&url, &username, password, api_key, &mut cfg, &main_tx).await {
+            UiCmd::Connect { url, username, password, api_key, remember } => {
+                match connect_cmd(&url, &username, password, api_key, remember, &mut cfg, &main_tx).await {
                     Ok(c) => client = Some(c),
                     Err(e) => {
                         let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
@@ -626,6 +631,7 @@ pub(crate) async fn connect_cmd(
     username: &str,
     password: Option<String>,
     api_key: Option<String>,
+    remember: bool,
     cfg: &mut Config,
     main_tx: &UnboundedSender<MainMsg>,
 ) -> Result<JellyfinClient, crate::jellyfin::client::JFError> {
@@ -649,11 +655,24 @@ pub(crate) async fn connect_cmd(
 
     let c = JellyfinClient::new(url, token.clone(), user_id.clone(), &cfg.device_id)?;
     connect_flow(&c, &user_name, main_tx).await?;
-    // Persist credentials only after a fully successful connect.
-    cfg.server_url = Some(normalize(url));
-    cfg.username = Some(user_name.clone());
-    cfg.user_id = Some(user_id.clone());
-    crate::config::store_token(&normalize(url), &token);
+    // Persist only after a fully successful connect. The choice itself is saved
+    // either way, so the next launch knows whether to sign in automatically.
+    let previous = cfg.server_url.take();
+    cfg.remember_me = remember;
+    if remember {
+        cfg.server_url = Some(normalize(url));
+        cfg.username = Some(user_name.clone());
+        cfg.user_id = Some(user_id.clone());
+        crate::config::store_token(&normalize(url), &token);
+    } else {
+        // Remember me off: no token and no session identity survive this sign-in.
+        crate::config::delete_token(&normalize(url));
+        if let Some(prev) = previous {
+            crate::config::delete_token(&prev);
+        }
+        cfg.username = None;
+        cfg.user_id = None;
+    }
     crate::config::save_config(cfg);
     // The UI keeps its own copy of the config; without this, Settings shows a
     // stale or empty Server URL until relaunch, and the next save looks changed.
@@ -1122,7 +1141,7 @@ mod tests {
     }
 
     fn connect_pw(url: &str) -> UiCmd {
-        UiCmd::Connect { url: url.into(), username: "alice".into(), password: Some("pw".into()), api_key: None }
+        UiCmd::Connect { url: url.into(), username: "alice".into(), password: Some("pw".into()), api_key: None, remember: true }
     }
 
     /// Worker connected to a fresh mock via the password path.
@@ -1215,7 +1234,7 @@ mod tests {
         let _env = TestEnv::new();
         let m = start_mock().await;
         let mut h = H::start(base_cfg());
-        h.send(UiCmd::Connect { url: m.url(), username: "me".into(), password: None, api_key: Some("apikey-1".into()) });
+        h.send(UiCmd::Connect { url: m.url(), username: "me".into(), password: None, api_key: Some("apikey-1".into()), remember: true });
         match h.next().await {
             MainMsg::Connected { user_name, views, .. } => {
                 assert_eq!(user_name, "me");
@@ -1236,25 +1255,25 @@ mod tests {
         let mut h = H::start(base_cfg());
 
         // Bad URL.
-        h.send(UiCmd::Connect { url: "ftp://nope".into(), username: "a".into(), password: Some("b".into()), api_key: None });
+        h.send(UiCmd::Connect { url: "ftp://nope".into(), username: "a".into(), password: Some("b".into()), api_key: None, remember: true });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("Invalid server URL"), "{e}"),
             o => panic!("{:?}", o),
         }
         // Wrong password -> 401.
-        h.send(UiCmd::Connect { url: m.url(), username: "alice".into(), password: Some("bad".into()), api_key: None });
+        h.send(UiCmd::Connect { url: m.url(), username: "alice".into(), password: Some("bad".into()), api_key: None, remember: true });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("Sign-in failed"), "{e}"),
             o => panic!("{:?}", o),
         }
         // Bad API key.
-        h.send(UiCmd::Connect { url: m.url(), username: "a".into(), password: None, api_key: Some("wrong".into()) });
+        h.send(UiCmd::Connect { url: m.url(), username: "a".into(), password: None, api_key: Some("wrong".into()), remember: true });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("Sign-in failed"), "{e}"),
             o => panic!("{:?}", o),
         }
         // Neither password nor key.
-        h.send(UiCmd::Connect { url: m.url(), username: "a".into(), password: None, api_key: None });
+        h.send(UiCmd::Connect { url: m.url(), username: "a".into(), password: None, api_key: None, remember: true });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("password or an API key"), "{e}"),
             o => panic!("{:?}", o),
@@ -1281,6 +1300,87 @@ mod tests {
         assert!(crate::config::load_token(&m.url()).is_none());
         // Still not connected.
         assert!(matches!(h.drain_via_probe().await.as_slice(), []));
+    }
+
+    #[tokio::test]
+    async fn remember_me_on_connect_persists_token_and_session() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::Connect {
+            url: m.url(),
+            username: "alice".into(),
+            password: Some("pw".into()),
+            api_key: None,
+            remember: true,
+        });
+        assert!(matches!(h.next().await, MainMsg::Connected { .. }));
+        let c = load_config();
+        assert!(c.remember_me);
+        assert_eq!(c.server_url.as_deref(), Some(m.url().as_str()));
+        assert_eq!(c.user_id.as_deref(), Some("u1"));
+        assert_eq!(crate::config::load_token(&m.url()).as_deref(), Some("tok123"));
+    }
+
+    #[tokio::test]
+    async fn remember_me_off_connect_persists_nothing() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::Connect {
+            url: m.url(),
+            username: "alice".into(),
+            password: Some("pw".into()),
+            api_key: None,
+            remember: false,
+        });
+        assert!(matches!(h.next().await, MainMsg::Connected { .. }));
+        let c = load_config();
+        assert!(!c.remember_me, "the choice itself is saved");
+        assert!(c.server_url.is_none() && c.user_id.is_none() && c.username.is_none());
+        assert!(crate::config::load_token(&m.url()).is_none());
+        let on_disk = std::fs::read_to_string(crate::config::config_path()).unwrap();
+        assert!(!on_disk.contains("tok123") && !on_disk.contains(&m.url()));
+    }
+
+    #[tokio::test]
+    async fn remember_me_off_connect_forgets_previously_remembered_session() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        h.send(connect_pw(&m.url()));
+        assert!(matches!(h.next().await, MainMsg::Connected { .. }));
+        assert!(crate::config::load_token(&m.url()).is_some());
+        h.send(UiCmd::Connect {
+            url: m.url(),
+            username: "alice".into(),
+            password: Some("pw".into()),
+            api_key: None,
+            remember: false,
+        });
+        assert!(matches!(h.next().await, MainMsg::Connected { .. }));
+        assert!(crate::config::load_token(&m.url()).is_none());
+        assert!(load_config().server_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_with_remember_me_off_does_not_auto_connect() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        crate::config::store_token(&m.url(), "tok123");
+        let cfg = Config {
+            server_url: Some(m.url()),
+            user_id: Some("u1".into()),
+            username: Some("Alice Display".into()),
+            remember_me: false,
+            ..base_cfg()
+        };
+        let mut h = H::start(cfg);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(m.reqs().is_empty(), "no server calls at launch");
+        assert!(crate::config::load_token(&m.url()).is_none(), "leftover token removed");
+        h.send(UiCmd::ProbeServer);
+        assert!(matches!(h.next().await, MainMsg::ServerDown | MainMsg::ServerUp));
     }
 
     #[tokio::test]
