@@ -5,7 +5,8 @@
 //! actions are invoked through real Objective-C dispatch on the JRCtl object,
 //! and outgoing UiCmds are logged by a drain task in main.rs. Steps run one per
 //! run-loop turn (optionally delayed) so AppKit layout/timers/KVO really fire.
-//! Video: $JELLYFIN_MAC_SELFTEST_VIDEO, else a system .m4v/.mov.
+//! Video: $JELLYFIN_MAC_SELFTEST_VIDEO, else assets/selftest.mp4 (a plain gradient clip
+//! with two audio tracks and one subtitle track).
 #![allow(unsafe_code)]
 use crate::app::controller::handle_main;
 use crate::app::messages::*;
@@ -173,7 +174,7 @@ fn image_bytes(kind: usize, w: usize, h: usize, shade: u8) -> Vec<u8> {
 }
 fn video_url() -> String {
     let path = std::env::var("JELLYFIN_MAC_SELFTEST_VIDEO").unwrap_or_else(|_| {
-        "/System/Library/Frameworks/ImagePlayground.framework/Versions/A/Resources/ReframeOrExpand.m4v".into()
+        concat!(env!("CARGO_MANIFEST_DIR"), "/assets/selftest.mp4").into()
     });
     let enc: Vec<String> = path.split('/').map(crate::jellyfin::urls::enc).collect();
     format!("file://{}", enc.join("/"))
