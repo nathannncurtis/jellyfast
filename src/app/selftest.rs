@@ -61,6 +61,10 @@ pub fn start() {
         state_check("launch: content_host hidden", h == YES);
         let h: BOOL = msg_send![ui.spinner.get(), isHidden];
         state_check("launch: spinner hidden", h == YES);
+        if !crate::ui::theme::reduce_transparency() {
+            let bh: BOOL = msg_send![ui.bgfx.get(), isHidden];
+            state_check("launch: login backdrop visible", bh == NO);
+        }
         let t: *mut Object = msg_send![ui.win.get(), title];
         state_check("window title is Jellyfast", to_str(t) == "Jellyfast");
     }
@@ -91,6 +95,7 @@ fn next(i: usize) {
 fn steps() -> Vec<Step> {
     vec![
         ("login: empty connect", s_login_empty, 50),
+        ("audit: login (long strings)", s_audit_login, 100),
         ("login: filled connect", s_login_filled, 50),
         ("connect error", s_connect_error, 50),
         ("connected (views + livetv)", s_connected, 100),
@@ -99,6 +104,7 @@ fn steps() -> Vec<Step> {
         ("worker->UI path (WORKER_TX)", s_worker_path, 400),
         ("worker->UI path check", s_worker_check, 50),
         ("posters (png, jpeg, garbage)", s_posters, 100),
+        ("audit: grid (long titles)", s_audit_grid, 200),
         ("resize window", s_resize, 200),
         ("hover cells", s_hover, 50),
         ("sidebar click", s_sidebar_click, 50),
@@ -245,7 +251,236 @@ fn state_check(what: &str, ok: bool) {
     }
 }
 
+// ---- layout audit (overlap / truncation) ------------------------------------
+//
+// Walks every visible window (sheets included) and reports:
+//  * sibling NSTextField / NSButton pairs whose frames intersect by more than 1pt;
+//  * labels / buttons whose text is wider than their frame without a truncating
+//    line-break mode (wrapping labels must instead be tall enough for their text);
+//  * text that intersects the standard window buttons (traffic lights).
+// Documented exemptions:
+//  * NSButton with an empty title and no image: a transparent full-area hit target
+//    (poster cell click button, sidebar row button) that is meant to sit above its labels;
+//  * hidden views, views with alpha 0, and zero-size views.
+unsafe fn visible(v: *mut Object) -> bool {
+    let h: BOOL = msg_send![v, isHidden];
+    let a: f64 = msg_send![v, alphaValue];
+    h == NO && a > 0.01
+}
+unsafe fn is_kind(v: *mut Object, cls: &objc::runtime::Class) -> bool {
+    let b: BOOL = msg_send![v, isKindOfClass: cls];
+    b == YES
+}
+unsafe fn describe(v: *mut Object) -> String {
+    let cls: *mut Object = msg_send![v, className];
+    let txt = if is_kind(v, class!(NSControl)) {
+        let sv: *mut Object = msg_send![v, stringValue];
+        to_str(sv)
+    } else {
+        String::new()
+    };
+    let t: String = txt.chars().take(24).collect();
+    let f: NSRect = msg_send![v, frame];
+    format!("{}[\"{}\" {:.0},{:.0} {:.0}x{:.0}]", to_str(cls), t, f.origin.x, f.origin.y, f.size.w, f.size.h)
+}
+unsafe fn is_text_item(v: *mut Object) -> bool {
+    is_kind(v, class!(NSTextField)) || is_kind(v, class!(NSButton))
+}
+unsafe fn is_hit_target(v: *mut Object) -> bool {
+    if !is_kind(v, class!(NSButton)) {
+        return false;
+    }
+    let t: *mut Object = msg_send![v, title];
+    let img: *mut Object = msg_send![v, image];
+    to_str(t).is_empty() && img.is_null()
+}
+unsafe fn audit_view(v: *mut Object, issues: &mut Vec<String>) {
+    if !visible(v) {
+        return;
+    }
+    let subs: *mut Object = msg_send![v, subviews];
+    let n: usize = msg_send![subs, count];
+    let mut items: Vec<*mut Object> = vec![];
+    for i in 0..n {
+        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        if !visible(c) {
+            continue;
+        }
+        if is_text_item(c) && !is_hit_target(c) {
+            let f: NSRect = msg_send![c, frame];
+            if f.size.w > 0.5 && f.size.h > 0.5 {
+                items.push(c);
+            }
+        }
+        audit_view(c, issues);
+    }
+    for i in 0..items.len() {
+        for j in (i + 1)..items.len() {
+            let a: NSRect = msg_send![items[i], frame];
+            let b: NSRect = msg_send![items[j], frame];
+            let ox = (a.origin.x + a.size.w).min(b.origin.x + b.size.w) - a.origin.x.max(b.origin.x);
+            let oy = (a.origin.y + a.size.h).min(b.origin.y + b.size.h) - a.origin.y.max(b.origin.y);
+            if ox > 1.0 && oy > 1.0 {
+                issues.push(format!("overlap: {} x {}", describe(items[i]), describe(items[j])));
+            }
+        }
+    }
+    for &c in &items {
+        if is_kind(c, class!(NSTextField)) {
+            let editable: BOOL = msg_send![c, isEditable];
+            if editable == YES {
+                continue; // inputs scroll their text
+            }
+            let f: NSRect = msg_send![c, frame];
+            let cell: *mut Object = msg_send![c, cell];
+            let lb: isize = msg_send![cell, lineBreakMode];
+            let sz: NSSize = msg_send![cell, cellSize];
+            let txt = to_str(msg_send![c, stringValue]);
+            if txt.is_empty() {
+                continue;
+            }
+            let wraps = lb == 0 || lb == 2; // word / char wrapping
+            if wraps {
+                let need: NSSize = msg_send![cell, cellSizeForBounds: rect(0., 0., f.size.w, 10000.)];
+                if need.h > f.size.h + 1.0 {
+                    issues.push(format!("clipped wrapping text: {} needs h={:.0}", describe(c), need.h));
+                }
+            } else if sz.w > f.size.w + 1.0 && lb != 4 && lb != 3 && lb != 5 {
+                issues.push(format!("no truncation: {} text w={:.0}", describe(c), sz.w));
+            }
+        }
+    }
+}
+/// Traffic-light collision: any visible text in the window's content that sits under a standard button.
+unsafe fn audit_traffic(win: *mut Object, issues: &mut Vec<String>) {
+    let content: *mut Object = msg_send![win, contentView];
+    for kind in 0..3isize {
+        let b: *mut Object = msg_send![win, standardWindowButton: kind];
+        if b.is_null() || !visible(b) {
+            continue;
+        }
+        let bb: NSRect = msg_send![b, bounds];
+        let br: NSRect = msg_send![b, convertRect: bb toView: nil()];
+        walk_text_windowrect(content, br, issues);
+    }
+}
+unsafe fn walk_text_windowrect(v: *mut Object, br: NSRect, issues: &mut Vec<String>) {
+    if !visible(v) {
+        return;
+    }
+    if is_kind(v, class!(NSTextField)) && !to_str(msg_send![v, stringValue]).is_empty() {
+        let bb: NSRect = msg_send![v, bounds];
+        let r: NSRect = msg_send![v, convertRect: bb toView: nil()];
+        let ox = (r.origin.x + r.size.w).min(br.origin.x + br.size.w) - r.origin.x.max(br.origin.x);
+        let oy = (r.origin.y + r.size.h).min(br.origin.y + br.size.h) - r.origin.y.max(br.origin.y);
+        if ox > 1.0 && oy > 1.0 {
+            issues.push(format!("under traffic lights: {}", describe(v)));
+        }
+    }
+    let subs: *mut Object = msg_send![v, subviews];
+    let n: usize = msg_send![subs, count];
+    for i in 0..n {
+        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        walk_text_windowrect(c, br, issues);
+    }
+}
+/// With JELLYFIN_MAC_SHOTS=<dir>, capture the window with screencapture (own-window capture).
+fn shot(tag: &str, idx: usize, win: *mut Object) {
+    let dir = match std::env::var("JELLYFIN_MAC_SHOTS") {
+        Ok(d) if !d.is_empty() => d,
+        _ => return,
+    };
+    unsafe {
+        let _: () = msg_send![win, displayIfNeeded];
+        let _: () = msg_send![class!(CATransaction), flush];
+        let num: isize = msg_send![win, windowNumber];
+        let appearance = std::env::var("JELLYFIN_MAC_APPEARANCE").unwrap_or_else(|_| "system".into());
+        let clean: String = tag.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
+        let path = format!("{}/{}-{}-w{}.png", dir, appearance, clean, idx);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let _ = std::process::Command::new("screencapture")
+            .args(["-x", "-o", "-l", &num.to_string(), &path])
+            .status();
+        log(&format!("  shot {}", path));
+    }
+}
+/// Fails the run (exit 2) if any visible window has layout problems.
+fn audit(tag: &str) {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let wins: *mut Object = msg_send![ui.app.get(), windows];
+        let n: usize = msg_send![wins, count];
+        let mut issues = vec![];
+        for i in 0..n {
+            let w: *mut Object = msg_send![wins, objectAtIndex: i];
+            let vis: BOOL = msg_send![w, isVisible];
+            if vis == NO {
+                continue;
+            }
+            let _: () = msg_send![w, layoutIfNeeded];
+            let content: *mut Object = msg_send![w, contentView];
+            let before = issues.len();
+            audit_view(content, &mut issues);
+            let is_main = w == ui.win.get();
+            if is_main {
+                audit_traffic(w, &mut issues);
+            }
+            let title = to_str(msg_send![w, title]);
+            shot(tag, i, w);
+            for it in issues.iter().skip(before) {
+                log(&format!("  layout[{}] ({}): {}", tag, title, it));
+            }
+        }
+        state_check(&format!("layout audit: {} ({} issues)", tag, issues.len()), issues.is_empty());
+    }
+}
+fn set_content_size(w: f64, h: f64) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: () = msg_send![ui.win.get(), setContentSize: size(w, h)];
+        let _: () = msg_send![ui.win.get(), displayIfNeeded];
+        let _: () = msg_send![ui.grid.get(), layoutSubtreeIfNeeded];
+    }
+}
+/// Audit at minimum and at a large window size.
+fn audit_both(tag: &str) {
+    set_content_size(960.0, 600.0);
+    audit(&format!("{} @min", tag));
+    set_content_size(1700.0, 1000.0);
+    audit(&format!("{} @large", tag));
+    set_content_size(1280.0, 800.0);
+}
+const LONG: &str = "An extremely long title that goes on and on and on, far beyond any sensible width for a poster cell or a header, to prove truncation works properly";
+
 // ---- steps ----------------------------------------------------------------
+fn s_audit_login() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        set_text(ui.login_url.get(), &format!("http://{}.example.com:8096", "very-long-hostname-".repeat(6)));
+        set_text(ui.login_user.get(), &"long-username-".repeat(8));
+        crate::ui::shell::login_error(LONG);
+    }
+    audit_both("login/error");
+    unsafe {
+        crate::ui::shell::login_status(&format!("Connecting to {}…", "very-long-hostname-".repeat(6)));
+    }
+    audit_both("login/connecting");
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        set_text(ui.login_url.get(), "");
+        set_text(ui.login_user.get(), "");
+        crate::ui::shell::login_status("");
+    }
+}
+fn s_audit_grid() {
+    let mut v = items_of("Movie", 14);
+    for (i, it) in v.iter_mut().enumerate() {
+        it.name = format!("{} {}", i, LONG.repeat(1).chars().take(120).collect::<String>());
+    }
+    send_items(&format!("Movies {}", LONG), v, true);
+    audit_both("grid");
+    send_items("Movies", items_of("Movie", 12), false);
+}
 fn s_login_empty() {
     unsafe { act(sel!(connectClicked:), nil()) }
 }
@@ -283,6 +518,9 @@ fn s_connected() {
         });
         state_check("auto-selected first library", ui.mode_stack.len() == 1 && ui.mode_stack[0].0 == "v1");
         state_check("selected_view set", ui.selected_view == Some(0));
+        state_check("window is opaque", { let o: BOOL = msg_send![ui.win.get(), isOpaque]; o == YES });
+        state_check("library canvas draws background", { let o: BOOL = msg_send![ui.lib_scroll.get(), drawsBackground]; o == YES });
+        state_check("login backdrop hidden once connected", { let o: BOOL = msg_send![ui.bgfx.get(), isHidden]; o == YES });
         state_check("auto-select sent LoadView", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == "v1")));
     }
 }

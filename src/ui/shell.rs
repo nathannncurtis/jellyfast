@@ -5,6 +5,7 @@ use crate::app::controller::*;
 use crate::app::messages::*;
 use crate::platform::appkit::*;
 use crate::platform::avkit::*;
+use crate::ui::theme::*;
 use crate::ui::library::*;
 use crate::ui::settings::*;
 use objc::class;
@@ -36,17 +37,14 @@ pub(crate) unsafe fn build_window_and_ui() {
     let _: () = msg_send![win, setReleasedWhenClosed: NO];
     let _: () = msg_send![win, setTabbingMode: 2i64]; // disallowed
     let _: () = msg_send![win, setMinSize: size(960., 600.)];
-    let _: () = msg_send![win, setOpaque: NO];
-    let clear: *mut Object = msg_send![class!(NSColor), clearColor];
-    let _: () = msg_send![win, setBackgroundColor: clear];
     let _: () = msg_send![win, center];
     ui.win = Ptr::retained(win);
 
     let content: *mut Object = msg_send![win, contentView];
     let b = bounds_of(content);
+    let _: () = msg_send![content, setWantsLayer: YES]; // crossfade() needs a layer
 
-    // Background vibrancy (whole-window glass; adapts to light/dark and to
-    // macOS 15's material rendering automatically).
+    // Login backdrop only: the main window itself is opaque.
     let bg = vev(MAT_UNDER_WINDOW, BLEND_BEHIND);
     set_frame(bg, b);
     set_autoresize(bg, RESIZE_W | RESIZE_H);
@@ -62,8 +60,13 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.content_host = Ptr(content_host);
 
     // Sidebar
+    // Opaque canvas under header + grid (the sidebar is the only translucent surface).
+    let canvas = surface(rect(SIDEBAR_W, 0., b.size.w - SIDEBAR_W, b.size.h), C_CANVAS, 0.);
+    set_autoresize(canvas, RESIZE_W | RESIZE_H);
+    add_sub(content_host, canvas);
+
     let sb = vev(MAT_SIDEBAR, BLEND_BEHIND);
-    set_frame(sb, rect(0., 0., 240., b.size.h));
+    set_frame(sb, rect(0., 0., SIDEBAR_W, b.size.h));
     set_autoresize(sb, RESIZE_H | MARGIN_MAXX);
     add_sub(content_host, sb);
     ui.sidebar = Ptr(sb);
@@ -127,7 +130,8 @@ pub(crate) unsafe fn build_window_and_ui() {
     let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
     let sc: *mut Object = msg_send![sc, initWithFrame: rect(256., 0., pb.size.w - 256. - 12., pb.size.h - 60.)];
     let _: () = msg_send![sc, setHasVerticalScroller: YES];
-    let _: () = msg_send![sc, setDrawsBackground: NO];
+    let _: () = msg_send![sc, setDrawsBackground: YES];
+    let _: () = msg_send![sc, setBackgroundColor: color(C_CANVAS)];
     set_autoresize(sc, RESIZE_W | RESIZE_H);
     add_sub(content_host, sc);
     autorel(sc);
@@ -228,48 +232,101 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.chip_label = Ptr(chip_l);
 
     // --- Login card ---
-    let card = vev(MAT_POPOVER, BLEND_WITHIN);
-    let card_w = 340.;
-    let card_h = 320.;
-    set_frame(card, rect(b.size.w / 2. - card_w / 2., b.size.h / 2. - card_h / 2., card_w, card_h));
+    let card_w = 380.;
+    let card_h = 416.;
+    let card = surface(
+        rect(b.size.w / 2. - card_w / 2., b.size.h / 2. - card_h / 2., card_w, card_h),
+        C_CARD,
+        R_CARD,
+    );
+    let _: () = msg_send![card, setBorderWidth: 1.0f64];
+    let _: () = msg_send![card, setBorderColor: color(C_SEPARATOR)];
     set_autoresize(card, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
-    let cl = layer_of(card);
-    let _: () = msg_send![cl, setCornerRadius: 14.0f64];
-    let _: () = msg_send![cl, setMasksToBounds: YES];
+    let _: () = msg_send![card, setWantsLayer: YES];
+    let shadow: *mut Object = msg_send![class!(NSShadow), alloc];
+    let shadow: *mut Object = autorel(msg_send![shadow, init]);
+    let _: () = msg_send![shadow, setShadowBlurRadius: SH_CARD.radius];
+    let _: () = msg_send![shadow, setShadowOffset: size(0., SH_CARD.dy)];
+    let _: () = msg_send![shadow, setShadowColor: color_a_black_fn(SH_CARD.opacity as f64)];
+    let _: () = msg_send![card, setShadow: shadow];
     add_sub(content, card);
     ui.login_card = Ptr(card);
+    let cv: *mut Object = msg_send![card, contentView];
 
-    let t = make_label("Sign in to Jellyfin", 17.0, true, false);
-    set_frame(t, rect(24., card_h - 44., card_w - 48., 24.));
-    add_sub(card, t);
+    let inner_x = SP8;
+    let inner_w = card_w - 2. * SP8;
+    let top = |t: f64, h: f64| card_h - t - h; // y from a distance below the card top
 
-    let url_f = text_field("Server URL (http://host:8096)", false);
-    set_frame(url_f, rect(24., card_h - 96., card_w - 48., 26.));
-    add_sub(card, url_f);
+    let mark = symbol("play.rectangle.on.rectangle.fill", 36., Weight::Regular);
+    let mv: *mut Object = msg_send![class!(NSImageView), alloc];
+    let mv: *mut Object = autorel(msg_send![mv, initWithFrame: rect(inner_x, top(SP8, 44.), inner_w, 44.)]);
+    if !mark.is_null() {
+        let _: () = msg_send![mv, setImage: mark];
+        let _: () = msg_send![mv, setContentTintColor: color(C_ACCENT)];
+    }
+    add_sub(cv, mv);
+    let t = label("Jellyfast", T_TITLE, C_TEXT, ALIGN_CENTER);
+    set_frame(t, rect(inner_x, top(SP8 + 44. + SP3, 26.), inner_w, 26.));
+    add_sub(cv, t);
+    let sub = label("Connect to your Jellyfin server", T_CALLOUT, C_TEXT2, ALIGN_CENTER);
+    set_frame(sub, rect(inner_x, top(SP8 + 44. + SP3 + 26. + SP1, 16.), inner_w, 16.));
+    add_sub(cv, sub);
+
+    let fields_top = SP8 + 44. + SP3 + 26. + SP1 + 16. + SP6; // 148
+    let fh = 28.;
+    let large_field = |ph: &str, secure: bool, row: f64| -> *mut Object {
+        let f = text_field(ph, secure);
+        let _: () = msg_send![f, setControlSize: 3usize]; // large
+        let _: () = msg_send![f, setFont: font(T_BODY)];
+        set_frame(f, rect(inner_x, top(fields_top + row * (fh + SP3), fh), inner_w, fh));
+        add_sub(cv, f);
+        f
+    };
+    let url_f = large_field("jellyfin.local:8096", false, 0.);
     ui.login_url = Ptr(url_f);
-    let user_f = text_field("Username", false);
-    set_frame(user_f, rect(24., card_h - 132., card_w - 48., 26.));
-    add_sub(card, user_f);
+    let user_f = large_field("Username", false, 1.);
     ui.login_user = Ptr(user_f);
-    let pass_f = text_field("Password", true);
-    set_frame(pass_f, rect(24., card_h - 168., card_w - 48., 26.));
-    add_sub(card, pass_f);
+    let pass_f = large_field("Password", true, 2.);
     ui.login_pass = Ptr(pass_f);
-    let key_f = text_field("API key (alternative to password)", false);
-    set_frame(key_f, rect(24., card_h - 204., card_w - 48., 26.));
-    add_sub(card, key_f);
+    let key_f = large_field("API key", true, 2.);
+    set_hidden(key_f, true);
     ui.login_key = Ptr(key_f);
 
+    let tog_top = fields_top + 3. * fh + 2. * SP3 + SP2;
+    let tog: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Use an API key instead")
+        target: ui.ctl.get() action: sel!(toggleApiKey:)];
+    let _: () = msg_send![tog, setBordered: NO];
+    let _: () = msg_send![tog, setFont: font(T_CALLOUT)];
+    let _: () = msg_send![tog, setContentTintColor: color(C_ACCENT)];
+    let _: () = msg_send![tog, setAlignment: ALIGN_LEFT as isize];
+    set_frame(tog, rect(inner_x - 4., top(tog_top, 18.), 220., 18.));
+    add_sub(cv, tog);
+    ui.login_toggle = Ptr(tog);
+
+    let btn_top = tog_top + 18. + SP5;
     let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Connect")
         target: ui.ctl.get() action: sel!(connectClicked:)];
-    set_frame(btn, rect(24., card_h - 244., card_w - 48., 32.));
+    let _: () = msg_send![btn, setBezelStyle: 1isize]; // push
+    let _: () = msg_send![btn, setControlSize: 3usize];
     let _: () = msg_send![btn, setKeyEquivalent: ns("\r")];
-    add_sub(card, btn);
+    set_frame(btn, rect(inner_x, top(btn_top, 32.), inner_w, 32.));
+    add_sub(cv, btn);
     ui.login_btn = Ptr(btn);
 
-    let err = crate::ui::theme::wrapping_label("", crate::ui::theme::T_CALLOUT, crate::ui::theme::C_TEXT2, crate::ui::theme::ALIGN_LEFT);
-    set_frame(err, rect(24., 20., card_w - 48., 44.));
-    add_sub(card, err);
+    let st_top = btn_top + 32. + SP3;
+    let lsp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
+    let lsp: *mut Object = autorel(msg_send![lsp, initWithFrame: rect(inner_x, top(st_top, 16.), 16., 16.)]);
+    let _: () = msg_send![lsp, setStyle: 1isize]; // spinning
+    let _: () = msg_send![lsp, setControlSize: 1usize]; // small
+    let _: () = msg_send![lsp, setIndeterminate: YES];
+    let _: () = msg_send![lsp, setUsesThreadedAnimation: YES];
+    set_hidden(lsp, true);
+    add_sub(cv, lsp);
+    ui.login_spin = Ptr(lsp);
+
+    let err = wrapping_label("", T_CALLOUT, C_TEXT2, ALIGN_LEFT);
+    set_frame(err, rect(inner_x, top(st_top, 48.), inner_w, 48.));
+    add_sub(cv, err);
     ui.login_err = Ptr(err);
 
     // Restore remembered URL/user.
@@ -308,7 +365,10 @@ pub(crate) unsafe fn add_arranged(stack: *mut Object, v: *mut Object, _top: CGFl
 
 pub(crate) unsafe fn apply_theme() {
     let ui = UI.get_mut().unwrap();
-    let appearance: *mut Object = match ui.cfg.settings.theme.as_str() {
+    // Self-test only: JELLYFIN_MAC_APPEARANCE=light|dark pins the appearance for screenshots.
+    let forced = if crate::app::selftest::enabled() { std::env::var("JELLYFIN_MAC_APPEARANCE").ok() } else { None };
+    let theme = forced.unwrap_or_else(|| ui.cfg.settings.theme.clone());
+    let appearance: *mut Object = match theme.as_str() {
         "light" => {
             let a: *mut Object =
                 msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameAqua")];
@@ -462,6 +522,7 @@ pub fn show_login_or_library(connected: bool) {
         crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
         set_hidden(ui.content_host.get(), !connected);
         set_hidden(ui.login_card.get(), connected);
+        set_hidden(ui.bgfx.get(), connected || reduce_transparency());
         if connected {
             let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
         } else {
@@ -471,13 +532,33 @@ pub fn show_login_or_library(connected: bool) {
     }
 }
 
+pub(crate) extern "C" fn toggle_api_key(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let key_mode = !is_hidden(ui.login_pass.get());
+        set_hidden(ui.login_pass.get(), key_mode);
+        set_hidden(ui.login_key.get(), !key_mode);
+        set_text(
+            ui.login_toggle.get(),
+            if key_mode { "Use a password instead" } else { "Use an API key instead" },
+        );
+        let f = if key_mode { ui.login_key.get() } else { ui.login_pass.get() };
+        let _: BOOL = msg_send![ui.win.get(), makeFirstResponder: f];
+    }
+}
+pub(crate) unsafe fn is_hidden(v: *mut Object) -> bool {
+    let h: BOOL = msg_send![v, isHidden];
+    h == YES
+}
+
 /// Neutral progress/info text on the login card (secondary colour).
 pub fn login_status(msg: &str) {
     use crate::ui::theme::*;
     unsafe {
         let ui = UI.get_mut().unwrap();
-        set_text(ui.login_err.get(), msg);
+        set_text(ui.login_err.get(), &clip_msg(msg, 96));
         set_label_color(ui.login_err.get(), C_TEXT2);
+        login_layout_status(!msg.is_empty() && msg.ends_with('…'));
     }
 }
 
@@ -486,11 +567,35 @@ pub fn login_error(msg: &str) {
     use crate::ui::theme::*;
     unsafe {
         let ui = UI.get_mut().unwrap();
-        set_text(ui.login_err.get(), msg);
+        set_text(ui.login_err.get(), &clip_msg(msg, 140));
         set_label_color(ui.login_err.get(), C_DANGER);
+        login_layout_status(false);
         let _: () = msg_send![ui.login_btn.get(), setEnabled: YES];
         set_text(ui.login_btn.get(), "Connect");
         set_busy(false);
+    }
+}
+
+/// Three wrapped lines fit the status area; longer text is cut with an ellipsis instead of clipping.
+pub fn clip_msg(msg: &str, max: usize) -> String {
+    if msg.chars().count() > max {
+        format!("{}…", msg.chars().take(max - 1).collect::<String>())
+    } else {
+        msg.to_string()
+    }
+}
+
+/// Show the inline spinner (and indent the text next to it) or not.
+unsafe fn login_layout_status(spinning: bool) {
+    let ui = UI.get_mut().unwrap();
+    let f = frame_of(ui.login_err.get());
+    let x = if spinning { SP8 + 16. + SP2 } else { SP8 };
+    set_frame(ui.login_err.get(), rect(x, f.origin.y, 380. - SP8 - x, f.size.h));
+    set_hidden(ui.login_spin.get(), !spinning);
+    if spinning {
+        let _: () = msg_send![ui.login_spin.get(), startAnimation: nil()];
+    } else {
+        let _: () = msg_send![ui.login_spin.get(), stopAnimation: nil()];
     }
 }
 
@@ -503,11 +608,21 @@ pub fn host_of(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::host_of;
+    use super::{clip_msg, host_of};
+    #[test]
+    fn clip_msg_limits_length() {
+        assert_eq!(clip_msg("short", 10), "short");
+        assert_eq!(clip_msg(&"x".repeat(50), 10).chars().count(), 10);
+    }
     #[test]
     fn host_of_strips_scheme_and_path() {
         assert_eq!(host_of("http://192.168.1.10:8096/web"), "192.168.1.10:8096");
         assert_eq!(host_of(" https://j.example.com "), "j.example.com");
         assert_eq!(host_of("jellyfin.local:8096"), "jellyfin.local:8096");
     }
+}
+
+unsafe fn color_a_black_fn(a: f64) -> *mut Object {
+    let b: *mut Object = msg_send![class!(NSColor), blackColor];
+    msg_send![b, colorWithAlphaComponent: a]
 }

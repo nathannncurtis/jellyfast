@@ -247,6 +247,8 @@ pub struct Ui {
     pub login_key: Ptr,
     pub login_btn: Ptr,
     pub login_err: Ptr,
+    pub login_spin: Ptr,
+    pub login_toggle: Ptr,
     pub settings_win: Ptr,
     pub s_url: Ptr,
     pub s_sub_lang: Ptr,
@@ -395,6 +397,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(markWatched:), mark_watched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
             (sel!(connectClicked:), connect_clicked as Extern0),
+            (sel!(toggleApiKey:), toggle_api_key as Extern0),
             (sel!(saveSettings:), save_settings as Extern0),
             (sel!(cancelSettings:), cancel_settings as Extern0),
             (sel!(sortChanged:), sort_changed as Extern0),
@@ -703,13 +706,15 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
         let url = read_field(ui.login_url.get());
         let user = read_field(ui.login_user.get());
         let pass = read_field_secure(ui.login_pass.get());
-        let key = read_field_secure(ui.login_key.get());
+        let key_mode = is_hidden(ui.login_pass.get());
+        let key = if key_mode { read_field_secure(ui.login_key.get()) } else { String::new() };
+        let pass = if key_mode { String::new() } else { pass };
         login_status(""); // clear
         if url.is_empty() {
             login_error("Enter your server's address, like jellyfin.local:8096.");
             return;
         }
-        if user.is_empty() && key.is_empty() {
+        if (key_mode && key.is_empty()) || (!key_mode && user.is_empty()) {
             login_error("Enter your username and password, or use an API key.");
             return;
         }
@@ -829,10 +834,6 @@ pub(crate) unsafe fn vev(material: i64, blending: i64) -> *mut Object {
     autorel(v)
 }
 // Materials / blending modes (AppKit enum values, stable since 10.10):
-pub(crate) const MAT_SIDEBAR: i64 = 7;
-pub(crate) const MAT_POPOVER: i64 = 6;
-pub(crate) const MAT_HUD: i64 = 13;
-pub(crate) const MAT_UNDER_WINDOW: i64 = 21;
 pub(crate) const BLEND_BEHIND: i64 = 0;
 pub(crate) const BLEND_WITHIN: i64 = 1;
 pub(crate) const RESIZE_W: NSUInteger = 2;
@@ -928,6 +929,8 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         login_key: Ptr(nil()),
         login_btn: Ptr(nil()),
         login_err: Ptr(nil()),
+        login_spin: Ptr(nil()),
+        login_toggle: Ptr(nil()),
         settings_win: Ptr(nil()),
         s_url: Ptr(nil()),
         s_sub_lang: Ptr(nil()),
