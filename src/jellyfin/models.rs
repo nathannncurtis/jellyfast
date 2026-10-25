@@ -211,3 +211,51 @@ pub struct MediaStream {
     #[serde(rename = "DisplayTitle", default)]
     pub display_title: Option<String>,
 }
+
+/// One entry of an item's `People` list (cast and crew).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Person {
+    #[serde(rename = "Id", default)]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    /// Character name for actors; empty for crew.
+    #[serde(rename = "Role", default)]
+    pub role: Option<String>,
+    /// "Actor", "Director", "Writer", "GuestStar", ...
+    #[serde(rename = "Type", default)]
+    pub kind: Option<String>,
+    #[serde(rename = "PrimaryImageTag", default)]
+    pub image_tag: Option<String>,
+}
+
+/// GET /Users/{uid}/Items/{id}?Fields=... for the item detail page.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DetailItem {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "Type", default)]
+    pub item_type: String,
+    #[serde(rename = "ProductionYear", default)]
+    pub year: Option<u32>,
+    #[serde(rename = "OfficialRating", default)]
+    pub official_rating: Option<String>,
+    #[serde(rename = "CommunityRating", default)]
+    pub community_rating: Option<f64>,
+    #[serde(rename = "RunTimeTicks", default)]
+    pub run_time_ticks: Option<i64>,
+    #[serde(rename = "Genres", default)]
+    pub genres: Vec<String>,
+    #[serde(rename = "Overview", default)]
+    pub overview: Option<String>,
+    #[serde(rename = "People", default)]
+    pub people: Vec<Person>,
+    #[serde(rename = "UserData", default)]
+    pub user_data: Option<UserData>,
+    #[serde(rename = "ImageTags", default)]
+    pub image_tags: Option<ImageTags>,
+    #[serde(rename = "BackdropImageTags", default)]
+    pub backdrop_tags: Vec<String>,
+}

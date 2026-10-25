@@ -4,6 +4,10 @@ use super::urls as u;
 use super::models::*;
 use crate::jellyfin::urls::enc;
 
+/// `Fields` requested for the item detail page.
+const DETAIL_FIELDS: &str =
+    "People,Genres,Overview,CommunityRating,OfficialRating,ProductionYear,RunTimeTicks,BackdropImageTags";
+
 #[derive(Debug)]
 pub enum JFError {
     BadUrl(String),
@@ -253,6 +257,21 @@ impl JellyfinClient {
             ))
             .header("Authorization", self.auth_header())
             .header("X-Emby-Token", &self.token)
+            .send()
+            .await
+            .map_err(map_err)?;
+        let r = check(r).await?;
+        r.json().await.map_err(|e| JFError::Parse(e.to_string()))
+    }
+
+    /// Item detail with the fields the detail page shows (cast, genres, overview, ratings).
+    pub async fn item_detail(&self, id: &str) -> Result<DetailItem, JFError> {
+        let r = self
+            .http
+            .get(format!("{}/Users/{}/Items/{}", self.base, enc(&self.user_id), enc(id)))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .query(&[("Fields", DETAIL_FIELDS)])
             .send()
             .await
             .map_err(map_err)?;

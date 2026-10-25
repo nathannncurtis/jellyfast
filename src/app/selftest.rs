@@ -19,6 +19,7 @@ use crate::transcode::decision::PlaybackMethod;
 use std::sync::Mutex;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use crate::ui::library::poster_key;
+use crate::ui::shell::is_hidden;
 use objc::msg_send;
 use objc::runtime::{Object, BOOL, NO, YES};
 use objc::{class, sel, sel_impl};
@@ -127,6 +128,10 @@ fn steps() -> Vec<Step> {
         ("item clicks", s_item_clicks, 50),
         ("sort/search/refresh/back", s_nav_actions, 50),
         ("mark watched / open web", s_misc_actions, 50),
+        ("detail: movie (long strings, art, actions)", s_detail_movie, 150),
+        ("detail: resize relayout, back", s_detail_resize, 150),
+        ("detail: series (episodes action)", s_detail_series, 150),
+        ("detail: error toast", s_detail_error, 50),
         ("stop when not playing", s_stop_idle, 50),
         ("playback error (idle)", s_playback_error, 50),
         ("server down/up while idle", s_server_idle, 50),
@@ -978,6 +983,130 @@ fn s_nav_actions() {
         act(sel!(refresh:), nil());
         act(sel!(goBack:), nil());
         act(sel!(signOut:), nil());
+    }
+}
+// ---- item detail page -------------------------------------------------------
+const OVERVIEW: &str = "A long overview paragraph that wraps across several lines so the wrapping label has to grow to show every word. It covers a sprawling plot, two timelines, a secret society, a rescue at sea, and an ending that nobody saw coming, written deliberately at length to exercise height measurement and the page layout.";
+fn detail_people(n: usize) -> Vec<DetailPerson> {
+    (0..n)
+        .map(|i| DetailPerson {
+            name: format!("Performer {} with a very long stage name that must truncate", i),
+            role: if i % 3 == 0 { None } else { Some(format!("Character {} of a long-running saga", i)) },
+            image_key: if i % 2 == 0 { Some(poster_key(&format!("person-{}", i))) } else { None },
+        })
+        .collect()
+}
+fn detail_view(series: bool) -> DetailView {
+    let id = if series { "detail-series" } else { "detail-long" };
+    DetailView {
+        id: id.into(),
+        name: if series {
+            "A Series With An Extremely Long Name That Keeps Going Well Past Any Sensible Header Width".into()
+        } else {
+            LONG.into()
+        },
+        item_type: if series { "Series" } else { "Movie" }.into(),
+        year: Some(2019),
+        official_rating: Some("TV-MA".into()),
+        community_rating: Some(8.4),
+        run_time_ticks: Some(72_000_000_000),
+        genres: vec![
+            "Science Fiction".into(),
+            "Drama with a rather long genre label".into(),
+            "Thriller".into(),
+            "Mystery".into(),
+        ],
+        overview: Some(OVERVIEW.into()),
+        played: false,
+        resume: !series,
+        poster_key: Some(poster_key(id)),
+        backdrop_key: Some(poster_key(&format!("{}#backdrop", id))),
+        people: detail_people(14),
+    }
+}
+/// Send `sel` to a page view (its own target), like a click would.
+unsafe fn act_on(target: *mut Object, sel: objc::runtime::Sel) {
+    let _: *mut Object = msg_send![target, performSelector: sel withObject: nil()];
+}
+fn detail_host() -> *mut Object {
+    unsafe { UI.get().unwrap().detail.host.get() }
+}
+fn s_detail_movie() {
+    take_cmds();
+    handle_main(MainMsg::DetailLoaded(Box::new(detail_view(false))));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("detail open", crate::ui::detail::is_open());
+        state_check("detail host shown", !is_hidden(detail_host()));
+        state_check("library header hidden", is_hidden(ui.header.get()));
+        state_check("library grid hidden", is_hidden(ui.lib_scroll.get()));
+        state_check("poster, backdrop and portraits laid out", crate::ui::detail::target_count() == 2 + 7);
+        state_check("backdrop waits for its image", crate::ui::detail::art_filled(poster_key("detail-long#backdrop")) == Some(false));
+    }
+    handle_main(MainMsg::PosterReady { key: poster_key("detail-long#backdrop"), bytes: image_bytes(0, 640, 360, 90) });
+    handle_main(MainMsg::PosterReady { key: poster_key("detail-long"), bytes: image_bytes(0, 200, 300, 200) });
+    handle_main(MainMsg::PosterReady { key: poster_key("person-0"), bytes: image_bytes(1, 96, 96, 120) });
+    state_check("backdrop fills on arrival", crate::ui::detail::art_filled(poster_key("detail-long#backdrop")) == Some(true));
+    state_check("poster fills on arrival", crate::ui::detail::art_filled(poster_key("detail-long")) == Some(true));
+    state_check("portrait fills on arrival", crate::ui::detail::art_filled(poster_key("person-0")) == Some(true));
+    state_check("portrait without image has no artwork view", crate::ui::detail::art_filled(poster_key("person-1")).is_none());
+    unsafe {
+        let host = detail_host();
+        act_on(host, sel!(detailPlay:));
+        state_check(
+            "play sends Play for the item",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::Play { item_id } if item_id == "detail-long")),
+        );
+        act_on(host, sel!(detailWatched:));
+        state_check(
+            "mark watched sends MarkPlayed",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::MarkPlayed { item_id, played: true } if item_id == "detail-long")),
+        );
+        let ui = UI.get_mut().unwrap();
+        state_check("page flips to watched", ui.detail.item.as_ref().map(|i| i.played).unwrap_or(false));
+        act_on(host, sel!(detailWatched:));
+        take_cmds();
+    }
+    audit_both("detail movie");
+}
+fn s_detail_resize() {
+    set_content_size(960.0, 600.0);
+    state_check("detail relaid out at min width", crate::ui::detail::layout_matches_clip());
+    audit("detail @min relaid");
+    set_content_size(1280.0, 800.0);
+    state_check("detail relaid out after grow", crate::ui::detail::layout_matches_clip());
+    unsafe {
+        act_on(detail_host(), sel!(detailBack:));
+        let ui = UI.get_mut().unwrap();
+        state_check("back closes the detail page", !crate::ui::detail::is_open() && is_hidden(detail_host()));
+        state_check("back shows the grid header", !is_hidden(ui.header.get()) && !is_hidden(ui.lib_scroll.get()));
+    }
+}
+fn s_detail_series() {
+    handle_main(MainMsg::DetailLoaded(Box::new(detail_view(true))));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("series page open", crate::ui::detail::is_open());
+        state_check("series page has no artwork waiting", crate::ui::detail::art_filled(poster_key("detail-series")) == Some(false));
+        let _ = ui;
+    }
+    audit_both("detail series");
+    unsafe {
+        act_on(detail_host(), sel!(detailEpisodes:));
+        let cmds = take_cmds();
+        state_check(
+            "episodes sends Episodes for the series",
+            cmds.iter().any(|c| matches!(c, UiCmd::Episodes { series_id, .. } if series_id == "detail-series")),
+        );
+        state_check("episodes leaves the detail page", !crate::ui::detail::is_open());
+    }
+}
+fn s_detail_error() {
+    handle_main(MainMsg::DetailError(format!("Server error (HTTP 500): {}", LONG)));
+    state_check("detail error shows a toast", unsafe { crate::ui::player::toast_visible() });
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("detail error keeps the grid", !crate::ui::detail::is_open() && !is_hidden(ui.lib_scroll.get()));
     }
 }
 fn s_misc_actions() {

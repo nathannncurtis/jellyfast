@@ -34,6 +34,10 @@ pub enum UiCmd {
         album_id: String,
         album_name: String,
     },
+    /// Open the detail page for a movie or series.
+    OpenDetail {
+        item_id: String,
+    },
     Play {
         item_id: String,
     },
@@ -104,6 +108,10 @@ pub enum MainMsg {
         bytes: Vec<u8>,
     },
     PlaybackReady(PlaybackStart),
+    /// Facts for the detail page; its artwork follows as `PosterReady` keys.
+    DetailLoaded(Box<DetailView>),
+    /// The detail page could not be loaded (shown as a toast).
+    DetailError(String),
     PlaybackError(String),
     ServerUp,
     ServerDown,
@@ -147,6 +155,35 @@ pub struct PlaybackStart {
 pub enum MediaKind {
     Video,
     Audio,
+}
+
+/// Everything the detail page shows for one item. Artwork is keyed by
+/// `poster_key`-style hashes and arrives separately as `PosterReady`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailView {
+    pub id: String,
+    pub name: String,
+    pub item_type: String,
+    pub year: Option<u32>,
+    pub official_rating: Option<String>,
+    pub community_rating: Option<f64>,
+    pub run_time_ticks: Option<i64>,
+    pub genres: Vec<String>,
+    pub overview: Option<String>,
+    pub played: bool,
+    /// Has a saved position and is not finished: the button says "Resume".
+    pub resume: bool,
+    pub poster_key: Option<u64>,
+    pub backdrop_key: Option<u64>,
+    pub people: Vec<DetailPerson>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailPerson {
+    pub name: String,
+    /// Character name, or the crew job ("Director") when there is no role.
+    pub role: Option<String>,
+    pub image_key: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

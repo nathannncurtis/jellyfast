@@ -343,6 +343,7 @@ pub struct Ui {
     pub s_quality: Ptr,
     pub s_theme: Ptr,
     pub seerr: crate::ui::seerr::SeerrUi,
+    pub detail: crate::ui::detail::DetailUi,
     // Rust-side state
     pub rows: Vec<(*mut Object, String)>, // sidebar row buttons + view ids
     pub views: Vec<(String, String, Option<String>)>,
@@ -513,6 +514,7 @@ pub(crate) unsafe fn register_classes() {
     register_window_class();
     register_sidebar_row();
     register_header_class();
+    crate::ui::detail::register_detail_classes();
     crate::ui::player::register_player_classes();
     crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
@@ -774,6 +776,7 @@ pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     }
 }
 pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    crate::ui::detail::hide();
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
@@ -798,8 +801,8 @@ pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Obj
         };
         set_busy(true);
         match it.item_type.as_str() {
-            "Series" => {
-                let _ = ui.ui_tx.send(UiCmd::Episodes { series_id: it.id.clone(), series_name: it.name.clone() });
+            "Movie" | "Series" => {
+                let _ = ui.ui_tx.send(UiCmd::OpenDetail { item_id: it.id.clone() });
             }
             "MusicAlbum" => {
                 let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
@@ -1116,6 +1119,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         s_quality: Ptr(nil()),
         s_theme: Ptr(nil()),
         seerr: crate::ui::seerr::SeerrUi::new(),
+        detail: crate::ui::detail::DetailUi::new(),
         rows: vec![],
         views: vec![],
         items: vec![],

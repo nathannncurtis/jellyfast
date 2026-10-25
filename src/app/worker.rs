@@ -2,6 +2,8 @@ use crate::*;
 use std::collections::VecDeque;
 use crate::app::messages::*;
 use crate::jellyfin::client::JellyfinClient;
+use crate::jellyfin::models::{DetailItem, Person};
+use crate::jellyfin::urls::{build_art_url, build_image_url};
 use crate::config::{load_config, save_config, Config};
 use crate::seerr::client::{SeerrClient, SeerrError};
 
@@ -173,6 +175,20 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                         }
                         Err(e) => {
                             let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
+                        }
+                    }
+                }
+            }
+            UiCmd::OpenDetail { item_id } => {
+                if let Some(c) = &client {
+                    match c.item_detail(&item_id).await {
+                        Ok(d) => {
+                            let (view, jobs) = plan_detail(c, &d);
+                            let _ = main_tx.send(MainMsg::DetailLoaded(Box::new(view)));
+                            fetch_art(jobs, &main_tx, &poster_dir, http_poster.as_ref());
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::DetailError(format!("{}", e)));
                         }
                     }
                 }
@@ -659,46 +675,108 @@ pub(crate) async fn fetch_posters(
     poster_dir: &std::path::Path,
     http: Option<&reqwest::Client>,
 ) {
+    // Spawn a bounded set of concurrent poster fetches (first 200 items).
+    let jobs: Vec<(u64, String)> = items
+        .iter()
+        .take(200)
+        .filter(|it| it.has_image())
+        .map(|it| (sys_key(&it.id), build_image_url(&c.base, &it.id, &c.token, 400)))
+        .collect();
+    fetch_art(jobs, main_tx, poster_dir, http);
+}
+
+/// Download artwork jobs `(key, url)` concurrently, through the disk cache in
+/// `poster_dir`. Each image arrives as `PosterReady { key, bytes }`.
+pub(crate) fn fetch_art(
+    jobs: Vec<(u64, String)>,
+    main_tx: &UnboundedSender<MainMsg>,
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+) {
     let Some(http) = http.cloned() else {
         return;
     };
-    let client = c.clone();
-    let tx = main_tx.clone();
-    let dir = poster_dir.to_path_buf();
-    // Spawn a bounded set of concurrent poster fetches (first 200 items).
-    for it in items.iter().take(200) {
-        if !it.has_image() {
-            continue;
-        }
-        let client = client.clone();
-        let tx = tx.clone();
-        let dir = dir.clone();
-        let id = it.id.clone();
+    for (key, url) in jobs {
+        let tx = main_tx.clone();
+        let dir = poster_dir.to_path_buf();
         let http = http.clone();
         tokio::spawn(async move {
-            let key = sys_key(&id);
             let path = dir.join(format!("{:016x}.img", key));
             let bytes = match tokio::fs::read(&path).await {
                 Ok(b) => Some(b),
-                Err(_) => {
-                    let url = crate::jellyfin::urls::build_image_url(&client.base, &id, &client.token, 400);
-                    match http.get(url).send().await {
-                        Ok(r) if r.status().is_success() => match r.bytes().await {
-                            Ok(b) => {
-                                let _ = tokio::fs::write(&path, &b).await;
-                                Some(b.to_vec())
-                            }
-                            Err(_) => None,
-                        },
-                        _ => None,
-                    }
-                }
+                Err(_) => match http.get(url).send().await {
+                    Ok(r) if r.status().is_success() => match r.bytes().await {
+                        Ok(b) => {
+                            let _ = tokio::fs::write(&path, &b).await;
+                            Some(b.to_vec())
+                        }
+                        Err(_) => None,
+                    },
+                    _ => None,
+                },
             };
             if let Some(b) = bytes {
                 let _ = tx.send(MainMsg::PosterReady { key, bytes: b });
             }
         });
     }
+}
+
+/// Cast and crew shown on the detail page (the first this many of `People`).
+const MAX_PEOPLE: usize = 30;
+
+/// Turn a detail response into the page's view plus the artwork to fetch
+/// as `(key, url)` jobs. Artwork is requested only where the server has it.
+pub(crate) fn plan_detail(c: &JellyfinClient, d: &DetailItem) -> (DetailView, Vec<(u64, String)>) {
+    let mut jobs = Vec::new();
+    let poster_key = d.image_tags.as_ref().and_then(|t| t.primary.as_ref()).map(|_| sys_key(&d.id));
+    if let Some(k) = poster_key {
+        jobs.push((k, build_image_url(&c.base, &d.id, &c.token, 400)));
+    }
+    let backdrop_key = d.backdrop_tags.first().map(|_| sys_key(&format!("{}#backdrop", d.id)));
+    if let Some(k) = backdrop_key {
+        jobs.push((k, build_art_url(&c.base, &d.id, "Backdrop", 1280, &c.token)));
+    }
+    let people = d
+        .people
+        .iter()
+        .take(MAX_PEOPLE)
+        .map(|p: &Person| {
+            let image_key = match p.image_tag.as_ref() {
+                Some(_) if !p.id.is_empty() => {
+                    let k = sys_key(&p.id);
+                    jobs.push((k, build_art_url(&c.base, &p.id, "Primary", 200, &c.token)));
+                    Some(k)
+                }
+                _ => None,
+            };
+            let role = p
+                .role
+                .clone()
+                .filter(|r| !r.trim().is_empty())
+                .or_else(|| p.kind.clone().filter(|k| !k.trim().is_empty()));
+            DetailPerson { name: p.name.clone(), role, image_key }
+        })
+        .collect();
+    let played = d.user_data.as_ref().map(|u| u.played).unwrap_or(false);
+    let position = d.user_data.as_ref().map(|u| u.position_ticks).unwrap_or(0);
+    let view = DetailView {
+        id: d.id.clone(),
+        name: d.name.clone(),
+        item_type: d.item_type.clone(),
+        year: d.year,
+        official_rating: d.official_rating.clone().filter(|r| !r.trim().is_empty()),
+        community_rating: d.community_rating,
+        run_time_ticks: d.run_time_ticks,
+        genres: d.genres.clone(),
+        overview: d.overview.clone().filter(|o| !o.trim().is_empty()),
+        played,
+        resume: !played && position > 0,
+        poster_key,
+        backdrop_key,
+        people,
+    };
+    (view, jobs)
 }
 
 /// Fetch thumbnails for Seerr results through the user's Seerr server (never TMDB),
@@ -1009,9 +1087,29 @@ mod tests {
                     }
                     _ => {}
                 }
+                if id.starts_with("det-") && *id != "det-bare" {
+                    v["Name"] = "Detail Movie".into();
+                    v["Overview"] = "A detailed overview.".into();
+                    v["Genres"] = serde_json::json!(["Drama", "Thriller"]);
+                    v["CommunityRating"] = serde_json::json!(7.8);
+                    v["OfficialRating"] = "PG-13".into();
+                    v["ImageTags"] = serde_json::json!({"Primary": "tag1"});
+                    v["BackdropImageTags"] = serde_json::json!(["bd1"]);
+                    v["People"] = serde_json::json!([
+                        {"Id": "p-actor", "Name": "Ada Actor", "Role": "Lead", "Type": "Actor", "PrimaryImageTag": "pt"},
+                        {"Id": "p-dir", "Name": "Dan Director", "Role": "", "Type": "Director"},
+                        {"Id": "p-noimg", "Name": "No Image", "Role": "Extra", "Type": "Actor"}
+                    ]);
+                    match *id {
+                        "det-series" => v["Type"] = "Series".into(),
+                        "det-resume" => v["UserData"] = serde_json::json!({"Played": false, "PlaybackPositionTicks": 6_000_000_000i64}),
+                        "det-played" => v["UserData"] = serde_json::json!({"Played": true, "PlaybackPositionTicks": 0}),
+                        _ => {}
+                    }
+                }
                 json(v)
             }
-            ("GET", ["Items", _, "Images", "Primary"]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
+            ("GET", ["Items", _, "Images", _]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
             ("POST", ["Sessions", "Playing", ..]) => status(204),
             ("POST", ["Users", _, "PlayedItems", id]) | ("DELETE", ["Users", _, "PlayedItems", id]) => {
                 if *id == "boom" {
@@ -1591,6 +1689,109 @@ mod tests {
         h.send(UiCmd::Stopped { item_id: "ch1".into(), ticks: 0 });
         h.drain_via_probe().await;
         assert_eq!(m.find("POST", "/LiveStreams/Close").len(), 1);
+    }
+
+    // ------------------------------------------------------ item detail
+    #[tokio::test]
+    async fn open_detail_builds_view_and_fetches_art() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "det-movie".into() });
+        let v = match h.next().await {
+            MainMsg::DetailLoaded(v) => *v,
+            o => panic!("{:?}", o),
+        };
+        assert_eq!(v.name, "Detail Movie");
+        assert_eq!((v.year, v.official_rating.as_deref()), (Some(2020), Some("PG-13")));
+        assert_eq!(v.community_rating, Some(7.8));
+        assert_eq!(v.genres, vec!["Drama".to_string(), "Thriller".to_string()]);
+        assert_eq!(v.overview.as_deref(), Some("A detailed overview."));
+        assert_eq!(v.run_time_ticks, Some(72_000_000_000));
+        assert!(!v.played && !v.resume);
+        let poster = sys_key("det-movie");
+        let backdrop = sys_key("det-movie#backdrop");
+        assert_eq!((v.poster_key, v.backdrop_key), (Some(poster), Some(backdrop)));
+        assert_eq!(
+            v.people,
+            vec![
+                DetailPerson { name: "Ada Actor".into(), role: Some("Lead".into()), image_key: Some(sys_key("p-actor")) },
+                DetailPerson { name: "Dan Director".into(), role: Some("Director".into()), image_key: None },
+                DetailPerson { name: "No Image".into(), role: Some("Extra".into()), image_key: None },
+            ]
+        );
+        // Artwork arrives after the facts: poster, backdrop and the one person photo.
+        let mut got = std::collections::HashSet::new();
+        while got.len() < 3 {
+            match h.next().await {
+                MainMsg::PosterReady { key, bytes } => {
+                    assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+                    got.insert(key);
+                }
+                o => panic!("{:?}", o),
+            }
+        }
+        assert_eq!(got, [poster, backdrop, sys_key("p-actor")].into_iter().collect());
+        let detail = m.find("GET", "/Users/u1/Items/det-movie");
+        assert_eq!(detail.len(), 1);
+        let fields = detail[0].query.get("Fields").cloned().unwrap_or_default();
+        for f in ["People", "Genres", "Overview"] {
+            assert!(fields.contains(f), "{fields}");
+        }
+        assert_eq!(m.find("GET", "/Items/det-movie/Images/Backdrop").len(), 1);
+        assert_eq!(m.find("GET", "/Items/p-actor/Images/Primary").len(), 1);
+        assert!(m.find("GET", "/Items/p-noimg/Images").is_empty());
+    }
+
+    #[tokio::test]
+    async fn detail_resume_played_and_series_kinds() {
+        let (_e, _m, mut h) = connected().await;
+        for (id, want_resume, want_played, want_ty) in
+            [("det-resume", true, false, "Movie"), ("det-played", false, true, "Movie"), ("det-series", false, false, "Series")]
+        {
+            h.send(UiCmd::OpenDetail { item_id: id.into() });
+            match h.next_nonposter().await {
+                MainMsg::DetailLoaded(v) => {
+                    assert_eq!((v.resume, v.played, v.item_type.as_str()), (want_resume, want_played, want_ty), "{id}");
+                }
+                o => panic!("{:?}", o),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_without_artwork_requests_none() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "det-bare".into() });
+        match h.next_nonposter().await {
+            MainMsg::DetailLoaded(v) => {
+                assert_eq!((v.poster_key, v.backdrop_key), (None, None));
+                assert!(v.people.is_empty() && v.genres.is_empty() && v.overview.is_none());
+                assert!(v.official_rating.is_none() && v.community_rating.is_none());
+            }
+            o => panic!("{:?}", o),
+        }
+        let rest = h.drain_via_probe().await;
+        assert!(rest.iter().all(|m| !matches!(m, MainMsg::PosterReady { .. })), "{rest:?}");
+        assert!(m.find("GET", "/Items/det-bare/Images").is_empty());
+    }
+
+    #[tokio::test]
+    async fn detail_error_is_reported() {
+        let (_e, _m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "missing".into() });
+        match h.next().await {
+            MainMsg::DetailError(e) => assert!(e.contains("HTTP 404"), "{e}"),
+            o => panic!("{:?}", o),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_detail_before_connect_is_ignored() {
+        let _env = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::OpenDetail { item_id: "det-movie".into() });
+        h.send(UiCmd::ProbeServer);
+        let got = h.drain_via_probe().await;
+        assert!(got.is_empty(), "{got:?}");
     }
 
     // -------------------------------------------------- progress / played
