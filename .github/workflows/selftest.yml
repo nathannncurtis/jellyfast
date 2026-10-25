@@ -1,0 +1,24 @@
+name: selftest
+
+# The headless UI self-test needs a WindowServer session. GitHub's macOS runners are not
+# documented to provide one, so this is run by hand (Actions tab, Run workflow) and is not
+# part of ci-ok. If it passes there, move the job into ci.yml and add it to ci-ok.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    if: github.repository == 'nathannncurtis/jellyfast'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo build --locked
+      - name: Self-test
+        run: |
+          bin=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[0].targets[] | select(.kind | index("bin")) | .name][0]')
+          HOME=$(mktemp -d) JELLYFIN_MAC_SELFTEST=1 perl -e 'alarm 600; exec @ARGV' "target/debug/$bin" 2>&1 | tee selftest.log || true
+          grep -q 'ALL STEPS DONE' selftest.log
