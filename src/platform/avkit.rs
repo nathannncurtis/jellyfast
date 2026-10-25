@@ -56,6 +56,11 @@ pub(crate) extern "C" fn kvo(
                 update_chip();
             }
             "presentationSize" => update_chip(),
+            "externalPlaybackActive" => {
+                // AirPlay started or stopped: the video is on another screen.
+                let on: BOOL = msg_send![obj, externalPlaybackActive];
+                crate::ui::player::set_external(on == YES);
+            }
             _ => {}
         }
     }
@@ -68,6 +73,7 @@ pub(crate) extern "C" fn tick(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
             None => return,
         };
         drain_main(); // safety net in case a pump kick was missed
+        crate::ui::cast::poll_tick(); // the remote bar refreshes its Play On session (own clock)
         if ui.playing.is_none() || ui.pitem.get().is_null() {
             return;
         }
@@ -225,6 +231,10 @@ pub(crate) extern "C" fn play_pause(_t: &mut Object, _c: Sel, _s: *mut Object) {
     }
 }
 pub(crate) extern "C" fn stop_playback(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    stop_for_cast();
+}
+/// Stops local playback and reports the stop, before a cast hands the item to another device.
+pub fn stop_for_cast() {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if let Some(pn) = ui.playing.as_ref() {
@@ -233,12 +243,14 @@ pub(crate) extern "C" fn stop_playback(_t: &mut Object, _c: Sel, _s: *mut Object
                 ticks: crate::jellyfin::urls::ticks_from_secs(pn.last_secs),
             });
         }
-        stop_playback_ui();
     }
+    stop_playback_ui();
 }
+
 pub fn stop_playback_ui() {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        crate::ui::player::set_external(false);
         if ui.playing.is_none() {
             return; // nothing observed / nothing to tear down
         }

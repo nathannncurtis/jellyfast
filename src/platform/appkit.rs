@@ -384,6 +384,10 @@ pub struct Ui {
     pub user_name: String,
     pub now: crate::ui::nowbar::NowBar,
     pub pbar: crate::ui::playerbar::PlayerBar,
+    /// Play On: cast menu state and the remote-control bar.
+    pub cast: crate::ui::cast::CastUi,
+    /// AirPlay card shown over the video while it plays on another screen.
+    pub ext: crate::ui::player::ExtUi,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
 unsafe impl Send for Ui {}
@@ -547,6 +551,13 @@ pub(crate) unsafe fn register_classes() {
             (sel!(showSpeedMenu:), crate::ui::playerbar::show_speed_menu as Extern0),
             (sel!(pickTrack:), crate::ui::playerbar::pick_track as Extern0),
             (sel!(togglePiP:), crate::ui::playerbar::toggle_pip as Extern0),
+            (sel!(showCastMenu:), crate::ui::cast::show_menu as Extern0),
+            (sel!(castPick:), crate::ui::cast::pick as Extern0),
+            (sel!(castAirPlay:), crate::ui::cast::airplay_pick as Extern0),
+            (sel!(jrCastPlayPause:), crate::ui::cast::play_pause as Extern0),
+            (sel!(jrCastStop:), crate::ui::cast::stop as Extern0),
+            (sel!(jrCastClose:), crate::ui::cast::close as Extern0),
+            (sel!(jrCastScrub:), crate::ui::cast::scrub as Extern0),
         ] {
             d.add_method(s, f);
         }
@@ -1243,6 +1254,8 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         user_name: String::new(),
         now: crate::ui::nowbar::NowBar::new(),
         pbar: crate::ui::playerbar::PlayerBar::new(),
+        cast: crate::ui::cast::CastUi::new(),
+        ext: crate::ui::player::ExtUi::new(),
         tint_cache: HashMap::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
