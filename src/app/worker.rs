@@ -3,7 +3,8 @@ use std::collections::VecDeque;
 use crate::app::messages::*;
 use crate::app::library_query::{browse_query, filter_query, library_query};
 use crate::jellyfin::client::JellyfinClient;
-use crate::jellyfin::models::{DetailItem, Episode, Person, Season};
+use crate::jellyfin::models::{DetailItem, Episode, FullItem, Person, Season};
+use crate::jellyfin::segments::{self, NextUp, Segment};
 use crate::jellyfin::urls::{build_art_url, build_image_url};
 use crate::config::{load_config, save_config, Config};
 use crate::seerr::client::{SeerrClient, SeerrError};
@@ -302,6 +303,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                 crate::transcode::decision::PlaybackMethod::DirectPlay => "DirectPlay",
                                 crate::transcode::decision::PlaybackMethod::ServerHls => "Transcode",
                             };
+                            let (segments, next_up, art_jobs) = playback_extras(c, &full).await;
                             c.report_start(&full.id, crate::jellyfin::urls::ticks_from_secs(resume_secs), play_method)
                                 .await;
                             let mut hist = crate::config::load_history();
@@ -342,7 +344,11 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                 } else {
                                     crate::app::messages::MediaKind::Video
                                 },
+                                segments,
+                                series_id: if full.item_type == "Episode" { full.series_id.clone() } else { None },
+                                next_up,
                             }));
+                            fetch_art(art_jobs, &main_tx, &poster_dir, http_poster.as_ref());
                         }
                         Err(e) => {
                             let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
@@ -634,6 +640,9 @@ async fn play_channel(
                         season_number: None,
                         episode_number: None,
                         production_year: None,
+                        segments: Vec::new(),
+                        series_id: None,
+                        next_up: None,
                     }));
                 }
                 None => {
@@ -1130,6 +1139,43 @@ pub(crate) fn plan_episodes(c: &JellyfinClient, eps: &[Episode]) -> (Vec<Episode
     (rows, jobs)
 }
 
+/// What the player needs beyond the stream: skip-button segments, and for an episode the
+/// next one in its series. Lookups fail soft (logged): playback then simply has no skip
+/// buttons or Up Next. The returned jobs are the next episode's still artwork.
+async fn playback_extras(c: &JellyfinClient, full: &FullItem) -> (Vec<Segment>, Option<NextUp>, Vec<(u64, String)>) {
+    if full.item_type == "Audio" {
+        return (Vec::new(), None, Vec::new());
+    }
+    let segs = match c.media_segments(&full.id).await {
+        Ok(v) => segments::from_models(&v),
+        Err(e) => {
+            tracing::warn!("media segments unavailable: {}", e);
+            Vec::new()
+        }
+    };
+    let Some(series) = full.series_id.as_deref().filter(|_| full.item_type == "Episode") else {
+        return (segs, None, Vec::new());
+    };
+    let eps = match c.series_episodes(series).await {
+        Ok(eps) => eps,
+        Err(e) => {
+            tracing::warn!("episode list unavailable: {}", e);
+            return (segs, None, Vec::new());
+        }
+    };
+    let Some(next) = segments::next_episode(&eps, &full.id) else {
+        return (segs, None, Vec::new());
+    };
+    let mut up = NextUp::from_episode(next);
+    let mut jobs = Vec::new();
+    if next.has_image() {
+        let key = sys_key(&next.id);
+        up.image_key = Some(key);
+        jobs.push((key, build_image_url(&c.base, &next.id, &c.token, 400)));
+    }
+    (segs, Some(up), jobs)
+}
+
 /// Fetch thumbnails for Seerr results through the user's Seerr server (never TMDB),
 /// with the same on-disk cache as library posters. Each arrives as `SeerrPoster`.
 pub(crate) fn fetch_seerr_posters(
@@ -1477,6 +1523,14 @@ mod tests {
                     "nosrc" => v["MediaSources"] = serde_json::json!([]),
                     "resume" => v["UserData"] = serde_json::json!({"Played": false, "PlaybackPositionTicks": 6_000_000_000i64}),
                     "played" => v["UserData"] = serde_json::json!({"Played": true, "PlaybackPositionTicks": 6_000_000_000i64}),
+                    "ep-auto" | "ep-seg-broken" => {
+                        v["Type"] = "Episode".into();
+                        v["SeriesName"] = "Auto Show".into();
+                        v["SeriesId"] = if *id == "ep-auto" { "auto" } else { "broken" }.into();
+                        v["ParentIndexNumber"] = 1.into();
+                        v["IndexNumber"] = 2.into();
+                    }
+                    "movie-seg" => v["Name"] = "Segmented Movie".into(),
                     "ep1" => {
                         v["Type"] = "Episode".into();
                         v["SeriesName"] = "Show One".into();
@@ -1524,6 +1578,34 @@ mod tests {
                     {"Id": "sea-a", "Name": "Season 1", "IndexNumber": 1, "Type": "Season"},
                     {"Id": "sea-b", "Name": "Season 2", "IndexNumber": 2, "Type": "Season"}
                 ]})),
+            },
+            ("GET", ["MediaSegments", id]) => match *id {
+                "ep-auto" | "movie-seg" => json(serde_json::json!({"Items": [
+                    {"Id": "s1", "ItemId": id, "Type": "Intro", "StartTicks": 0, "EndTicks": 600_000_000i64},
+                    {"Id": "s2", "ItemId": id, "Type": "Outro", "StartTicks": 9_000_000_000i64, "EndTicks": 10_000_000_000i64},
+                    {"Id": "s3", "ItemId": id, "Type": "Unknown", "StartTicks": 0, "EndTicks": 10}
+                ], "TotalRecordCount": 3})),
+                "ep-seg-broken" => status(500),
+                _ => status(404),
+            },
+            ("GET", ["Shows", sid, "Episodes"]) if !r.query.contains_key("seasonId") => match *sid {
+                "auto" => {
+                    let e = |id: &str, season: u32, n: u32, image: bool| {
+                        let mut v = serde_json::json!({
+                            "Id": id, "Name": format!("S{} E{}", season, n), "Type": "Episode",
+                            "IndexNumber": n, "ParentIndexNumber": season
+                        });
+                        if image {
+                            v["ImageTags"] = serde_json::json!({"Primary": "tag1"});
+                        }
+                        v
+                    };
+                    json(serde_json::json!({"Items": [
+                        e("e2-0", 2, 9, false),
+                        e("e1", 1, 1, false), e("ep-auto", 1, 2, false), e("e3", 2, 1, true)
+                    ], "TotalRecordCount": 4}))
+                }
+                _ => status(500),
             },
             ("GET", ["Shows", _, "Episodes"]) => {
                 let ep = |id: &str, n: u32, season: &str, played: bool, pos: i64, image: bool| {
@@ -2498,6 +2580,54 @@ mod tests {
             MainMsg::PlaybackError(e) => assert!(e.contains("Network problem"), "{e}"),
             o => panic!("{:?}", o),
         }
+    }
+
+    #[tokio::test]
+    async fn play_episode_carries_segments_series_and_next_episode() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::Play { item_id: "ep-auto".into() });
+        let p = playback(h.next_nonposter().await);
+        assert_eq!(p.series_id.as_deref(), Some("auto"));
+        assert_eq!(p.segments.len(), 2, "unknown segment types are dropped");
+        assert_eq!(p.segments[0].kind, segments::SegmentKind::Intro);
+        assert_eq!((p.segments[0].start, p.segments[0].end), (0.0, 60.0));
+        assert_eq!(p.segments[1].kind, segments::SegmentKind::Outro);
+        assert_eq!(p.segments[1].start, 900.0);
+        // Season 1 episode 2 is followed by season 2 episode 1 (the 9th of season 2 comes later).
+        let n = p.next_up.expect("next episode");
+        assert_eq!(n.id, "e3");
+        assert_eq!((n.season, n.number), (Some(2), Some(1)));
+        assert_eq!(n.image_key, Some(sys_key("e3")), "episodes with a still get a thumbnail key");
+        let list = m.find("GET", "/Shows/auto/Episodes");
+        assert_eq!(list.len(), 1);
+        assert!(!list[0].query.contains_key("seasonId"), "whole series, not one season");
+        assert_eq!(m.find("GET", "/MediaSegments/ep-auto").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn play_movie_has_segments_but_no_next_episode() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::Play { item_id: "movie-seg".into() });
+        let p = playback(h.next_nonposter().await);
+        assert_eq!(p.segments.len(), 2);
+        assert!(p.next_up.is_none());
+        assert_eq!(p.series_id, None);
+        assert!(m.find("GET", "/Shows/").is_empty(), "movies never look for an episode list");
+    }
+
+    #[tokio::test]
+    async fn missing_segments_and_failed_lookups_still_play() {
+        let (_e, _m, mut h) = connected().await;
+        // The mock answers 404 for segments of an item it knows nothing about.
+        h.send(UiCmd::Play { item_id: "movie-plain".into() });
+        let p = playback(h.next_nonposter().await);
+        assert!(p.segments.is_empty() && p.next_up.is_none());
+        // Segments and the episode list both answer 500 here: playback still starts, with neither.
+        h.send(UiCmd::Play { item_id: "ep-seg-broken".into() });
+        let p = playback(h.next_nonposter().await);
+        assert!(p.segments.is_empty() && p.next_up.is_none());
+        assert_eq!(p.series_id.as_deref(), Some("broken"));
+        assert!(p.url.contains("ep-seg-broken"));
     }
 
     #[tokio::test]

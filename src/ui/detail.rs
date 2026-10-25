@@ -136,6 +136,19 @@ extern "C" fn on_play(_t: &mut Object, _c: Sel, _s: *mut Object) {
     }
 }
 
+/// The series page's "Skip intros automatically": saved for this show on this Mac only.
+extern "C" fn on_skip_intros(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    unsafe {
+        let Some(ui) = UI.get_mut() else { return };
+        let Some(item) = ui.detail.item.as_ref() else { return };
+        let on: NSInteger = msg_send![sender, state];
+        if crate::config::set_skip_intros(&item.id, on != 0).is_err() {
+            let _: () = msg_send![sender, setState: (on == 0) as NSInteger];
+            crate::ui::player::toast("Couldn't save that setting", Some("exclamationmark.triangle"), true);
+        }
+    }
+}
+
 /// Cast button: Play On menu for the open movie, episode or series.
 extern "C" fn on_cast(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
@@ -219,6 +232,7 @@ pub(crate) unsafe fn register_detail_classes() {
     h.add_method(sel!(detailCast:), on_cast as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailSeason:), on_season as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailEpisode:), on_episode as extern "C" fn(&mut Object, Sel, *mut Object));
+    h.add_method(sel!(detailSkipIntros:), on_skip_intros as extern "C" fn(&mut Object, Sel, *mut Object));
     h.register();
     let mut d = ClassDecl::new("JRDetailDoc", class!(NSView)).unwrap();
     d.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
@@ -586,6 +600,18 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
     let (b, bw) = action_button(watched, "checkmark.circle", sel!(detailWatched:), host, false);
     set_frame(b, rect(bx, y, bw, BUTTON_H));
     add_sub(doc, b);
+    if is_series {
+        bx += bw + SP2;
+        let on = crate::config::skip_intros_for(&item.id, ui.cfg.settings.skip_intros_default);
+        let cb: *mut Object = msg_send![class!(NSButton), checkboxWithTitle: ns("Skip intros automatically")
+            target: host action: sel!(detailSkipIntros:)];
+        let _: () = msg_send![cb, setState: on as NSInteger];
+        let _: () = msg_send![cb, setToolTip: ns("Skip intros as soon as they start, for this show on this Mac.")];
+        let _: () = msg_send![cb, sizeToFit];
+        let f: NSRect = msg_send![cb, frame];
+        set_frame(cb, rect(bx, y + (BUTTON_H - f.size.h) / 2., f.size.w, f.size.h));
+        add_sub(doc, cb);
+    }
     y += BUTTON_H + SP5;
 
     if let Some(ov) = item.overview.as_deref() {

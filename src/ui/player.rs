@@ -189,6 +189,7 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
 
     // ---- bottom transport bar (scrubber, buttons, menus) ----
     crate::ui::playerbar::build(ph, b);
+    crate::ui::skip::build(ph, b);
 
     // ---- toast ----
     let chip = vev(MAT_HUD, BLEND_WITHIN);
@@ -327,7 +328,7 @@ pub(crate) unsafe fn hide_bars_if_idle() {
         }
     }
 }
-unsafe fn fade(v: *mut Object, to: f64, d: f64) {
+pub(crate) unsafe fn fade(v: *mut Object, to: f64, d: f64) {
     anim_begin(d, if to > 0.5 { timing_ease_out() } else { timing_ease_in_out() });
     let a: *mut Object = msg_send![v, animator];
     let _: () = msg_send![a, setAlphaValue: to];

@@ -332,6 +332,24 @@ impl JellyfinClient {
         Ok(page.items.into_iter().next())
     }
 
+    /// Skip-button ranges of an item. A 404 means the server has none for it (older
+    /// servers, or nothing analysed yet), which is an empty list, not an error.
+    pub async fn media_segments(&self, item_id: &str) -> Result<Vec<MediaSegment>, JFError> {
+        let path = format!("/MediaSegments/{}", enc(item_id));
+        match self.get_json::<ItemsPage<MediaSegment>>(&path, &[]).await {
+            Ok(page) => Ok(page.items),
+            Err(JFError::Api(404, _)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Every episode of a series in one list, all seasons and specials, for Up Next.
+    pub async fn series_episodes(&self, series_id: &str) -> Result<Vec<Episode>, JFError> {
+        let path = format!("/Shows/{}/Episodes", enc(series_id));
+        let page: ItemsPage<Episode> = self.get_json(&path, &[("UserId", self.user_id.clone())]).await?;
+        Ok(page.items)
+    }
+
     pub async fn image(&self, item_id: &str) -> Result<Vec<u8>, JFError> {
         let url = u::build_image_url(&self.base, item_id, &self.token, 400);
         let r = self.http.get(url).timeout(Duration::from_secs(30)).send().await.map_err(map_err)?;
@@ -1598,6 +1616,62 @@ mod tests {
             err(client(&refused_base()).set_played("i", true).await),
             JFError::Network(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn media_segments_path_auth_and_parse() {
+        let body = r#"{"Items":[{"Id":"x","ItemId":"ep","Type":"Intro","StartTicks":0,"EndTicks":600000000}],"TotalRecordCount":1}"#;
+        let m = serve(|_| reply(200, body)).await;
+        let segs = client(&m.base).media_segments("ep 1").await.unwrap();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].segment_type, "Intro");
+        assert_eq!(segs[0].end_ticks, 600_000_000);
+        let r = m.last();
+        assert_eq!(r.method, "GET");
+        assert_eq!(r.path, "/MediaSegments/ep%201");
+        assert_token_auth(&r);
+    }
+
+    #[tokio::test]
+    async fn media_segments_404_and_empty_mean_no_segments() {
+        let m = serve(|_| status_only(404)).await;
+        assert!(client(&m.base).media_segments("ep").await.unwrap().is_empty());
+        let m = serve(|_| reply(200, r#"{"Items":[],"TotalRecordCount":0}"#)).await;
+        assert!(client(&m.base).media_segments("ep").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn media_segments_other_errors_still_fail() {
+        let m = serve(|_| status_only(500)).await;
+        assert!(matches!(err(client(&m.base).media_segments("ep").await), JFError::Api(500, _)));
+        let m = serve(|_| status_only(401)).await;
+        assert!(matches!(err(client(&m.base).media_segments("ep").await), JFError::Auth(_)));
+        assert!(matches!(
+            err(client(&refused_base()).media_segments("ep").await),
+            JFError::Network(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn series_episodes_lists_whole_series_without_season_filter() {
+        let body = r#"{"Items":[{"Id":"e1","Name":"One","IndexNumber":1,"ParentIndexNumber":1}],"TotalRecordCount":1}"#;
+        let m = serve(|_| reply(200, body)).await;
+        let eps = client(&m.base).series_episodes("sh 1").await.unwrap();
+        assert_eq!(eps[0].id, "e1");
+        assert_eq!(eps[0].parent_index, Some(1));
+        let r = m.last();
+        assert_eq!(r.path, "/Shows/sh%201/Episodes");
+        assert_eq!(r.qp("UserId"), Some(USER));
+        assert_eq!(r.qp("seasonId"), None);
+        assert_token_auth(&r);
+    }
+
+    #[tokio::test]
+    async fn full_item_carries_series_id() {
+        let body = r#"{"Id":"e1","Name":"One","Type":"Episode","SeriesId":"sh1","SeriesName":"Show","ParentIndexNumber":2,"IndexNumber":3}"#;
+        let m = serve(|_| reply(200, body)).await;
+        let it = client(&m.base).full_item("e1").await.unwrap();
+        assert_eq!(it.series_id.as_deref(), Some("sh1"));
     }
 }
 

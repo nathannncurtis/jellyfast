@@ -426,8 +426,7 @@ pub(crate) extern "C" fn restart(_t: &mut Object, _c: Sel, _s: *mut Object) {
         if ui.playing.is_none() {
             return;
         }
-        let tm = CMTimeMakeWithSeconds(0.0, 600);
-        let _: () = msg_send![ui.player.get(), seekToTime: tm];
+        crate::platform::avkit::seek_to_secs(0.0);
         update();
     }
 }
@@ -448,8 +447,7 @@ pub(crate) extern "C" fn scrub(_t: &mut Object, _c: Sel, sender: *mut Object) {
             return;
         }
         let v: f64 = msg_send![sender, doubleValue];
-        let tm = CMTimeMakeWithSeconds((v * dur).clamp(0.0, dur), 600);
-        let _: () = msg_send![ui.player.get(), seekToTime: tm];
+        crate::platform::avkit::seek_to_secs((v * dur).clamp(0.0, dur));
     }
 }
 pub(crate) extern "C" fn volume(_t: &mut Object, _c: Sel, sender: *mut Object) {

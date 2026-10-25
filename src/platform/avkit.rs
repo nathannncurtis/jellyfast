@@ -106,13 +106,16 @@ pub(crate) extern "C" fn tick(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
                 paused: pn.paused,
             });
         }
-        // Auto mark-watched near the end.
+        // At the end: play the next episode when there is one (Up Next, autoplay on),
+        // otherwise mark watched and leave the player as before.
         if pn.duration_secs > 0.0 && pn.last_secs >= pn.duration_secs - 0.5 {
-            let id = pn.item_id.clone();
-            let _ = ui.ui_tx.send(UiCmd::Stopped {
-                item_id: id.clone(),
-                ticks: crate::jellyfin::urls::ticks_from_secs(pn.duration_secs),
-            });
+            if crate::ui::skip::advance() {
+                return;
+            }
+            let ui = UI.get_mut().unwrap();
+            let id = ui.playing.as_ref().map(|p| p.item_id.clone()).unwrap_or_default();
+            let end_ticks = ui.playing.as_ref().map(|p| crate::jellyfin::urls::ticks_from_secs(p.duration_secs)).unwrap_or(0);
+            let _ = ui.ui_tx.send(UiCmd::Stopped { item_id: id.clone(), ticks: end_ticks });
             let _ = ui.ui_tx.send(UiCmd::MarkPlayed { item_id: id, played: true });
             stop_playback_ui();
         }
@@ -272,6 +275,7 @@ pub fn stop_playback_ui() {
         release_obj(ui.pitem.get());
         ui.pitem = Ptr(nil());
         ui.playing = None;
+        crate::ui::skip::stop();
         let content: *mut Object = msg_send![ui.win.get(), contentView];
         crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
         set_hidden(ui.player_host.get(), true);
@@ -299,6 +303,16 @@ pub(crate) unsafe fn clear_media_groups() {
     ui.audio_group = nil();
 }
 
+/// Seeks the current item to `secs` with zero tolerance, so the playhead lands on the
+/// target. The plain `seekToTime:` form left it at 0 in the self-test build. Every seek
+/// (scrubber, +/-10 s, resume, restart, skip) goes through here.
+pub(crate) unsafe fn seek_to_secs(secs: f64) {
+    let ui = UI.get_mut().unwrap();
+    let tm = CMTimeMakeWithSeconds(secs.max(0.), 600);
+    let zero = CMTimeMakeWithSeconds(0.0, 600);
+    let _: () = msg_send![ui.player.get(), seekToTime: tm toleranceBefore: zero toleranceAfter: zero];
+}
+
 pub(crate) unsafe fn seek_by(delta: f64) {
     let ui = UI.get_mut().unwrap();
     if ui.playing.is_none() {
@@ -306,8 +320,7 @@ pub(crate) unsafe fn seek_by(delta: f64) {
     }
     let t: CMTime = msg_send![ui.player.get(), currentTime];
     let target = (t.seconds() + delta).clamp(0.0, ui.playing.as_ref().unwrap().duration_secs.max(1.0));
-    let tm = CMTimeMakeWithSeconds(target, 600);
-    let _: () = msg_send![ui.player.get(), seekToTime: tm];
+    seek_to_secs(target);
 }
 pub(crate) extern "C" fn seek_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
@@ -476,7 +489,9 @@ pub fn start_playback(ps: &PlaybackStart) {
             paused: false,
             attempts: 0,
             ticks_since_save: 0,
+            skip: Default::default(),
         });
+        crate::ui::skip::start(ps);
         // Upper-left header: the title (episode or movie name) and, under it, the header line.
         let header_sub = ps.header_subtitle();
         set_text(ui.top_title.get(), &ps.title);
@@ -528,8 +543,7 @@ pub fn start_playback(ps: &PlaybackStart) {
             }
         }
         if ps.resume_secs > 1.0 {
-            let tm = CMTimeMakeWithSeconds(ps.resume_secs, 600);
-            let _: () = msg_send![ui.player.get(), seekToTime: tm];
+            seek_to_secs(ps.resume_secs);
         }
         let _ = ui.ui_tx.send(UiCmd::Progress {
             item_id: ps.item_id.clone(),
@@ -595,7 +609,6 @@ pub(crate) unsafe fn drop_replace_item(url: &str, resume: f64) {
             forKeyPath: ns(kp) options: 3usize context: nil()];
     }
     if resume > 1.0 {
-        let tm = CMTimeMakeWithSeconds(resume, 600);
-        let _: () = msg_send![ui.player.get(), seekToTime: tm];
+        seek_to_secs(resume);
     }
 }

@@ -273,6 +273,8 @@ pub struct PlayingNow {
     pub paused: bool,
     pub attempts: u32,
     pub ticks_since_save: u8,
+    /// Segments, next episode and Up Next state of this item (see ui::skip).
+    pub skip: crate::ui::skip::SkipState,
 }
 
 pub struct Ui {
@@ -359,6 +361,9 @@ pub struct Ui {
     pub s_lib_down: Ptr,
     /// Settings: sidebar layout popup (separate libraries / one big library).
     pub s_layout: Ptr,
+    /// Settings: "Autoplay next episode" and "Skip intros by default".
+    pub s_autoplay: Ptr,
+    pub s_skip_default: Ptr,
     pub seerr: crate::ui::seerr::SeerrUi,
     pub detail: crate::ui::detail::DetailUi,
     // Rust-side state
@@ -394,6 +399,8 @@ pub struct Ui {
     pub user_name: String,
     pub now: crate::ui::nowbar::NowBar,
     pub pbar: crate::ui::playerbar::PlayerBar,
+    /// Skip-segment button and Up Next card (see ui::skip).
+    pub skip: crate::ui::skip::SkipUi,
     /// Play On: cast menu state and the remote-control bar.
     pub cast: crate::ui::cast::CastUi,
     /// AirPlay card shown over the video while it plays on another screen.
@@ -567,6 +574,12 @@ pub(crate) unsafe fn register_classes() {
             (sel!(showSpeedMenu:), crate::ui::playerbar::show_speed_menu as Extern0),
             (sel!(pickTrack:), crate::ui::playerbar::pick_track as Extern0),
             (sel!(togglePiP:), crate::ui::playerbar::toggle_pip as Extern0),
+            (sel!(skipSegment:), crate::ui::skip::skip_segment as Extern0),
+            (sel!(jrSkipTick:), crate::ui::skip::skip_tick as Extern0),
+            (sel!(jrSkipSegment:), crate::ui::skip::skip_segment as Extern0),
+            (sel!(jrUpNextPlay:), crate::ui::skip::up_next_play as Extern0),
+            (sel!(jrUpNextCancel:), crate::ui::skip::up_next_cancel as Extern0),
+            (sel!(jrToggleSeriesSkip:), crate::ui::skip::toggle_series_skip as Extern0),
             (sel!(showCastMenu:), crate::ui::cast::show_menu as Extern0),
             (sel!(castPick:), crate::ui::cast::pick as Extern0),
             (sel!(castAirPlay:), crate::ui::cast::airplay_pick as Extern0),
@@ -764,6 +777,10 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         s.theme = popup_choice(ui.s_theme.get(), &ui.s_theme_ids, "system");
         s.system_light = popup_choice(ui.s_light.get(), &ui.s_light_ids, &s.system_light);
         s.system_dark = popup_choice(ui.s_dark.get(), &ui.s_dark_ids, &s.system_dark);
+        let ap: NSInteger = msg_send![ui.s_autoplay.get(), state];
+        s.autoplay_next = ap != 0;
+        let sk: NSInteger = msg_send![ui.s_skip_default.get(), state];
+        s.skip_intros_default = sk != 0;
         // Compare display forms: the field shows a bare host, while the stored
         // URL carries a resolved scheme. The worker resolves and stores the URL.
         let new_url = read_field(ui.s_url.get()).trim().to_string();
@@ -1307,6 +1324,8 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         s_lib_up: Ptr(nil()),
         s_lib_down: Ptr(nil()),
         s_layout: Ptr(nil()),
+        s_autoplay: Ptr(nil()),
+        s_skip_default: Ptr(nil()),
         seerr: crate::ui::seerr::SeerrUi::new(),
         detail: crate::ui::detail::DetailUi::new(),
         rows: vec![],
@@ -1337,6 +1356,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         user_name: String::new(),
         now: crate::ui::nowbar::NowBar::new(),
         pbar: crate::ui::playerbar::PlayerBar::new(),
+        skip: crate::ui::skip::SkipUi::new(),
         cast: crate::ui::cast::CastUi::new(),
         ext: crate::ui::player::ExtUi::new(),
         tint_cache: HashMap::new(),

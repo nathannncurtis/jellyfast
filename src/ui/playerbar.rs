@@ -523,8 +523,7 @@ pub(crate) unsafe fn seek_frac(f: f64) {
     }
     let f = f.clamp(0.0, 1.0);
     ui.pbar.frac = f;
-    let tm = CMTimeMakeWithSeconds(f * dur, 600);
-    let _: () = msg_send![ui.player.get(), seekToTime: tm];
+    crate::platform::avkit::seek_to_secs(f * dur);
     redraw_scrub();
 }
 

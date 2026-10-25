@@ -68,6 +68,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Controls", "Next Subtitle Track", "subCycle:", "c", 0, 0),
     s("Controls", "Next Audio Track", "audioCycle:", "a", 0, 0),
     s("Controls", "Enter / Exit Full Screen", "fullscreen:", "f", 0, 0),
+    s("Controls", "Skip Intro or Current Segment", "skipSegment:", "s", 0, 0),
     s("Controls", "Picture in Picture", "togglePiP:", "p", ALT | CMD, 0),
     s("Controls", "Cast to a Device…", "showCastMenu:", "c", CMD | SHIFT, 0),
     // Playback speed (submenu of Controls)
@@ -112,7 +113,7 @@ pub(crate) const EXEMPT_ACTIONS: &[&str] = &["showAbout:", "reloadThemes:"];
 /// Actions that only make sense while something is playing; they grey out when idle.
 const PLAYBACK_ACTIONS: &[&str] = &[
     "playPause:", "stopPlayback:", "seekBack:", "seekFwd:", "volUp:", "volDown:", "mute:",
-    "subCycle:", "audioCycle:", "setSpeed:", "togglePiP:",
+    "subCycle:", "audioCycle:", "setSpeed:", "skipSegment:", "togglePiP:",
 ];
 
 /// Human label for a key equivalent, e.g. "⌘F", "⌃⌘2", "←", "⇧⇥", "Space".
