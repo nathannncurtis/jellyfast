@@ -28,7 +28,7 @@ pub(crate) unsafe fn build_window_and_ui() {
         }
     }
     let style: NSUInteger = 1 | 2 | 4 | 8 | (1 << 15); // titled|closable|mini|resizable|fullSizeContent
-    let win: *mut Object = msg_send![class!(NSWindow), alloc];
+    let win: *mut Object = msg_send![jr_window_class(), alloc];
     let win: *mut Object = msg_send![win,
         initWithContentRect: frame styleMask: style backing: 2usize defer: NO];
     let _: () = msg_send![win, setTitle: ns("Jellyfast")];
@@ -37,7 +37,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     let _: () = msg_send![win, setReleasedWhenClosed: NO];
     let _: () = msg_send![win, setTabbingMode: 2i64]; // disallowed
     let _: () = msg_send![win, setMinSize: size(960., 600.)];
-    let _: () = msg_send![win, center];
+    place_window(win);
     ui.win = Ptr::retained(win);
 
     let content: *mut Object = msg_send![win, contentView];
@@ -360,8 +360,10 @@ pub(crate) unsafe fn build_window_and_ui() {
     build_menus();
 
     let _: () = msg_send![win, makeKeyAndOrderFront: nil()];
-    #[allow(deprecated)]
-    let _: () = msg_send![ui.app.get(), activateIgnoringOtherApps: YES];
+    if !offscreen_mode() {
+        #[allow(deprecated)]
+        let _: () = msg_send![ui.app.get(), activateIgnoringOtherApps: YES];
+    }
 
     // 1s UI timer: chip/progress/autosave (target = controller).
     let timer: *mut Object = msg_send![class!(NSTimer),

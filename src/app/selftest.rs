@@ -68,6 +68,7 @@ pub fn start() {
         let t: *mut Object = msg_send![ui.win.get(), title];
         state_check("window title is Jellyfast", to_str(t) == "Jellyfast");
     }
+    check_offscreen("start");
     next(0);
 }
 
@@ -398,12 +399,50 @@ unsafe fn walk_text_windowrect(v: *mut Object, br: NSRect, issues: &mut Vec<Stri
         walk_text_windowrect(c, br, issues);
     }
 }
+/// Every visible window must lie entirely outside every screen in headless mode.
+fn check_offscreen(tag: &str) {
+    if !offscreen_mode() {
+        return;
+    }
+    unsafe {
+        let ui = UI.get().unwrap();
+        let wins: *mut Object = msg_send![ui.app.get(), windows];
+        let n: usize = msg_send![wins, count];
+        let screens: *mut Object = msg_send![class!(NSScreen), screens];
+        let sn: usize = msg_send![screens, count];
+        let mut bad = 0;
+        for i in 0..n {
+            let w: *mut Object = msg_send![wins, objectAtIndex: i];
+            let vis: BOOL = msg_send![w, isVisible];
+            if vis == NO {
+                continue;
+            }
+            let f: NSRect = msg_send![w, frame];
+            for j in 0..sn {
+                let s: *mut Object = msg_send![screens, objectAtIndex: j];
+                let sf: NSRect = msg_send![s, frame];
+                let ox = (f.origin.x + f.size.w).min(sf.origin.x + sf.size.w) - f.origin.x.max(sf.origin.x);
+                let oy = (f.origin.y + f.size.h).min(sf.origin.y + sf.size.h) - f.origin.y.max(sf.origin.y);
+                if ox > 0.0 && oy > 0.0 {
+                    let cls: *mut Object = msg_send![w, className];
+                    log(&format!("  window on screen: {} {} {:?}", to_str(cls), to_str(msg_send![w, title]), f));
+                    bad += 1;
+                }
+            }
+        }
+        state_check(&format!("all visible windows are off-screen ({})", tag), bad == 0);
+    }
+}
 /// With JELLYFIN_MAC_SHOTS=<dir>, capture the window with screencapture (own-window capture).
 fn shot(tag: &str, idx: usize, win: *mut Object) {
     let dir = match std::env::var("JELLYFIN_MAC_SHOTS") {
         Ok(d) if !d.is_empty() => d,
         _ => return,
     };
+    if offscreen_mode() {
+        // screencapture cannot grab windows that sit off every screen; use JELLYFIN_MAC_SELFTEST_ONSCREEN=1 for shot runs.
+        return;
+    }
     unsafe {
         let _: () = msg_send![win, displayIfNeeded];
         let _: () = msg_send![class!(CATransaction), flush];
@@ -420,6 +459,7 @@ fn shot(tag: &str, idx: usize, win: *mut Object) {
 }
 /// Fails the run (exit 2) if any visible window has layout problems.
 fn audit(tag: &str) {
+    check_offscreen(tag);
     unsafe {
         let ui = UI.get().unwrap();
         let wins: *mut Object = msg_send![ui.app.get(), windows];
@@ -922,6 +962,7 @@ fn s_settings_cancel() {
         std::thread::sleep(std::time::Duration::from_millis(300));
         on_main(|| unsafe {
             log("  cancelling settings sheet");
+            check_offscreen("settings sheet");
             let ui = UI.get_mut().unwrap();
             state_check("seerr fields filled", read_field(ui.seerr.s_url.get()) == "https://seerr.example");
             set_text(ui.seerr.s_key.get(), "typed-then-cancelled");
@@ -1068,6 +1109,11 @@ fn s_play_stop() {
 }
 fn s_fullscreen() {
     handle_main(playback(0.0, 6.0));
+    if offscreen_mode() {
+        // Full screen would take over a real display; only exercised with JELLYFIN_MAC_SELFTEST_ONSCREEN=1.
+        log("  fullscreen toggle skipped (headless mode)");
+        return;
+    }
     unsafe {
         act(sel!(fullscreen:), nil());
     }
@@ -1106,8 +1152,8 @@ fn s_quit_prep() {
     unsafe {
         let ui = UI.get().unwrap();
         state_check("no sheet left", {
-            let s: *mut Object = msg_send![ui.win.get(), attachedSheet];
-            s.is_null()
+            let _ = ui;
+            !crate::platform::appkit::settings_open()
         });
     }
 }
@@ -1152,8 +1198,8 @@ fn seerr_visible_win() -> bool {
 fn sheet_open() -> bool {
     unsafe {
         let ui = UI.get().unwrap();
-        let a: *mut Object = msg_send![ui.win.get(), attachedSheet];
-        !a.is_null()
+        let _ = ui;
+        crate::platform::appkit::settings_open()
     }
 }
 /// Number of rows in the Seerr list that carry a Request button.
@@ -1205,6 +1251,7 @@ fn s_seerr_enabled() {
         ui.cfg.settings.seerr_enabled = true;
         ui.cfg.settings.seerr_url = "http://seerr.example:5055".into();
         act(sel!(openSeerr:), nil()); // same window reused
+        check_offscreen("seerr window");
         state_check("hint hidden when configured", seerr_hidden(ui.seerr.hint.get()));
         state_check("search visible", !seerr_hidden(ui.seerr.search.get()));
         state_check("empty state row", ui.seerr.rows.len() == 1);

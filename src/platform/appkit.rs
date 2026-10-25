@@ -84,6 +84,61 @@ extern "C" {}
 #[link(name = "QuartzCore", kind = "framework")]
 extern "C" {}
 
+// ---- Self-test isolation ---------------------------------------------------------------------
+/// In self-test mode windows open far outside every screen and the app never takes
+/// focus, so a headless run is invisible to whoever is at the machine.
+/// `JELLYFIN_MAC_SELFTEST_ONSCREEN=1` opts out (for screenshot runs on a visible window).
+pub fn offscreen_mode() -> bool {
+    crate::app::selftest::enabled()
+        && std::env::var("JELLYFIN_MAC_SELFTEST_ONSCREEN").map(|v| v != "1").unwrap_or(true)
+}
+/// Right edge of the union of all screens.
+pub unsafe fn screens_max_x() -> f64 {
+    let screens: *mut Object = msg_send![class!(NSScreen), screens];
+    let n: NSUInteger = msg_send![screens, count];
+    let mut max_x: f64 = 0.0;
+    for i in 0..n {
+        let s: *mut Object = msg_send![screens, objectAtIndex: i];
+        let f: NSRect = msg_send![s, frame];
+        max_x = max_x.max(f.origin.x + f.size.w);
+    }
+    max_x
+}
+/// Self-test only: move a window fully off every screen (size unchanged).
+pub unsafe fn place_offscreen(win: *mut Object) {
+    let x = screens_max_x() + 2000.0;
+    let _: () = msg_send![win, setFrameOrigin: NSPoint { x, y: 100.0 }];
+}
+/// Center normally; off-screen in self-test mode.
+pub unsafe fn place_window(win: *mut Object) {
+    if offscreen_mode() {
+        place_offscreen(win);
+    } else {
+        let _: () = msg_send![win, center];
+    }
+}
+/// Window subclass that, in self-test mode, lets AppKit keep it off-screen.
+extern "C" fn constrain_frame(this: &mut Object, _c: Sel, r: NSRect, screen: *mut Object) -> NSRect {
+    unsafe {
+        if offscreen_mode() {
+            r
+        } else {
+            msg_send![super(this, class!(NSWindow)), constrainFrameRect: r toScreen: screen]
+        }
+    }
+}
+pub(crate) unsafe fn register_window_class() {
+    let mut d = ClassDecl::new("JRWindow", class!(NSWindow)).unwrap();
+    d.add_method(
+        sel!(constrainFrameRect:toScreen:),
+        constrain_frame as extern "C" fn(&mut Object, Sel, NSRect, *mut Object) -> NSRect,
+    );
+    d.register();
+}
+pub(crate) unsafe fn jr_window_class() -> *const Class {
+    objc::runtime::objc_getClass(b"JRWindow\0".as_ptr() as *const std::os::raw::c_char) as *const Class
+}
+
 // ---- Tiny pointer RAII for process-lifetime globals --------------------
 #[derive(Clone, Copy)]
 pub struct Ptr(pub *mut Object);
@@ -448,6 +503,7 @@ pub(crate) unsafe fn register_classes() {
         d.register();
     }
     crate::ui::seerr::register_seerr_classes();
+    register_window_class();
     register_sidebar_row();
     register_header_class();
     crate::ui::player::register_player_classes();
@@ -552,10 +608,25 @@ pub(crate) extern "C" fn show_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         let _ = ui.main_tx.send(MainMsg::SettingsSnapshot(Box::new(ui.cfg.clone())));
     }
 }
+/// Whether the settings sheet is up. (Headless self-test shows it as a plain off-screen window:
+/// AppKit drags an off-screen parent onto a screen to present a sheet.)
+pub(crate) unsafe fn settings_open() -> bool {
+    let ui = UI.get_mut().unwrap();
+    if offscreen_mode() {
+        let v: BOOL = msg_send![ui.settings_win.get(), isVisible];
+        return v == YES;
+    }
+    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
+    !attached.is_null()
+}
 pub(crate) unsafe fn show_settings_sheet() {
     let ui = UI.get_mut().unwrap();
-    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
-    if !attached.is_null() {
+    if settings_open() {
+        return;
+    }
+    if offscreen_mode() {
+        place_offscreen(ui.settings_win.get());
+        let _: () = msg_send![ui.settings_win.get(), orderFront: nil()];
         return;
     }
     let _: () = msg_send![ui.win.get(), beginSheet: ui.settings_win.get() completionHandler: nil()];
@@ -570,9 +641,13 @@ pub(crate) unsafe fn close_settings() {
     set_text(ui.seerr.s_key.get(), "");
     set_text(ui.seerr.s_pass.get(), "");
     ui.seerr.pending = None;
-    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
-    if !attached.is_null() {
-        let _: () = msg_send![ui.win.get(), endSheet: ui.settings_win.get()];
+    if offscreen_mode() {
+        let _: () = msg_send![ui.settings_win.get(), orderOut: nil()];
+    } else {
+        let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
+        if !attached.is_null() {
+            let _: () = msg_send![ui.win.get(), endSheet: ui.settings_win.get()];
+        }
     }
 }
 pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object) {
@@ -931,7 +1006,7 @@ impl CellOf for *mut Object {
 pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: UnboundedSender<MainMsg>) {
     register_classes();
     let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-    let _: BOOL = msg_send![app, setActivationPolicy: 0i64]; // regular app
+    let _: BOOL = msg_send![app, setActivationPolicy: if offscreen_mode() { 1i64 } else { 0i64 }]; // regular app (accessory in headless self-test)
 
     let pump: *mut Object = {
         let cls = class!(NSObject); // JRPump registered above; look it up:

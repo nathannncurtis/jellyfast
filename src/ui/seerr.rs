@@ -167,14 +167,14 @@ unsafe fn flip_view(frame: NSRect) -> *mut Object {
 
 unsafe fn build_window() {
     let ui = UI.get_mut().unwrap();
-    let w: *mut Object = msg_send![class!(NSWindow), alloc];
+    let w: *mut Object = msg_send![jr_window_class(), alloc];
     let w: *mut Object = msg_send![w,
         initWithContentRect: rect(0., 0., 620., 640.)
         styleMask: (1 | 2 | 8) as NSUInteger backing: 2usize defer: NO];
     let _: () = msg_send![w, setTitle: ns("Request something new")];
     let _: () = msg_send![w, setReleasedWhenClosed: NO];
     let _: () = msg_send![w, setMinSize: size(460., 360.)];
-    let _: () = msg_send![w, center];
+    place_window(w);
     let c: *mut Object = msg_send![w, contentView];
     let b = bounds_of(c);
 

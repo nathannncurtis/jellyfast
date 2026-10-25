@@ -20,7 +20,7 @@ use std::sync::{Mutex, OnceLock};
 
 pub(crate) unsafe fn build_settings_window() {
     let ui = UI.get_mut().unwrap();
-    let w: *mut Object = msg_send![class!(NSWindow), alloc];
+    let w: *mut Object = msg_send![jr_window_class(), alloc];
     let w: *mut Object = msg_send![w,
         initWithContentRect: rect(0., 0., 460., 620.)
         styleMask: (1 | 2) as NSUInteger backing: 2usize defer: NO];
