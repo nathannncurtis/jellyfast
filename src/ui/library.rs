@@ -124,7 +124,7 @@ pub fn grid_set_items(items: &[ListItem]) {
             let _: () = msg_send![art, setMasksToBounds: YES];
             let _: () = msg_send![art, setContentsGravity: ns("resizeAspectFill")];
             let _: () = msg_send![art, setContentsScale: scale];
-            let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_HOVER)];
+            let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_SEL)];
             add_layer(host, art);
 
             // Progress: track + fill, clipped by the art layer.
@@ -298,7 +298,7 @@ pub fn grid_set_skeleton(n: usize) {
             set_corner(art, R_POSTER);
             let _: () = msg_send![art, setMasksToBounds: YES];
             let _: () = msg_send![art, setContentsScale: scale];
-            let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_HOVER)];
+            let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_SEL)];
             add_layer(host, art);
             let t = new_layer();
             set_corner(t, 3.);
@@ -470,7 +470,7 @@ pub(crate) extern "C" fn grid_appearance_changed(this: &mut Object, _cmd: Sel) {
         }
         tx_begin_instant();
         for c in &(*data).cells {
-            let _: () = msg_send![c.art, setBackgroundColor: cg(C_FILL_HOVER)];
+            let _: () = msg_send![c.art, setBackgroundColor: cg(C_FILL_SEL)];
             if !c.prog_fill.is_null() {
                 let _: () = msg_send![c.prog_fill, setBackgroundColor: cg(C_ACCENT)];
             }
