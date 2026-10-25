@@ -95,6 +95,36 @@ fn check(code: u16, body: &str, what: &str) -> Result<(), SeerrError> {
     }
 }
 
+/// For a plain `http://` address that the server redirects to https on the same
+/// host, returns that https base (path kept). Sends one unauthenticated GET
+/// /api/v1/status with redirects turned off, so the password or API key is
+/// never sent in cleartext before the upgrade. `None` when there is nothing to
+/// upgrade or the probe fails; the normal flow then reports the real error.
+pub async fn https_upgrade(base: &str) -> Option<String> {
+    let host_and_path = base.trim().trim_end_matches('/').strip_prefix("http://")?;
+    let host = host_and_path.split('/').next()?;
+    let probe = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let r = probe.get(format!("http://{}/api/v1/status", host_and_path)).send().await.ok()?;
+    if !r.status().is_redirection() {
+        return None;
+    }
+    let loc = r.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+    let loc_host = loc.strip_prefix("https://")?.split('/').next()?;
+    (loc_host == host).then(|| format!("https://{}", host_and_path))
+}
+
+/// True when following a redirect from `cur` to `next` may carry credentials:
+/// same host, and either the same scheme and port or an http -> https upgrade.
+fn safe_hop(cur: &reqwest::Url, next: &reqwest::Url) -> bool {
+    let upgrade = cur.scheme() == "http" && next.scheme() == "https";
+    next.host_str() == cur.host_str() && (upgrade || (next.scheme() == cur.scheme() && next.port() == cur.port()))
+}
+
 #[derive(Clone)]
 enum Auth {
     Key(String),
@@ -114,12 +144,66 @@ impl SeerrClient {
     fn build(base: &str, auth: Auth) -> Result<Self, SeerrError> {
         let base = normalize_base_url(base).map_err(SeerrError::BadUrl)?;
         let http = reqwest::Client::builder()
+            // Redirects are followed by `exec`: reqwest drops the Cookie header on
+            // an http -> https hop (it counts the scheme change as another origin).
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .user_agent("Jellyfast/0.1.0")
             .build()
             .map_err(|e| SeerrError::Network(e.to_string()))?;
         Ok(Self { http, base, auth })
+    }
+
+    /// Same server with an https base (see [`https_upgrade`]).
+    pub fn with_base(mut self, base: String) -> Self {
+        self.base = base;
+        self
+    }
+
+    /// Sends a request and follows redirects by hand, keeping every header
+    /// (including Cookie / X-Api-Key) across a hop to the same host, also when
+    /// the scheme goes from http to https. A redirect to another host is never
+    /// followed, so credentials cannot leak; that response is returned as is.
+    async fn exec(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response, SeerrError> {
+        let mut req = rb.build().map_err(map_err)?;
+        for _ in 0..5 {
+            let r = self
+                .http
+                .execute(req.try_clone().ok_or_else(|| SeerrError::Invalid("request not repeatable".into()))?)
+                .await
+                .map_err(map_err)?;
+            if !r.status().is_redirection() {
+                return Ok(r);
+            }
+            let Some(next) = r
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|l| req.url().join(l).ok())
+            else {
+                return Ok(r);
+            };
+            if !safe_hop(req.url(), &next) {
+                return Ok(r);
+            }
+            if !matches!(r.status().as_u16(), 307 | 308) {
+                *req.method_mut() = reqwest::Method::GET;
+                *req.body_mut() = None;
+                req.headers_mut().remove(reqwest::header::CONTENT_TYPE);
+                req.headers_mut().remove(reqwest::header::CONTENT_LENGTH);
+            }
+            *req.url_mut() = next;
+        }
+        Err(SeerrError::Network("too many redirects".into()))
+    }
+
+    /// Jellyfin username in login mode; `None` in API-key mode.
+    pub fn account(&self) -> Option<&str> {
+        match &self.auth {
+            Auth::Login { username, .. } => Some(username.as_str()),
+            Auth::Key(_) => None,
+        }
     }
 
     /// API-key mode.
@@ -146,10 +230,8 @@ impl SeerrClient {
             .http
             .post(format!("{}/api/v1/auth/jellyfin", self.base))
             .header("Accept", "application/json")
-            .json(&serde_json::json!({"username": username, "password": password}))
-            .send()
-            .await
-            .map_err(map_err)?;
+            .json(&serde_json::json!({"username": username, "password": password}));
+        let r = self.exec(r).await?;
         let code = r.status().as_u16();
         let cookies: Vec<String> = r
             .headers()
@@ -198,12 +280,12 @@ impl SeerrClient {
         let rb = rb.header("Accept", "application/json");
         let (code, body) = match &self.auth {
             Auth::Key(k) => {
-                let r = rb.header("X-Api-Key", k).send().await.map_err(map_err)?;
+                let r = self.exec(rb.header("X-Api-Key", k)).await?;
                 let code = r.status().as_u16();
                 (code, r.text().await.map_err(|e| SeerrError::Network(e.to_string()))?)
             }
             Auth::Login { .. } if !authed => {
-                let r = rb.send().await.map_err(map_err)?;
+                let r = self.exec(rb).await?;
                 let code = r.status().as_u16();
                 (code, r.text().await.map_err(|e| SeerrError::Network(e.to_string()))?)
             }
@@ -212,7 +294,7 @@ impl SeerrClient {
                 let mut attempt = 0;
                 loop {
                     let req = rb.try_clone().ok_or_else(|| SeerrError::Invalid("request not repeatable".into()))?;
-                    let r = req.header(reqwest::header::COOKIE, &cookie).send().await.map_err(map_err)?;
+                    let r = self.exec(req.header(reqwest::header::COOKIE, &cookie)).await?;
                     let code = r.status().as_u16();
                     let body = r.text().await.map_err(|e| SeerrError::Network(e.to_string()))?;
                     if (code == 401 || code == 403) && attempt == 0 {
@@ -225,7 +307,15 @@ impl SeerrClient {
             }
         };
         match check(code, &body, what) {
-            Err(SeerrError::Auth(m)) if matches!(self.auth, Auth::Login { .. }) => Err(SeerrError::Login(format!("not permitted ({})", m))),
+            // Still refused after a fresh sign-in: a 403 means this account may not
+            // do that (permission or quota), which is not a sign-in failure. A 401
+            // means the session itself was not accepted.
+            Err(SeerrError::Auth(m)) if matches!(self.auth, Auth::Login { .. }) => Err(if code == 403 {
+                let m = if m.starts_with("invalid API key") { "your Seerr account is not allowed to do this".to_string() } else { m };
+                SeerrError::Api(403, m)
+            } else {
+                SeerrError::Login(format!("the session was not accepted ({})", m))
+            }),
             r => r.map(|_| body),
         }
     }
@@ -332,7 +422,7 @@ impl SeerrClient {
 
     /// Poster bytes through this server's image proxy (needs no credentials).
     pub async fn poster(&self, path: &str) -> Result<Vec<u8>, SeerrError> {
-        let r = self.http.get(poster_url(&self.base, path)).send().await.map_err(map_err)?;
+        let r = self.exec(self.http.get(poster_url(&self.base, path))).await?;
         let code = r.status().as_u16();
         if !(200..300).contains(&code) {
             return Err(SeerrError::Api(code, "poster".into()));
@@ -710,11 +800,80 @@ mod tests {
         st.deny_login.store(false, std::sync::atomic::Ordering::SeqCst);
         // a genuine permission error (403 even with a fresh session) is reported after one relogin
         match c.request("movie", 997).await.unwrap_err() {
-            SeerrError::Login(msg) => assert!(msg.contains("quota"), "{}", msg),
+            SeerrError::Api(403, msg) => assert!(msg.contains("quota"), "{}", msg),
             e => panic!("{:?}", e),
         }
         assert_eq!(m.find("POST", "/api/v1/request").len(), 2);
         assert_eq!(logins(&m).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn login_permission_403_is_not_reported_as_sign_in_failure() {
+        let (m, _st) = login_mock().await;
+        let c = SeerrClient::with_login(&m.url(), "nathan", "pw").unwrap();
+        let err = c.request("movie", 997).await.unwrap_err();
+        assert!(matches!(err, SeerrError::Api(403, _)), "{:?}", err);
+        assert!(!err.to_string().contains("sign-in"), "{}", err);
+        // a refused session (401 with a fresh login) is still a sign-in problem
+        let m2 = start(|r| if r.path == "/api/v1/status" { default_route(r) } else { Resp::text(401, "") }).await;
+        let e2 = SeerrClient::with_login(&m2.url(), "a", "b").unwrap().search("x", 1).await.unwrap_err();
+        assert!(matches!(e2, SeerrError::Login(_)), "{:?}", e2);
+    }
+
+    #[tokio::test]
+    async fn https_upgrade_only_for_same_host_https_redirect() {
+        // 308 to https on the same host -> upgraded base (path kept)
+        let m = start(|r| {
+            let h = r.headers.get("host").cloned().unwrap_or_default();
+            Resp::text(308, "").with_header("Location", &format!("https://{}/api/v1/status", h))
+        })
+        .await;
+        let host = &m.url()["http://".len()..];
+        assert_eq!(https_upgrade(&m.url()).await, Some(format!("https://{}", host)));
+        assert_eq!(https_upgrade(&format!("{}/", m.url())).await, Some(format!("https://{}", host)));
+        // redirect to a different host is never followed for credentials
+        let other = start(|_| Resp::text(308, "").with_header("Location", "https://evil.example/api/v1/status")).await;
+        assert_eq!(https_upgrade(&other.url()).await, None);
+        // plain answer, https input, and unreachable servers do not upgrade
+        let plain = start(default_route).await;
+        assert_eq!(https_upgrade(&plain.url()).await, None);
+        assert_eq!(https_upgrade("https://127.0.0.1:1").await, None);
+        assert_eq!(https_upgrade("http://127.0.0.1:1").await, None);
+    }
+
+    #[tokio::test]
+    async fn redirects_keep_cookie_for_same_host_and_never_leave_it() {
+        let u = |s: &str| reqwest::Url::parse(s).unwrap();
+        // the live failure: http -> https on the same host used to lose the cookie
+        assert!(safe_hop(&u("http://s.example/api/v1/auth/me"), &u("https://s.example/api/v1/auth/me")));
+        assert!(!safe_hop(&u("https://s.example/a"), &u("http://s.example/a")));
+        assert!(!safe_hop(&u("http://s.example/a"), &u("https://evil.example/a")));
+        assert!(!safe_hop(&u("http://s.example/a"), &u("http://s.example:81/a")));
+        // login + authenticated calls through a 308 hop: cookie survives, POST body too
+        let st = LoginState::default();
+        let inner = login_route("nathan", "pw", st.clone());
+        let m = start(move |r| {
+            if let Some(rest) = r.path.strip_prefix("/old") {
+                Resp::text(308, "").with_header("Location", rest)
+            } else {
+                inner(r)
+            }
+        })
+        .await;
+        let c = SeerrClient::with_login(&format!("{}/old", m.url()), "nathan", "pw").unwrap();
+        let me = c.me().await.expect("me through redirect");
+        assert_eq!(me.display_name, "Nathan");
+        c.request("movie", 27205).await.expect("POST through redirect");
+        let target: Vec<_> = m.reqs().into_iter().filter(|r| !r.path.starts_with("/old") && r.path != "/api/v1/status").collect();
+        assert_eq!(logins(&m).len(), 1);
+        for r in target.iter().filter(|r| r.path != "/api/v1/auth/jellyfin") {
+            assert_eq!(r.headers["cookie"], "connect.sid=s0; locale=en", "{} {}", r.method, r.path);
+        }
+        assert!(m.find("POST", "/api/v1/request").iter().all(|r| r.body.contains("27205")));
+        // a redirect to another host is returned, not followed, and carries no cookie
+        let other = start(|_| Resp::text(308, "").with_header("Location", "http://other.invalid/x")).await;
+        let c2 = SeerrClient::new(&other.url(), "k").unwrap();
+        assert!(matches!(c2.me().await, Err(SeerrError::Api(308, _))));
     }
 
     #[tokio::test]
@@ -735,6 +894,30 @@ mod tests {
         assert!(matches!(c.request("movie", 996).await, Err(SeerrError::Api(500, _))));
     }
 
+    /// Sign-in only, against a real server: status (public), then /auth/me with
+    /// the password login. Used by the CI live-auth job. Read-only: the only POST
+    /// is the sign-in itself, and the password is never printed.
+    ///   SEERR_LIVE_URL=https://seerr.example SEERR_LIVE_USER=name \
+    ///   SEERR_LIVE_PASS_FILE=/path/to/password-file \
+    ///   cargo test -- --ignored seerr_live_login --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn seerr_live_login() {
+        let (Ok(url), Ok(user), Ok(pf)) = (
+            std::env::var("SEERR_LIVE_URL"),
+            std::env::var("SEERR_LIVE_USER"),
+            std::env::var("SEERR_LIVE_PASS_FILE"),
+        ) else {
+            panic!("set SEERR_LIVE_URL, SEERR_LIVE_USER and SEERR_LIVE_PASS_FILE");
+        };
+        let pass = std::fs::read_to_string(&pf).expect("password file");
+        let c = SeerrClient::with_login(&url, &user, pass.trim_end_matches(['\r', '\n'])).unwrap();
+        let (st, me) = c.verify().await.expect("status + sign-in");
+        println!("seerr {} signed in as id={}", st.version, me.id);
+        assert!(!st.version.is_empty());
+        assert!(me.id > 0 && !me.display_name.is_empty());
+    }
+
     /// Read-only smoke test against a real server. Never creates or deletes
     /// anything (the only POST is the sign-in itself).
     ///   SEERR_LIVE_URL=https://seerr.example SEERR_LIVE_USER=name \
@@ -751,6 +934,18 @@ mod tests {
             panic!("set SEERR_LIVE_URL, SEERR_LIVE_USER and SEERR_LIVE_PASS_FILE");
         };
         let pass = std::fs::read_to_string(&pf).expect("password file");
+        // A plain http address that redirects to https is used in its https form,
+        // and (below) the client also survives being pointed at the http form.
+        let up = https_upgrade(&url).await;
+        if let Some(u) = &up {
+            println!("note: {} redirects to https; checking both forms", url);
+            let c = SeerrClient::with_login(u, &user, pass.trim_end_matches(['\r', '\n'])).unwrap();
+            c.me().await.expect("me (upgraded https base)");
+        } else if url.starts_with("https://") {
+            assert!(https_upgrade(&url).await.is_none());
+        }
+        // `url` itself is used as given: for http input this walks the http -> https
+        // redirect with the session cookie, the case reqwest's own policy broke.
         let c = SeerrClient::with_login(&url, &user, pass.trim_end_matches(['\r', '\n'])).unwrap();
 
         let st = c.status().await.expect("status");

@@ -370,8 +370,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     Ok(_) if latest.trim().is_empty() => {
                         let _ = main_tx.send(MainMsg::SeerrResults(Vec::new()));
                     }
-                    Ok(c) => match c.search(&latest, 1).await {
-                        Ok(page) => {
+                    Ok(c) => match { let c = seerr_secure(c, &mut seerr).await; c.search(&latest, 1).await.map(|p| (c, p)) } {
+                        Ok((c, page)) => {
                             let paths = page.results.iter().filter_map(|r| r.poster_path.clone()).collect();
                             let _ = main_tx.send(MainMsg::SeerrResults(page.results));
                             fetch_seerr_posters(&c, &main_tx, paths, &poster_dir);
@@ -386,7 +386,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match c.request(&media_type, tmdb_id).await {
+                Ok(c) => match seerr_secure(c, &mut seerr).await.request(&media_type, tmdb_id).await {
                     Ok(_) => {
                         let _ = main_tx.send(MainMsg::SeerrRequested { title });
                     }
@@ -402,8 +402,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match c.requests(20, 0).await {
-                    Ok(v) => {
+                Ok(c) => match { let c = seerr_secure(c, &mut seerr).await; c.requests(20, 0).await.map(|v| (c, v)) } {
+                    Ok((c, v)) => {
                         let paths = v.iter().filter_map(|r| r.poster_path.clone()).collect();
                         let _ = main_tx.send(MainMsg::SeerrRequestList(v));
                         fetch_seerr_posters(&c, &main_tx, paths, &poster_dir);
@@ -557,8 +557,12 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
         return Err("Seerr URL is not set. Add it in Settings.".into());
     }
     let url = crate::jellyfin::urls::normalize_base_url(raw).map_err(|e| format!("Invalid Seerr URL: {}", e))?;
+    // The cache is only valid for the same server AND the same sign-in mode and
+    // account; SaveSeerr also clears it, so a changed password is picked up there.
+    let account = (!user.is_empty()).then_some(user.as_str());
     if let Some(c) = cache {
-        if c.base == url {
+        let upgraded = url.replacen("http://", "https://", 1);
+        if (c.base == url || c.base == upgraded) && c.account() == account {
             return Ok(c.clone());
         }
     }
@@ -574,6 +578,23 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
     .map_err(|e| e.to_string())?;
     *cache = Some(c.clone());
     Ok(c)
+}
+
+/// An address saved as http:// (before the https upgrade existed) is switched
+/// to its https form before anything is sent; secrets stay keyed by the saved
+/// address. One probe per client: the upgraded client replaces the cached one.
+async fn seerr_secure(c: SeerrClient, cache: &mut Option<SeerrClient>) -> SeerrClient {
+    if !c.base.starts_with("http://") {
+        return c;
+    }
+    match crate::seerr::client::https_upgrade(&c.base).await {
+        Some(n) => {
+            let c = c.with_base(n);
+            *cache = Some(c.clone());
+            c
+        }
+        None => c,
+    }
 }
 
 /// Handle SaveSeerr: validate before persisting anything when enabling.
@@ -630,14 +651,21 @@ async fn save_seerr(
     if !use_login && key_in.is_none() && stored_key.is_none() {
         return fail("Enter your Seerr API key (Seerr > Settings > General), or sign in with your Jellyfin account.".into());
     }
-    let n = match SeerrClient::resolve(trimmed).await {
+    let resolved = match SeerrClient::resolve(trimmed).await {
         Ok((base, _)) => base,
         Err(e) => return fail(e.to_string()),
     };
-    let client = if use_login {
-        SeerrClient::with_login(&n, &user, &pw_in.clone().or(stored_pw).unwrap_or_default())
+    // Never send the password or API key over plain http: when the server
+    // redirects http to https, save and use the https address.
+    let n = crate::seerr::client::https_upgrade(&resolved).await.unwrap_or(resolved);
+    // The secret actually used (typed now, or saved under any form of the address)
+    // is what gets stored under the saved address on success.
+    let (client, login_pw, api_key) = if use_login {
+        let pw = pw_in.clone().or(stored_pw).unwrap_or_default();
+        (SeerrClient::with_login(&n, &user, &pw), Some(pw), None)
     } else {
-        SeerrClient::new(&n, &key_in.clone().or(stored_key).unwrap_or_default())
+        let key = key_in.clone().or(stored_key).unwrap_or_default();
+        (SeerrClient::new(&n, &key), None, Some(key))
     };
     let client = match client {
         Ok(c) => c,
@@ -645,11 +673,10 @@ async fn save_seerr(
     };
     match client.verify().await {
         Ok((st, me)) => {
-            if use_login {
-                if let Some(p) = &pw_in {
-                    crate::config::store_seerr_login(&n, p);
-                }
-            } else if let Some(k) = &key_in {
+            if let Some(p) = &login_pw {
+                crate::config::store_seerr_login(&n, p);
+            }
+            if let Some(k) = &api_key {
                 crate::config::store_seerr_key(&n, k);
             }
             cfg.settings.seerr_enabled = true;
