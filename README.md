@@ -46,6 +46,16 @@ HOME=$(mktemp -d) JELLYFAST_SELFTEST=1 ./target/debug/jellyfast
 
 Optional live tests against your own servers are `#[ignore]`d and configured through environment variables; see the test modules for the variable names.
 
+## Releasing
+
+Bump `version` in `Cargo.toml` (and `Cargo.lock`), merge to `master`, then push a matching tag:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The `release` workflow builds the universal app, signs it with the Developer ID certificate, notarizes and staples it, and publishes a GitHub Release with a `.dmg`, a `.zip` and `SHA256SUMS.txt`. It fails if the tag differs from the `Cargo.toml` version or if the signing secrets are missing. It needs the repository secrets `MAC_DEVID_P12`, `MAC_DEVID_P12_PASSWORD`, `MAC_DEVID_IDENTITY`, `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8`.
+
 ## Credits
 
 Jellyfast is inspired by [Spotifast](https://github.com/crmne/spotifast) by Carmine Paolino — a native, fast, lightweight Spotify client in Rust. Jellyfast shares its philosophy, not its code.

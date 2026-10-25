@@ -32,6 +32,52 @@ type Step = (&'static str, fn(), u64);
 
 static CMD_RX: Mutex<Option<UnboundedReceiver<UiCmd>>> = Mutex::new(None);
 
+/// UiCmds sent before `start()` swapped in the interceptor (during launch).
+static EARLY_CMDS: Mutex<Vec<UiCmd>> = Mutex::new(Vec::new());
+
+/// Pre-start UiCmd sink: `main` routes the self-test drain here instead of dropping.
+pub fn early_cmd(c: UiCmd) {
+    println!("[selftest]   UiCmd (launch) -> {:?}", c);
+    EARLY_CMDS.lock().unwrap().push(c);
+}
+
+/// Commands that reach the network or sign in, i.e. anything that must wait for Connect.
+fn is_connect_or_auth(c: &UiCmd) -> bool {
+    matches!(
+        c,
+        UiCmd::Connect { .. }
+            | UiCmd::SaveSettings { server_url: Some(_), .. }
+            | UiCmd::SaveSeerr { .. }
+            | UiCmd::ProbeServer
+            | UiCmd::LoadHome
+            | UiCmd::LoadBrowse
+            | UiCmd::LoadView { .. }
+            | UiCmd::SeerrSearch { .. }
+            | UiCmd::SeerrRequest { .. }
+            | UiCmd::SeerrRequests
+    )
+}
+
+/// Fresh login screen: no connect/auth command queued, Connect enabled, no status text.
+fn state_check_fresh_login(ui: &crate::platform::appkit::Ui) {
+    let mut sent = std::mem::take(&mut *EARLY_CMDS.lock().unwrap());
+    sent.extend(take_cmds());
+    let bad: Vec<String> = sent.iter().filter(|c| is_connect_or_auth(c)).map(|c| format!("{:?}", c)).collect();
+    if !bad.is_empty() {
+        log(&format!("  sent before Connect: {:?}", bad));
+    }
+    state_check("fresh login: no connect/auth UiCmd before Connect", bad.is_empty());
+    unsafe {
+        let en: BOOL = msg_send![ui.login_btn.get(), isEnabled];
+        let title: *mut Object = msg_send![ui.login_btn.get(), title];
+        let status: *mut Object = msg_send![ui.login_err.get(), stringValue];
+        state_check(
+            "fresh login: Connect enabled, titled Connect, no connecting status",
+            en == YES && to_str(title) == "Connect" && to_str(status).is_empty(),
+        );
+    }
+}
+
 /// Take (and log) every UiCmd emitted since the last call.
 fn take_cmds() -> Vec<UiCmd> {
     let mut out = vec![];
@@ -57,6 +103,7 @@ pub fn start() {
         let (tx, rx) = unbounded_channel::<UiCmd>();
         ui.ui_tx = tx;
         *CMD_RX.lock().unwrap() = Some(rx);
+        state_check_fresh_login(ui);
         // Launch state: no library chrome, no spinner, branded window.
         let h: BOOL = msg_send![ui.content_host.get(), isHidden];
         state_check("launch: content_host hidden", h == YES);
@@ -137,6 +184,7 @@ fn steps() -> Vec<Step> {
         ("resize window (many)", s_resize, 200),
         ("item clicks", s_item_clicks, 50),
         ("shortcuts: menu keys, no duplicates", s_shortcuts_menu, 50),
+        ("shortcuts: Edit menu routes text commands", s_edit_menu, 50),
         ("shortcuts: text fields keep plain keys", s_shortcuts_text, 50),
         ("shortcuts: grid focus (Tab, Return enabled)", s_shortcuts_grid, 50),
         ("shortcuts: help window", s_shortcuts_help, 150),
@@ -1306,6 +1354,54 @@ fn s_shortcuts_menu() {
         state_check("⌘F, library ⌘1 and ⌘/ stay enabled", item_enabled("focusSearch:", 0, CMD)
             && item_enabled("viewSelected:", 0, CMD)
             && item_enabled("showShortcuts:", 0, CMD));
+    }
+}
+/// The "Edit" submenu item with this action, if the main menu has one.
+unsafe fn edit_menu_item(action: &str) -> Option<*mut Object> {
+    let main: *mut Object = msg_send![UI.get().unwrap().app.get(), mainMenu];
+    let n: NSInteger = msg_send![main, numberOfItems];
+    for i in 0..n {
+        let top: *mut Object = msg_send![main, itemAtIndex: i];
+        let sub: *mut Object = msg_send![top, submenu];
+        if sub.is_null() || to_str(msg_send![sub, title]) != "Edit" {
+            continue;
+        }
+        let m: NSInteger = msg_send![sub, numberOfItems];
+        for j in 0..m {
+            let it: *mut Object = msg_send![sub, itemAtIndex: j];
+            let a: objc::runtime::Sel = msg_send![it, action];
+            if !a.as_ptr().is_null() && a.name() == action {
+                return Some(it);
+            }
+        }
+    }
+    None
+}
+/// Standard text commands live in an Edit menu with nil target, so AppKit sends them to
+/// the focused text field (login password, URL, settings, search).
+fn s_edit_menu() {
+    use crate::ui::shortcuts::CMD;
+    let checks = [
+        ("undo:", "z", "Undo ⌘Z"),
+        ("redo:", "z", "Redo ⇧⌘Z"),
+        ("cut:", "x", "Cut ⌘X"),
+        ("copy:", "c", "Copy ⌘C"),
+        ("paste:", "v", "Paste ⌘V"),
+        ("selectAll:", "a", "Select All ⌘A"),
+    ];
+    for (action, key, label) in checks {
+        let ok = unsafe {
+            match edit_menu_item(action) {
+                Some(it) => {
+                    let k = to_str(msg_send![it, keyEquivalent]);
+                    let m: NSUInteger = msg_send![it, keyEquivalentModifierMask];
+                    let t: *mut Object = msg_send![it, target];
+                    k == key && m & CMD != 0 && t.is_null()
+                }
+                None => false,
+            }
+        };
+        state_check(&format!("Edit menu: {} with nil target", label), ok);
     }
 }
 fn s_shortcuts_text() {

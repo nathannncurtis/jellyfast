@@ -13,6 +13,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     let mut cfg = cfg;
     // Lazily built from settings + Keychain; invalidated when settings change.
     let mut seerr: Option<SeerrClient> = None;
+    // Base address whose probe found no https redirect; cleared with `seerr`.
+    let mut seerr_plain: Option<String> = None;
     // Live stream opened by the current channel playback; closed on the next one / stop.
     let mut live_stream: Option<String> = None;
 
@@ -29,12 +31,15 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     } else if let (Some(url), Some(uid)) = (cfg.server_url.clone(), cfg.user_id.clone()) {
         if let Some(token) = crate::config::load_token(&url) {
             match crate::jellyfin::client::JellyfinClient::new(&url, token.clone(), uid.clone(), &cfg.device_id) {
-                Ok(c) => match connect_flow(&c, &cfg.username.clone().unwrap_or_else(|| uid.clone()), &main_tx).await {
-                    Ok(()) => client = Some(c),
-                    Err(e) => {
-                        let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
+                Ok(c) => {
+                    let _ = main_tx.send(MainMsg::Resuming { url: url.clone() });
+                    match connect_flow(&c, &cfg.username.clone().unwrap_or_else(|| uid.clone()), &main_tx).await {
+                        Ok(()) => client = Some(c),
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
                 }
@@ -388,7 +393,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     Ok(_) if latest.trim().is_empty() => {
                         let _ = main_tx.send(MainMsg::SeerrResults(Vec::new()));
                     }
-                    Ok(c) => match { let c = seerr_secure(c, &mut seerr).await; c.search(&latest, 1).await.map(|p| (c, p)) } {
+                    Ok(c) => match { let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await; c.search(&latest, 1).await.map(|p| (c, p)) } {
                         Ok((c, page)) => {
                             let paths = page.results.iter().filter_map(|r| r.poster_path.clone()).collect();
                             let _ = main_tx.send(MainMsg::SeerrResults(page.results));
@@ -404,7 +409,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match seerr_secure(c, &mut seerr).await.request(&media_type, tmdb_id).await {
+                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.request(&media_type, tmdb_id).await {
                     Ok(_) => {
                         let _ = main_tx.send(MainMsg::SeerrRequested { title });
                     }
@@ -420,7 +425,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match { let c = seerr_secure(c, &mut seerr).await; c.requests(20, 0).await.map(|v| (c, v)) } {
+                Ok(c) => match { let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await; c.requests(20, 0).await.map(|v| (c, v)) } {
                     Ok((c, v)) => {
                         let paths = v.iter().filter_map(|r| r.poster_path.clone()).collect();
                         let _ = main_tx.send(MainMsg::SeerrRequestList(v));
@@ -433,6 +438,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             },
             UiCmd::SaveSeerr { enabled, url, username, password, api_key } => {
                 seerr = None;
+                seerr_plain = None;
                 let msg = save_seerr(&mut cfg, enabled, &url, &username, password, api_key).await;
                 let _ = main_tx.send(msg);
             }
@@ -456,6 +462,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             }
             UiCmd::SaveSettings { settings, reconnect, server_url } => {
                 seerr = None;
+                seerr_plain = None;
                 // Settings are saved before the URL resolves on purpose: a mistyped
                 // server host must not discard the other edits. If the URL fails to
                 // resolve, the old URL stays in effect, the error is reported, and
@@ -617,18 +624,24 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
 
 /// An address saved as http:// (before the https upgrade existed) is switched
 /// to its https form before anything is sent; secrets stay keyed by the saved
-/// address. One probe per client: the upgraded client replaces the cached one.
-async fn seerr_secure(c: SeerrClient, cache: &mut Option<SeerrClient>) -> SeerrClient {
-    if !c.base.starts_with("http://") {
+/// address. One probe per base: the upgraded client replaces the cached one, and
+/// a server with no https redirect is remembered in `plain`, so later calls skip
+/// the probe. A failed probe is not remembered, so the next call tries again.
+async fn seerr_secure(c: SeerrClient, cache: &mut Option<SeerrClient>, plain: &mut Option<String>) -> SeerrClient {
+    if !c.base.starts_with("http://") || plain.as_deref() == Some(c.base.as_str()) {
         return c;
     }
-    match crate::seerr::client::https_upgrade(&c.base).await {
-        Some(n) => {
+    match crate::seerr::client::probe_https(&c.base).await {
+        Ok(Some(n)) => {
             let c = c.with_base(n);
             *cache = Some(c.clone());
             c
         }
-        None => c,
+        Ok(None) => {
+            *plain = Some(c.base.clone());
+            c
+        }
+        Err(_) => c,
     }
 }
 
@@ -1458,6 +1471,10 @@ mod tests {
                 .expect("timed out waiting for MainMsg")
                 .expect("main channel closed")
         }
+        /// A message already queued, without waiting.
+        fn try_next(&mut self) -> Option<MainMsg> {
+            self.rx.try_recv().ok()
+        }
         /// Next message, ignoring asynchronous Seerr thumbnail deliveries and the
         /// ServerUrl side-notification that follows a successful connect (tests
         /// that care about it read it with `next_raw`).
@@ -1751,12 +1768,39 @@ mod tests {
         };
         let mut h = H::start(cfg);
         match h.next().await {
+            MainMsg::Resuming { url } => assert_eq!(url, m.url()),
+            o => panic!("{:?}", o),
+        }
+        match h.next().await {
             MainMsg::Connected { user_name, .. } => assert_eq!(user_name, "Alice Display"),
             o => panic!("{:?}", o),
         }
         // Worker is usable right away.
         h.send(UiCmd::ProbeServer);
         assert!(matches!(h.next().await, MainMsg::ServerUp));
+    }
+
+    #[tokio::test]
+    async fn startup_without_saved_session_makes_no_server_call_and_sends_no_resume() {
+        // Fresh launch: nothing stored. No network, and no "Connecting" announcement.
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(m.reqs().is_empty(), "no server calls at launch");
+        assert!(h.try_next().is_none(), "nothing is announced before Connect");
+        // Remembered URL and user but Remember me off: still no resume, no request.
+        let cfg = Config {
+            server_url: Some(m.url()),
+            user_id: Some("u1".into()),
+            remember_me: false,
+            ..base_cfg()
+        };
+        crate::config::store_token(&m.url(), "tok123");
+        let mut h = H::start(cfg);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(m.reqs().is_empty(), "no server calls with Remember me off");
+        assert!(h.try_next().is_none(), "no resume announced with Remember me off");
     }
 
     #[tokio::test]
@@ -1771,6 +1815,7 @@ mod tests {
         }
         crate::config::store_token(&m.url(), "revoked");
         let mut h = H::start(cfg);
+        assert!(matches!(h.next().await, MainMsg::Resuming { .. }), "resume is announced before the attempt");
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("token expired"), "{e}"),
             o => panic!("{:?}", o),

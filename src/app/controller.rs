@@ -72,6 +72,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
             login_error(&e);
             show_login_or_library(false);
         },
+        MainMsg::Resuming { url } => login_connecting(&url),
         MainMsg::HomeLoaded(home) => unsafe {
             crate::ui::home::set_rows(home.rows);
         },
