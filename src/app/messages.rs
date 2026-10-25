@@ -1,5 +1,6 @@
-use crate::config::{Config, LayoutMode};
+use crate::config::{Config, HomeSection, LayoutMode};
 use crate::jellyfin::models::ListItem;
+use crate::jellyfin::sessions::{RemoteAction, RemoteSession};
 use crate::seerr::models::{SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,16 @@ pub enum UiCmd {
         name: String,
         collection_type: Option<String>,
     },
+    /// Filter the grid on screen by `q`. `parent_id` and `types` scope it to that grid
+    /// (see `library_query::filter_scope`); the sort comes from the worker's config.
     Search {
         q: String,
+        parent_id: Option<String>,
+        types: Option<String>,
+    },
+    /// The header sort popup changed. The UI saved it; this keeps the worker's copy in step.
+    SetSort {
+        sort_by: String,
     },
     Episodes {
         series_id: String,
@@ -79,6 +88,11 @@ pub enum UiCmd {
     /// Fetch the Home screen rows (continue watching, next up, recently added,
     /// recommendations). Answered with `MainMsg::HomeLoaded`.
     LoadHome,
+    /// One Home tab in the one-big-library layout: Movies or TV Shows. Its rows and
+    /// poster grid come back as `MainMsg::HomeLoaded` tagged with the same section.
+    LoadHomeSection {
+        section: HomeSection,
+    },
     SaveSettings {
         settings: Settings,
         reconnect: bool,
@@ -115,6 +129,27 @@ pub enum UiCmd {
         username: String,
         password: Option<String>,
         api_key: Option<String>,
+    },
+    /// Play On: fetch the other devices this user can control. Answered with
+    /// `MainMsg::SessionsLoaded`. `silent` (the remote bar's poll) reports no errors.
+    LoadSessions {
+        silent: bool,
+    },
+    /// Play On: start `item_id` on another session, from `start_secs` (`PlayNow`).
+    CastPlay {
+        session_id: String,
+        item_id: String,
+        start_secs: f64,
+    },
+    /// Play On a series: the server picks its Next Up episode (else the first one) and starts it.
+    CastSeries {
+        session_id: String,
+        series_id: String,
+    },
+    /// Remote control (pause, unpause, stop, seek) for another session.
+    CastControl {
+        session_id: String,
+        action: RemoteAction,
     },
     QuitSaving,
 }
@@ -184,6 +219,10 @@ pub enum MainMsg {
     },
     /// Search/request/list failure, "already requested", or Seerr disabled/unconfigured.
     SeerrError(String),
+    /// Controllable sessions on the server, without this app's own.
+    SessionsLoaded(Vec<RemoteSession>),
+    /// A Play On request or remote command failed (shown as a toast).
+    CastError(String),
     /// Outcome of `SaveSeerr` (ok=false: nothing was persisted).
     SeerrStatus {
         ok: bool,
@@ -215,9 +254,14 @@ pub struct HomeRow {
     pub items: Vec<ListItem>,
 }
 
+/// Home content for one tab. `grid` is the full poster grid under the rows (Movies
+/// and TV Shows tabs only; empty on Home). The UI drops a reply whose `section` is
+/// no longer the one on screen.
 #[derive(Debug, Clone, Default)]
 pub struct HomeRows {
+    pub section: HomeSection,
     pub rows: Vec<HomeRow>,
+    pub grid: Vec<ListItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -292,6 +336,8 @@ pub struct DetailView {
     pub played: bool,
     /// Has a saved position and is not finished: the button says "Resume".
     pub resume: bool,
+    /// Saved position (ticks), where Play On starts the item.
+    pub resume_ticks: i64,
     pub poster_key: Option<u64>,
     pub backdrop_key: Option<u64>,
     pub people: Vec<DetailPerson>,
@@ -330,7 +376,13 @@ pub struct DetailPerson {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     #[serde(default)]
-    pub theme: String, // "system" | "light" | "dark"
+    pub theme: String, // "system" (Follow system) | "light" | "dark" | a palette id
+    /// Light-mode theme used under "Follow system": "light" (Jellyfast) or a palette id.
+    #[serde(default)]
+    pub system_light: String,
+    /// Dark-mode theme used under "Follow system": "dark" (Jellyfast) or a palette id.
+    #[serde(default)]
+    pub system_dark: String,
     #[serde(default)]
     pub max_bitrate_kbps: u64, // 0 = original
     #[serde(default = "default_sub_lang")]

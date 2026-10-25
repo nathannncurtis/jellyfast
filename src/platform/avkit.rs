@@ -56,6 +56,12 @@ pub(crate) extern "C" fn kvo(
                 update_chip();
             }
             "presentationSize" => update_chip(),
+            "pictureInPicturePossible" | "pictureInPictureActive" => crate::ui::playerbar::refresh_pip_button(),
+            "externalPlaybackActive" => {
+                // AirPlay started or stopped: the video is on another screen.
+                let on: BOOL = msg_send![obj, externalPlaybackActive];
+                crate::ui::player::set_external(on == YES);
+            }
             _ => {}
         }
     }
@@ -67,7 +73,9 @@ pub(crate) extern "C" fn tick(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
             Some(u) => u,
             None => return,
         };
+        crate::ui::shell::sync_system_appearance();
         drain_main(); // safety net in case a pump kick was missed
+        crate::ui::cast::poll_tick(); // the remote bar refreshes its Play On session (own clock)
         if ui.playing.is_none() || ui.pitem.get().is_null() {
             return;
         }
@@ -225,6 +233,10 @@ pub(crate) extern "C" fn play_pause(_t: &mut Object, _c: Sel, _s: *mut Object) {
     }
 }
 pub(crate) extern "C" fn stop_playback(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    stop_for_cast();
+}
+/// Stops local playback and reports the stop, before a cast hands the item to another device.
+pub fn stop_for_cast() {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if let Some(pn) = ui.playing.as_ref() {
@@ -233,15 +245,19 @@ pub(crate) extern "C" fn stop_playback(_t: &mut Object, _c: Sel, _s: *mut Object
                 ticks: crate::jellyfin::urls::ticks_from_secs(pn.last_secs),
             });
         }
-        stop_playback_ui();
     }
+    stop_playback_ui();
 }
+
 pub fn stop_playback_ui() {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        crate::ui::player::set_external(false);
         if ui.playing.is_none() {
             return; // nothing observed / nothing to tear down
         }
+        // Picture in Picture ends with the item; the controller itself stays with the player layer.
+        crate::ui::playerbar::pip_stop();
         if !ui.pitem.get().is_null() {
             for kp in ["status", "presentationSize"] {
                 let _: () = msg_send![ui.pitem.get(),
@@ -266,6 +282,7 @@ pub fn stop_playback_ui() {
         let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: NO];
         let _: () = msg_send![ui.win.get(), setTitle: ns("Jellyfast")];
         let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
+        crate::ui::cast::layout(); // after the player host is hidden: the strip may come back
     }
 }
 pub(crate) unsafe fn clear_media_groups() {
@@ -481,7 +498,8 @@ pub fn start_playback(ps: &PlaybackStart) {
             // Audio: same AVPlayer, no video view. The library stays up with the bar below it.
             let content: *mut Object = msg_send![ui.win.get(), contentView];
             if !is_hidden(ui.player_host.get()) {
-                // Coming from video: swap the player view out.
+                // Coming from video: swap the player view out, and any Picture in Picture window with it.
+                crate::ui::playerbar::pip_stop();
                 crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
                 set_hidden(ui.player_host.get(), true);
                 set_hidden(ui.content_host.get(), false);
@@ -505,7 +523,7 @@ pub fn start_playback(ps: &PlaybackStart) {
             {
                 use crate::ui::theme::*;
                 let poster = ps.image_key.and_then(|k| ui.poster_cache.get(&k).copied()).unwrap_or(nil());
-                let tint: *mut Object = msg_send![class!(NSColor), colorWithWhite: 0.13f64 alpha: 1.0f64];
+                let tint: *mut Object = crate::ui::theme::color(crate::ui::theme::Col::PlayerBackdrop);
                 crate::ui::player::backdrop_show(tint, poster);
             }
         }
@@ -518,6 +536,7 @@ pub fn start_playback(ps: &PlaybackStart) {
             ticks: crate::jellyfin::urls::ticks_from_secs(ps.resume_secs),
             paused: false,
         });
+        crate::ui::cast::layout();
     }
 }
 

@@ -47,6 +47,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     // Application
     s("App", "About Jellyfast", "showAbout:", "", 0, 0),
     s("App", "Settings…", "showSettings:", ",", CMD, 0),
+    s("App", "Reload Themes", "reloadThemes:", "", 0, 0),
     s("App", "Quit Jellyfast", "terminate:", "q", CMD, 0),
     // Text editing (standard Edit menu; nil target, so the first responder gets them)
     s("Edit", "Undo", "undo:", "z", CMD, 0),
@@ -67,6 +68,8 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Controls", "Next Subtitle Track", "subCycle:", "c", 0, 0),
     s("Controls", "Next Audio Track", "audioCycle:", "a", 0, 0),
     s("Controls", "Enter / Exit Full Screen", "fullscreen:", "f", 0, 0),
+    s("Controls", "Picture in Picture", "togglePiP:", "p", ALT | CMD, 0),
+    s("Controls", "Cast to a Device…", "showCastMenu:", "c", CMD | SHIFT, 0),
     // Playback speed (submenu of Controls)
     s("Speed", "0.5×", "setSpeed:", "1", CTRL | CMD, 50),
     s("Speed", "0.75×", "setSpeed:", "2", CTRL | CMD, 75),
@@ -74,6 +77,10 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Speed", "1.25×", "setSpeed:", "4", CTRL | CMD, 125),
     s("Speed", "1.5×", "setSpeed:", "5", CTRL | CMD, 150),
     s("Speed", "2×", "setSpeed:", "6", CTRL | CMD, 200),
+    // Home tabs (one big library): Home, Movies, TV Shows
+    s("Go", "Home", "showHomeSection:", "0", ALT | CMD, 0),
+    s("Go", "Movies", "showHomeSection:", "m", ALT | CMD, 1),
+    s("Go", "TV Shows", "showHomeSection:", "t", ALT | CMD, 2),
     // Browse
     s("Go", "Search", "focusSearch:", "f", CMD, 0),
     s("Go", "Open Selected Item", "openSelected:", "\r", 0, 0),
@@ -92,20 +99,20 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Go", "Refresh", "refresh:", "r", CMD, 0),
     s("Go", "Sign Out", "signOut:", "l", ALT, 0),
     // Requests (Seerr)
-    s("Go", "Request Something New…", "openSeerr:", "k", ALT | CMD, 0),
-    s("Go", "Seerr: Discover", "seerrShowTab:", "1", ALT | CMD, 0),
-    s("Go", "Seerr: My Requests", "seerrShowTab:", "2", ALT | CMD, 1),
+    s("Go", "Requests", "openSeerr:", "k", ALT | CMD, 0),
+    s("Go", "Requests: Search", "seerrShowTab:", "1", ALT | CMD, 0),
+    s("Go", "Requests: My Requests", "seerrShowTab:", "2", ALT | CMD, 1),
     // Help
     s("Help", "Keyboard Shortcuts", "showShortcuts:", "/", CMD, 0),
 ];
 
 /// Actions that exist without a key equivalent on purpose.
-pub(crate) const EXEMPT_ACTIONS: &[&str] = &["showAbout:"];
+pub(crate) const EXEMPT_ACTIONS: &[&str] = &["showAbout:", "reloadThemes:"];
 
 /// Actions that only make sense while something is playing; they grey out when idle.
 const PLAYBACK_ACTIONS: &[&str] = &[
     "playPause:", "stopPlayback:", "seekBack:", "seekFwd:", "volUp:", "volDown:", "mute:",
-    "subCycle:", "audioCycle:", "setSpeed:",
+    "subCycle:", "audioCycle:", "setSpeed:", "togglePiP:",
 ];
 
 /// Human label for a key equivalent, e.g. "⌘F", "⌃⌘2", "←", "⇧⇥", "Space".
@@ -200,6 +207,8 @@ pub(crate) unsafe fn item_enabled(action: &str, tag: NSInteger, mods: NSUInteger
         "openSelected:" => main_window_active() && crate::ui::library::kb_focus_index().is_some(),
         "focusNext:" | "focusPrevious:" => main_window_active() && grid_has_items() && !settings_open(),
         "seerrShowTab:" => crate::ui::seerr::is_configured(&ui.cfg.settings),
+        "togglePiP:" => crate::ui::playerbar::pip_available(),
+        "showHomeSection:" => ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified),
         _ => true,
     }
 }
@@ -251,7 +260,7 @@ pub(crate) extern "C" fn focus_search(_t: &mut Object, _c: Sel, _s: *mut Object)
     unsafe {
         let ui = UI.get_mut().unwrap();
         let k = key_window();
-        let field = if !ui.seerr.win.get().is_null() && k == ui.seerr.win.get() {
+        let field = if ui.seerr.active {
             ui.seerr.search.get()
         } else {
             ui.search.get()
@@ -273,7 +282,6 @@ pub(crate) extern "C" fn focus_previous(_t: &mut Object, _c: Sel, _s: *mut Objec
 pub(crate) extern "C" fn seerr_show_tab(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
         let tag: NSInteger = msg_send![sender, tag];
-        crate::ui::seerr::open_window();
         crate::ui::seerr::select_mode(tag == 1);
     }
 }

@@ -1,6 +1,7 @@
 use crate::*;
 use std::collections::VecDeque;
 use crate::app::messages::*;
+use crate::app::library_query::{browse_query, filter_query, library_query};
 use crate::jellyfin::client::JellyfinClient;
 use crate::jellyfin::models::{DetailItem, Episode, Person, Season};
 use crate::jellyfin::urls::{build_art_url, build_image_url};
@@ -78,19 +79,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     let res = if live {
                         c.livetv_channels().await.map(|v| (name.clone(), v))
                     } else {
-                        let sort = sort_from_popup(&cfg);
-                        let mut q = crate::jellyfin::models::ItemQuery {
-                            parent_id: Some(view_id.clone()),
-                            ..Default::default()
-                        };
-                        q.sort_by = sort.0;
-                        q.sort_order = sort.1;
-                        match collection_type.as_deref() {
-                            Some("movies") => q.types = Some("Movie".into()),
-                            Some("tvshows") => q.types = Some("Series".into()),
-                            Some("music") => q.types = Some("MusicAlbum".into()),
-                            _ => {}
-                        }
+                        let q = library_query(&view_id, collection_type.as_deref(), cfg.sort_by.as_deref());
                         c.items(&q).await.map(|v| (name.clone(), v))
                     };
                     match res {
@@ -111,13 +100,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             UiCmd::LoadBrowse => {
                 if let Some(c) = &client {
                     // Movies and series together; no ParentId, so Jellyfin searches every library.
-                    let sort = sort_from_popup(&cfg);
-                    let q = crate::jellyfin::models::ItemQuery {
-                        types: Some("Movie,Series".into()),
-                        sort_by: sort.0,
-                        sort_order: sort.1,
-                        ..Default::default()
-                    };
+                    let q = browse_query(cfg.sort_by.as_deref());
                     match c.items(&q).await {
                         Ok(items) => {
                             fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
@@ -138,38 +121,39 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 // write from here could clobber fields the UI changed since startup.
                 cfg.layout_mode = Some(mode);
             }
-            UiCmd::Search { q } => {
+            UiCmd::SetSort { sort_by } => {
+                // Same as SetLayoutMode: the UI saved the choice; keep the worker's copy in step.
+                cfg.sort_by = Some(sort_by);
+            }
+            UiCmd::Search { q, parent_id, types } => {
                 // Debounce: wait, then keep only the newest search.
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                let mut latest = q;
+                let mut latest = (q, parent_id, types);
                 let mut held = Vec::new();
                 while let Ok(c2) = rx.try_recv() {
                     match c2 {
-                        UiCmd::Search { q } => latest = q,
+                        UiCmd::Search { q, parent_id, types } => latest = (q, parent_id, types),
+                        // A sort change made during the wait applies to this search.
+                        UiCmd::SetSort { sort_by } => cfg.sort_by = Some(sort_by),
                         other => held.push(other),
                     }
                 }
                 // Non-search commands drained above run after this search, in arrival order.
                 backlog.extend(held);
-                if let Some(c) = &client {
-                    if !latest.trim().is_empty() {
-                        let mut qy = crate::jellyfin::models::ItemQuery {
-                            search: Some(latest.clone()),
-                            ..Default::default()
-                        };
-                        qy.limit = 100;
-                        match c.items(&qy).await {
-                            Ok(items) => {
-                                fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
-                                let _ = main_tx.send(MainMsg::ItemsLoaded {
-                                    title: format!("Results for “{}”", latest),
-                                    items,
-                                    can_go_back: true,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
-                            }
+                let (q, parent_id, types) = latest;
+                let query = filter_query(&q, parent_id.as_deref(), types.as_deref(), cfg.sort_by.as_deref());
+                if let (Some(c), Some(qy)) = (&client, query) {
+                    match c.items(&qy).await {
+                        Ok(items) => {
+                            fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
+                            let _ = main_tx.send(MainMsg::ItemsLoaded {
+                                title: format!("Results for “{}”", q.trim()),
+                                items,
+                                can_go_back: true,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
                         }
                     }
                 }
@@ -384,6 +368,51 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     c.report_stopped(&item_id, ticks).await;
                 }
             }
+            UiCmd::LoadSessions { silent } => {
+                if let Some(c) = &client {
+                    match c.controllable_sessions().await {
+                        Ok(v) => {
+                            let _ = main_tx.send(MainMsg::SessionsLoaded(v));
+                        }
+                        Err(e) => {
+                            if !silent {
+                                let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                            }
+                        }
+                    }
+                }
+            }
+            UiCmd::CastPlay { session_id, item_id, start_secs } => {
+                if let Some(c) = &client {
+                    if let Err(e) = c.play_on_session(&session_id, &item_id, start_secs).await {
+                        let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                    }
+                }
+            }
+            UiCmd::CastSeries { session_id, series_id } => {
+                if let Some(c) = &client {
+                    let target = match c.series_next_up(&series_id).await {
+                        Ok(Some(ep)) => Ok(Some(ep.id)),
+                        Ok(None) => first_episode_id(c, &series_id).await,
+                        Err(e) => Err(e),
+                    };
+                    let result = match target {
+                        Ok(Some(id)) => c.play_on_session(&session_id, &id, 0.0).await,
+                        Ok(None) => Err(crate::jellyfin::client::JFError::Api(404, "no episodes to play".into())),
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = result {
+                        let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                    }
+                }
+            }
+            UiCmd::CastControl { session_id, action } => {
+                if let Some(c) = &client {
+                    if let Err(e) = c.remote_control(&session_id, action).await {
+                        let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                    }
+                }
+            }
             UiCmd::MarkPlayed { item_id, played } => {
                 if let Some(c) = &client {
                     if let Err(e) = c.set_played(&item_id, played).await {
@@ -465,14 +494,31 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             }
             UiCmd::LoadHome => {
                 if let Some(c) = &client {
+                    // One big library: Home mixes everything but splits the recent rows by type.
+                    let unified = cfg.layout_mode == Some(crate::config::LayoutMode::Unified);
+                    let (order, hidden) = (cfg.library_order.clone(), cfg.hidden_libraries.clone());
                     // Spawned so a slow Home load never blocks later commands.
                     let (c, tx) = (c.clone(), main_tx.clone());
                     let (dir, http) = (poster_dir.clone(), http_poster.clone());
                     tokio::spawn(async move {
-                        let rows = crate::app::home::load_home(&c).await;
-                        // Rows first, so Home is usable at once; artwork follows as PosterReady.
-                        let _ = tx.send(MainMsg::HomeLoaded(rows.clone()));
-                        fetch_home_art(&c, &tx, &rows.rows, &dir, http.as_ref());
+                        let rows = if unified {
+                            crate::app::home::load_unified_home(&c, &order, &hidden).await
+                        } else {
+                            crate::app::home::load_home(&c).await
+                        };
+                        send_home(&c, &tx, rows, &dir, http.as_ref());
+                    });
+                }
+            }
+            UiCmd::LoadHomeSection { section } => {
+                if let Some(c) = &client {
+                    // Movies and TV Shows tabs (one big library only); same spawn-and-send shape.
+                    let (order, hidden) = (cfg.library_order.clone(), cfg.hidden_libraries.clone());
+                    let (c, tx) = (c.clone(), main_tx.clone());
+                    let (dir, http) = (poster_dir.clone(), http_poster.clone());
+                    tokio::spawn(async move {
+                        let rows = crate::app::home::load_section(&c, section, &order, &hidden).await;
+                        send_home(&c, &tx, rows, &dir, http.as_ref());
                     });
                 }
             }
@@ -756,19 +802,22 @@ async fn save_seerr(
     }
 }
 
+/// The first episode of a series' first season, for Play On when nothing is Next Up.
+async fn first_episode_id(
+    c: &JellyfinClient,
+    series_id: &str,
+) -> Result<Option<String>, crate::jellyfin::client::JFError> {
+    let seasons = c.seasons(series_id).await?;
+    let Some(season) = seasons.first() else { return Ok(None) };
+    let eps = c.season_episodes(series_id, &season.id).await?;
+    Ok(eps.first().map(|e| e.id.clone()))
+}
+
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-pub(crate) fn sort_from_popup(cfg: &Config) -> (String, String) {
-    // The popup index is not directly visible to the worker; settings could
-    // carry it — for now we honor the UI default (SortName) and read the
-    // popup choice through the settings struct when modularized.
-    let _ = cfg;
-    ("SortName".into(), "Ascending".into())
 }
 
 pub(crate) async fn connect_cmd(
@@ -879,6 +928,18 @@ pub(crate) fn fetch_art(
     poster_dir: &std::path::Path,
     http: Option<&reqwest::Client>,
 ) {
+    fetch_art_gated(jobs, main_tx, poster_dir, http, None);
+}
+
+/// `fetch_art` with an optional gate: when `gate` is given, each download waits
+/// for a permit first, so a long grid never has more than the gate's width in flight.
+pub(crate) fn fetch_art_gated(
+    jobs: Vec<(u64, String)>,
+    main_tx: &UnboundedSender<MainMsg>,
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+    gate: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+) {
     let Some(http) = http.cloned() else {
         return;
     };
@@ -886,7 +947,12 @@ pub(crate) fn fetch_art(
         let tx = main_tx.clone();
         let dir = poster_dir.to_path_buf();
         let http = http.clone();
+        let gate = gate.clone();
         tokio::spawn(async move {
+            let _permit = match gate {
+                Some(g) => g.acquire_owned().await.ok(),
+                None => None,
+            };
             let path = dir.join(format!("{:016x}.img", key));
             let bytes = match tokio::fs::read(&path).await {
                 Ok(b) => Some(b),
@@ -906,6 +972,28 @@ pub(crate) fn fetch_art(
             }
         });
     }
+}
+
+/// Send one Home reply, then its artwork: rows first so Home is usable at once,
+/// and the grid's posters after the row artwork. Posters arrive as `PosterReady`.
+fn send_home(
+    c: &JellyfinClient,
+    tx: &UnboundedSender<MainMsg>,
+    rows: crate::app::messages::HomeRows,
+    dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+) {
+    let _ = tx.send(MainMsg::HomeLoaded(rows.clone()));
+    fetch_home_art(c, tx, &rows.rows, dir, http);
+    // The whole grid, not just the first 200 posters; twelve downloads at a time.
+    let jobs: Vec<(u64, String)> = rows
+        .grid
+        .iter()
+        .filter(|it| it.has_image())
+        .map(|it| (sys_key(&it.id), build_image_url(&c.base, &it.id, &c.token, 400)))
+        .collect();
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(12));
+    fetch_art_gated(jobs, tx, dir, http, Some(gate));
 }
 
 /// Fetch Home artwork after `HomeLoaded` has been sent. Poster rows get Primary
@@ -991,6 +1079,7 @@ pub(crate) fn plan_detail(c: &JellyfinClient, d: &DetailItem) -> (DetailView, Ve
         overview: d.overview.clone().filter(|o| !o.trim().is_empty()),
         played,
         resume: !played && position > 0,
+        resume_ticks: if played { 0 } else { position },
         poster_key,
         backdrop_key,
         people,
@@ -1462,6 +1551,18 @@ mod tests {
             }
             ("GET", ["Items", _, "Images", _]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
             ("POST", ["Sessions", "Playing", ..]) => status(204),
+            ("GET", ["Sessions"]) => json(serde_json::json!([
+                {"Id": "sess-mine", "DeviceId": "dev-test", "DeviceName": "This Mac", "Client": "Jellyfast", "SupportsRemoteControl": true},
+                {"Id": "sess-tv", "DeviceId": "tv-1", "DeviceName": "Living Room", "Client": "Jellyfin Android TV",
+                 "SupportsRemoteControl": true,
+                 "NowPlayingItem": {"Id": "ep-9", "Name": "Pilot", "SeriesName": "Show", "RunTimeTicks": 27_000_000_000i64},
+                 "PlayState": {"PositionTicks": 1_200_000_000i64, "IsPaused": true}},
+                {"Id": "sess-web", "DeviceId": "web-1", "DeviceName": "Office", "Client": "Jellyfin Web", "SupportsRemoteControl": true},
+                {"Id": "sess-locked", "DeviceId": "x-1", "DeviceName": "Kiosk", "Client": "Other", "SupportsRemoteControl": false},
+            ])),
+            ("POST", ["Sessions", sid, "Playing"]) | ("POST", ["Sessions", sid, "Playing", _]) => {
+                if *sid == "sess-gone" { status(404) } else { status(204) }
+            }
             ("POST", ["Users", _, "PlayedItems", id]) | ("DELETE", ["Users", _, "PlayedItems", id]) => {
                 if *id == "boom" {
                     status(500)
@@ -1542,12 +1643,33 @@ mod tests {
 
     /// Worker connected to a fresh mock via the password path.
     async fn connected() -> (TestEnv, Mock, H) {
+        connected_with(base_cfg()).await
+    }
+
+    /// As `connected`, with the given config (layout, hidden libraries, ...).
+    async fn connected_with(cfg: Config) -> (TestEnv, Mock, H) {
         let env = TestEnv::new();
         let m = start_mock().await;
-        let mut h = H::start(base_cfg());
+        let mut h = H::start(cfg);
         h.send(connect_pw(&m.url()));
         assert!(matches!(h.next().await, MainMsg::Connected { .. }));
         (env, m, h)
+    }
+
+    /// The Home reply behind `next_nonposter`, whole (section, rows and grid).
+    fn home_reply(m: MainMsg) -> crate::app::messages::HomeRows {
+        match m {
+            MainMsg::HomeLoaded(h) => h,
+            other => panic!("expected HomeLoaded, got {other:?}"),
+        }
+    }
+
+    fn unified_cfg(hidden: &[&str]) -> Config {
+        Config {
+            layout_mode: Some(crate::config::LayoutMode::Unified),
+            hidden_libraries: hidden.iter().map(|s| s.to_string()).collect(),
+            ..base_cfg()
+        }
     }
 
     fn items_of(m: MainMsg) -> (String, Vec<String>, bool) {
@@ -1951,6 +2073,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_big_library_home_splits_recent_rows_by_type() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&[])).await;
+        h.send(UiCmd::LoadHome);
+        let reply = home_reply(h.next_nonposter().await);
+        assert_eq!(reply.section, crate::config::HomeSection::Home);
+        let titles: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Continue Watching", "Next Up", "Recently Added Movies", "Recently Added TV", "Because you watched Movie One", "More with Some Actor"]
+        );
+        assert!(reply.grid.is_empty(), "Home has no grid");
+        let movies: Vec<&str> = reply.rows[2].items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(movies, ["Movie One", "Movie Two"]);
+        assert_eq!(reply.rows[3].items[0].name, "Show One");
+        // Library-scoped requests: one Latest per movie library and per show library.
+        let latest: Vec<String> = m
+            .find("GET", "/Users/u1/Items/Latest")
+            .iter()
+            .map(|r| r.qp("ParentId").unwrap_or_default().to_string())
+            .collect();
+        assert!(latest.iter().any(|p| p == "v-mov") && latest.iter().any(|p| p == "v-tv"), "{latest:?}");
+        assert!(latest.iter().all(|p| p != "v-mus"), "music is not a Home library: {latest:?}");
+    }
+
+    #[tokio::test]
+    async fn one_big_library_home_skips_hidden_libraries() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&["v-tv"])).await;
+        h.send(UiCmd::LoadHome);
+        let reply = home_reply(h.next_nonposter().await);
+        let titles: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
+        assert!(!titles.contains(&"Recently Added TV"), "{titles:?}");
+        assert!(!titles.contains(&"Next Up"), "{titles:?}");
+        assert!(m.find("GET", "/Shows/NextUp").is_empty(), "a hidden show library is never queried");
+        assert!(m.find("GET", "/Users/u1/Items/Latest").iter().all(|r| r.qp("ParentId") != Some("v-tv")));
+    }
+
+    #[tokio::test]
+    async fn movies_tab_queries_visible_movie_libraries_only() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&["v-tv"])).await;
+        h.send(UiCmd::LoadHomeSection { section: crate::config::HomeSection::Movies });
+        let reply = home_reply(h.next_nonposter().await);
+        assert_eq!(reply.section, crate::config::HomeSection::Movies);
+        let grid: Vec<&str> = reply.grid.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(grid, ["Movie One", "Movie Two"]);
+        assert!(reply.grid.iter().all(|i| i.item_type == "Movie"));
+        let rows: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
+        assert!(rows.contains(&"Recently Added") && !rows.iter().any(|t| t.contains("TV")), "{rows:?}");
+        let grid_reqs: Vec<Req> = m.find("GET", "/Users/u1/Items").into_iter().filter(|r| r.path == "/Users/u1/Items").collect();
+        assert!(!grid_reqs.is_empty());
+        for r in &grid_reqs {
+            assert_eq!(r.qp("IncludeItemTypes"), Some("Movie"), "{:?}", r.query);
+            assert_eq!(r.qp("ParentId"), Some("v-mov"), "only the visible movie library: {:?}", r.query);
+            assert_eq!(r.qp("Recursive"), Some("true"));
+        }
+        assert!(m.find("GET", "/Shows/NextUp").is_empty());
+        for r in m.find("GET", "/Users/u1/Items/Resume") {
+            assert_eq!(r.qp("ParentId"), Some("v-mov"));
+        }
+    }
+
+    #[tokio::test]
+    async fn tv_tab_queries_series_in_visible_show_libraries() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&[])).await;
+        h.send(UiCmd::LoadHomeSection { section: crate::config::HomeSection::TvShows });
+        let reply = home_reply(h.next_nonposter().await);
+        assert_eq!(reply.section, crate::config::HomeSection::TvShows);
+        let grid: Vec<&str> = reply.grid.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(grid, ["Show One"]);
+        let rows: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(rows, ["Next Up", "Recently Added"]);
+        let grid_reqs: Vec<Req> = m.find("GET", "/Users/u1/Items").into_iter().filter(|r| r.path == "/Users/u1/Items").collect();
+        assert_eq!(grid_reqs.len(), 1, "one grid request per visible show library");
+        assert_eq!(grid_reqs[0].qp("IncludeItemTypes"), Some("Series"));
+        assert_eq!(grid_reqs[0].qp("ParentId"), Some("v-tv"));
+        let next = m.find("GET", "/Shows/NextUp");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].qp("ParentId"), Some("v-tv"));
+        assert!(m.find("GET", "/Movies/Recommendations").is_empty(), "no recommendations on the TV tab");
+    }
+
+    #[tokio::test]
+    async fn movies_tab_with_every_movie_library_hidden_is_empty() {
+        let (_env, m, mut h) = connected_with(unified_cfg(&["v-mov"])).await;
+        h.send(UiCmd::LoadHomeSection { section: crate::config::HomeSection::Movies });
+        let reply = home_reply(h.next_nonposter().await);
+        assert!(reply.grid.is_empty() && reply.rows.is_empty());
+        assert!(m.reqs().iter().all(|r| r.path != "/Users/u1/Items"), "no library, no grid request");
+    }
+
+    #[tokio::test]
     async fn load_home_builds_every_row_in_order() {
         let (_env, m, mut h) = connected().await;
         h.send(UiCmd::LoadHome);
@@ -2086,7 +2298,7 @@ mod tests {
     #[tokio::test]
     async fn search_single_query() {
         let (_e, m, mut h) = connected().await;
-        h.send(UiCmd::Search { q: "matrix".into() });
+        h.send(UiCmd::Search { q: "matrix".into(), parent_id: None, types: None });
         let (title, names, back) = items_of(h.next().await);
         assert_eq!(title, "Results for “matrix”");
         assert_eq!(names, vec!["Found matrix"]);
@@ -2099,7 +2311,7 @@ mod tests {
     #[tokio::test]
     async fn blank_search_makes_no_request() {
         let (_e, m, mut h) = connected().await;
-        h.send(UiCmd::Search { q: "   ".into() });
+        h.send(UiCmd::Search { q: "   ".into(), parent_id: None, types: None });
         assert!(h.drain_via_probe().await.is_empty());
         assert!(m.find("GET", "/Users/u1/Items").is_empty());
     }
@@ -2107,10 +2319,10 @@ mod tests {
     #[tokio::test]
     async fn search_debounce_keeps_newest_and_preserves_order() {
         let (_e, m, mut h) = connected().await;
-        h.send(UiCmd::Search { q: "a".into() });
-        h.send(UiCmd::Search { q: "ab".into() });
+        h.send(UiCmd::Search { q: "a".into(), parent_id: None, types: None });
+        h.send(UiCmd::Search { q: "ab".into(), parent_id: None, types: None });
         h.send(UiCmd::Episodes { series_id: "sr1".into(), series_name: "Show One".into() });
-        h.send(UiCmd::Search { q: "abc".into() });
+        h.send(UiCmd::Search { q: "abc".into(), parent_id: None, types: None });
         h.send(UiCmd::Tracks { album_id: "al1".into(), album_name: "Album One".into() });
         h.send(UiCmd::ProbeServer);
         // Search result first, then the held commands in arrival order.
@@ -2133,9 +2345,9 @@ mod tests {
     #[tokio::test]
     async fn search_after_search_each_runs_when_spaced_out() {
         let (_e, m, mut h) = connected().await;
-        h.send(UiCmd::Search { q: "one".into() });
+        h.send(UiCmd::Search { q: "one".into(), parent_id: None, types: None });
         assert_eq!(items_of(h.next().await).0, "Results for “one”");
-        h.send(UiCmd::Search { q: "two".into() });
+        h.send(UiCmd::Search { q: "two".into(), parent_id: None, types: None });
         assert_eq!(items_of(h.next().await).0, "Results for “two”");
         assert_eq!(m.find("GET", "/Users/u1/Items").len(), 2);
     }
@@ -2144,7 +2356,7 @@ mod tests {
     async fn search_error_reports_playback_error() {
         let (_e, m, mut h) = connected().await;
         m.cfg.lock().unwrap().items_status = Some(503);
-        h.send(UiCmd::Search { q: "x".into() });
+        h.send(UiCmd::Search { q: "x".into(), parent_id: None, types: None });
         match h.next().await {
             MainMsg::PlaybackError(e) => assert!(e.contains("HTTP 503"), "{e}"),
             o => panic!("{:?}", o),
@@ -2534,6 +2746,86 @@ mod tests {
         assert_eq!(m.find("POST", "/Users/u1/PlayedItems/i1").len(), 1);
         assert_eq!(m.find("DELETE", "/Users/u1/PlayedItems/i1").len(), 1);
         assert_eq!(m.find("POST", "/Users/u1/PlayedItems/boom").len(), 1);
+    }
+
+    // ------------------------------------------------------------ play on
+    #[tokio::test]
+    async fn sessions_list_excludes_own_device_and_uncontrollable() {
+        use crate::app::messages::MainMsg;
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::LoadSessions { silent: false });
+        match h.next().await {
+            MainMsg::SessionsLoaded(v) => {
+                let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
+                assert_eq!(ids, vec!["sess-tv", "sess-web"]);
+                assert_eq!(v[0].label(), "Living Room · Jellyfin Android TV");
+                assert_eq!(v[0].now_playing.as_ref().unwrap().title, "Show · Pilot");
+                assert!(v[1].now_playing.is_none());
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+        let q = m.find("GET", "/Sessions");
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].qp("ControllableByUserId"), Some("u1"));
+        assert_eq!(q[0].headers.get("x-emby-token").map(String::as_str), Some("tok123"));
+        assert!(q[0].headers.get("authorization").map(|a| a.contains("DeviceId=\"dev-test\"")).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn play_on_and_remote_commands_hit_session_routes() {
+        use crate::app::messages::MainMsg;
+        use crate::jellyfin::sessions::RemoteAction;
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::CastPlay { session_id: "sess-tv".into(), item_id: "m1".into(), start_secs: 61.0 });
+        h.send(UiCmd::CastControl { session_id: "sess-tv".into(), action: RemoteAction::Pause });
+        h.send(UiCmd::CastControl { session_id: "sess-tv".into(), action: RemoteAction::Unpause });
+        h.send(UiCmd::CastControl { session_id: "sess-tv".into(), action: RemoteAction::SeekSecs(30.0) });
+        h.send(UiCmd::CastControl { session_id: "sess-tv".into(), action: RemoteAction::Stop });
+        h.send(UiCmd::CastControl { session_id: "sess-gone".into(), action: RemoteAction::Stop });
+        let rest = h.drain_via_probe().await;
+        assert_eq!(rest.len(), 1, "only the gone session fails");
+        assert!(matches!(&rest[0], MainMsg::CastError(_)));
+
+        let play: Vec<_> = m.reqs().into_iter().filter(|r| r.method == "POST" && r.path == "/Sessions/sess-tv/Playing").collect();
+        assert_eq!(play.len(), 1);
+        assert_eq!(play[0].qp("playCommand"), Some("PlayNow"));
+        assert_eq!(play[0].qp("itemIds"), Some("m1"));
+        assert_eq!(play[0].qp("startPositionTicks"), Some("610000000"));
+        assert_eq!(play[0].headers.get("x-emby-token").map(String::as_str), Some("tok123"));
+
+        let cmd = |name: &str| m.reqs().into_iter().filter(|r| r.method == "POST" && r.path == format!("/Sessions/sess-tv/Playing/{}", name)).count();
+        assert_eq!(cmd("Pause"), 1);
+        assert_eq!(cmd("Unpause"), 1);
+        assert_eq!(cmd("Stop"), 1);
+        let seek: Vec<_> = m.reqs().into_iter().filter(|r| r.path == "/Sessions/sess-tv/Playing/Seek").collect();
+        assert_eq!(seek.len(), 1);
+        assert_eq!(seek[0].qp("seekPositionTicks"), Some("300000000"));
+        assert_eq!(m.find("POST", "/Sessions/sess-gone/Playing/Stop").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn play_on_series_uses_next_up_then_first_episode() {
+        use crate::app::messages::MainMsg;
+        let (_e, m, mut h) = connected().await;
+        // sr1 has a Next Up episode; sr4 has none, so the first episode of its first season is used;
+        // noseasons has nothing to play.
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "sr1".into() });
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "sr4".into() });
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "noseasons".into() });
+        let rest = h.drain_via_probe().await;
+        assert_eq!(rest.len(), 1, "only the empty series fails");
+        assert!(matches!(&rest[0], MainMsg::CastError(_)));
+        let plays: Vec<_> = m
+            .reqs()
+            .into_iter()
+            .filter(|r| r.method == "POST" && r.path == "/Sessions/sess-tv/Playing")
+            .collect();
+        assert_eq!(plays.len(), 2);
+        assert_eq!(plays[0].qp("playCommand"), Some("PlayNow"));
+        assert_eq!(plays[0].qp("itemIds"), Some("nx1"));
+        assert_eq!(plays[0].qp("startPositionTicks"), Some("0"));
+        assert!(plays[1].qp("itemIds").map(|v| !v.is_empty()).unwrap_or(false));
+        assert_eq!(m.find("GET", "/Shows/sr4/Episodes").len(), 1);
     }
 
     // ------------------------------------------------- settings / sign-out

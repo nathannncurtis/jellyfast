@@ -90,7 +90,7 @@ async fn jf_live_worker_end_to_end() {
             series = items.clone();
         }
     }
-    let (t, found) = h.items(UiCmd::Search { q: "green".into() }).await;
+    let (t, found) = h.items(UiCmd::Search { q: "green".into(), parent_id: None, types: None }).await;
     eprintln!("{} -> {}", t, found.len());
     assert!(!found.is_empty());
 
