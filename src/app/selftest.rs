@@ -148,8 +148,11 @@ fn steps() -> Vec<Step> {
         ("settings: open+cancel", s_settings_cancel, 600),
         ("settings: open+save", s_settings_save, 600),
         ("playback: start", s_play_start, 2500),
+        ("playback: chrome", s_play_chrome, 100),
         ("playback: controls", s_play_controls, 300),
-        ("playback: subtitle/audio cycle", s_play_cycle, 300),
+        ("playback: subtitle/audio cycle", s_play_cycle, 2300),
+        ("playback: toast hides itself", s_toast_hidden, 50),
+        ("audit: player (long title, toast, info)", s_audit_player, 200),
         ("playback: speed", s_play_speed, 300),
         ("playback: server down/up/error", s_play_net, 500),
         ("playback: replace item", s_play_start, 1500),
@@ -251,6 +254,8 @@ fn playback(resume: f64, run: f64) -> MainMsg {
         resume_secs: resume,
         method: PlaybackMethod::DirectPlay,
         run_time_secs: run,
+        image_key: Some(poster_key("Movie-0")),
+        media_kind: MediaKind::Video,
     })
 }
 fn state_check(what: &str, ok: bool) {
@@ -950,6 +955,66 @@ fn s_play_start() {
         state_check("playing set", ui.playing.is_some());
     }
 }
+fn s_play_chrome() {
+    use crate::ui::player;
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let ap: *mut Object = msg_send![ui.player_host.get(), effectiveAppearance];
+        let name: *mut Object = msg_send![ap, name];
+        state_check("player chrome is dark", to_str(name) == "NSAppearanceNameDarkAqua");
+        let cs: isize = msg_send![ui.avview.get(), controlsStyle];
+        state_check("AVKit controls are floating", cs == 2);
+        state_check("toast hidden when empty", !player::toast_visible());
+        let ip: BOOL = msg_send![ui.info_panel.get(), isHidden];
+        state_check("playback info hidden by default", ip == YES);
+        let sel: objc::runtime::Sel = msg_send![ui.back_btn.get(), action];
+        state_check("back button stops playback", sel == sel!(stopPlayback:));
+        let a: f64 = msg_send![ui.top_bar.get(), alphaValue];
+        state_check("top bar visible at start", a > 0.99);
+        state_check("backdrop gone once playing", !player::backdrop_visible());
+        // info toggle shows the panel and persists
+        act(sel!(togglePlaybackInfo:), nil());
+        let ip: BOOL = msg_send![ui.info_panel.get(), isHidden];
+        state_check("info panel shown after toggle", ip == NO && ui.cfg.settings.show_stats);
+        update_chip();
+        state_check("info text filled", read_field(ui.info_label.get()).contains("/"));
+        act(sel!(togglePlaybackInfo:), nil());
+        let ip: BOOL = msg_send![ui.info_panel.get(), isHidden];
+        state_check("info panel hidden after second toggle", ip == YES && !ui.cfg.settings.show_stats);
+    }
+}
+fn s_toast_hidden() {
+    unsafe {
+        state_check("toast hidden 2.2 s after subCycle", !crate::ui::player::toast_visible());
+    }
+}
+fn s_audit_player() {
+    handle_main(MainMsg::PlaybackReady(PlaybackStart {
+        url: video_url(),
+        item_id: "movie-1".into(),
+        title: LONG.into(),
+        subtitle: Some(format!("{} · {}", "Some Show With A Long Name", LONG)),
+        resume_secs: 0.0,
+        method: PlaybackMethod::DirectPlay,
+        run_time_secs: 6.0,
+        image_key: None,
+        media_kind: MediaKind::Video,
+    }));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.settings.show_stats = true;
+        crate::ui::player::apply_info_visibility();
+        crate::ui::player::toast(&"Can't reach your server. Press ⌘R to retry. ".repeat(4), Some("wifi.exclamationmark"), true);
+    }
+    audit_both("player");
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.settings.show_stats = false;
+        crate::ui::player::apply_info_visibility();
+        crate::ui::player::toast("Subtitles: Off", Some("captions.bubble"), false);
+        audit("player/toast-short");
+    }
+}
 fn s_play_controls() {
     unsafe {
         act(sel!(playPause:), nil());
@@ -970,6 +1035,9 @@ fn s_play_cycle() {
         for _ in 0..4 {
             act(sel!(subCycle:), nil());
             act(sel!(audioCycle:), nil());
+        }
+        if !ui.sub_opts.is_empty() {
+            state_check("toast visible after cycling", crate::ui::player::toast_visible());
         }
     }
 }

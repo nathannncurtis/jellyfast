@@ -88,7 +88,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
             let ui = UI.get_mut().unwrap();
             set_busy(false);
             if ui.playing.is_some() {
-                set_chip(&format!("⚠︎ {}", e), true);
+                crate::ui::player::toast(&e, Some("exclamationmark.triangle"), true);
             } else if ui.items.is_empty() {
                 grid_set_items(&[]);
                 show_state("exclamationmark.triangle", "Couldn't load this library", &e, true);
@@ -104,10 +104,10 @@ pub(crate) fn handle_main(msg: MainMsg) {
             if let Some(pn) = ui.playing.as_mut() {
                 pn.attempts += 1;
                 if pn.attempts < 3 {
-                    set_chip("Reconnecting…", false);
+                    crate::ui::player::toast("Reconnecting…", Some("wifi.exclamationmark"), false);
                     schedule_retry(2.0);
                 } else {
-                    set_chip("Stream failed — server unreachable. Press ⌘R to try again.", true);
+                    crate::ui::player::toast("Can't reach your server. Press ⌘R to retry.", Some("wifi.exclamationmark"), true);
                 }
             }
         },

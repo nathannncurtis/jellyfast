@@ -245,6 +245,12 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                 run_time_secs: crate::jellyfin::urls::secs_from_ticks(
                                     full.run_time_ticks.unwrap_or(0),
                                 ),
+                                image_key: Some(crate::ui::library::poster_key(&full.id)),
+                                media_kind: if full.item_type == "Audio" {
+                                    crate::app::messages::MediaKind::Audio
+                                } else {
+                                    crate::app::messages::MediaKind::Video
+                                },
                             }));
                         }
                         Err(e) => {
@@ -256,6 +262,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             UiCmd::PlayChannel { channel_id, name } => {
                 if let Some(c) = &client {
                     let url = crate::jellyfin::urls::build_livetv_url(&c.base, &channel_id, &c.token);
+                    let channel_id_key = channel_id.clone();
                     c.report_start(&channel_id, 0, "DirectStream").await;
                     let _ = main_tx.send(MainMsg::PlaybackReady(PlaybackStart {
                         url,
@@ -265,6 +272,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                         resume_secs: 0.0,
                         method: crate::transcode::decision::PlaybackMethod::DirectPlay,
                         run_time_secs: 0.0,
+                        image_key: Some(crate::ui::library::poster_key(&channel_id_key)),
+                        media_kind: crate::app::messages::MediaKind::Video,
                     }));
                 }
             }

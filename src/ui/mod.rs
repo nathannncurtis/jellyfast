@@ -1,3 +1,4 @@
+pub mod player;
 pub mod theme;
 pub mod library;
 pub mod seerr;

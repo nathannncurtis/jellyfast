@@ -258,6 +258,16 @@ pub struct Ui {
     pub player_host: Ptr,
     pub top_bar: Ptr,
     pub top_title: Ptr,
+    pub top_sub: Ptr,
+    pub toast_icon: Ptr,
+    pub info_panel: Ptr,
+    pub info_label: Ptr,
+    pub info_item: Ptr,
+    pub backdrop: Ptr,
+    pub backdrop_poster: Ptr,
+    pub backdrop_spin: Ptr,
+    pub last_mouse: Option<std::time::Instant>,
+    pub bar_shown: bool,
     pub chip: Ptr,
     pub chip_label: Ptr,
     pub back_btn: Ptr,
@@ -427,6 +437,9 @@ pub(crate) unsafe fn register_classes() {
             (sel!(controlTextDidChange:), text_changed as Extern0),
             (sel!(jrTick:), tick as Extern0),
             (sel!(jrSearchNow:), search_now as Extern0),
+            (sel!(jrHideToast:), crate::ui::player::hide_toast as Extern0),
+            (sel!(jrBackdropOff:), crate::ui::player::backdrop_off as Extern0),
+            (sel!(togglePlaybackInfo:), crate::ui::player::toggle_info as Extern0),
             (sel!(jrRetry:), retry_now as Extern0),
         ] {
             d.add_method(s, f);
@@ -437,6 +450,7 @@ pub(crate) unsafe fn register_classes() {
     crate::ui::seerr::register_seerr_classes();
     register_sidebar_row();
     register_header_class();
+    crate::ui::player::register_player_classes();
     // Poster grid container
     {
         let mut d = ClassDecl::new("JRGridView", class!(NSView)).unwrap();
@@ -473,11 +487,15 @@ pub(crate) unsafe fn register_classes() {
 pub(crate) type Extern0 = extern "C" fn(&mut Object, Sel, *mut Object);
 pub(crate) type KvoFn = extern "C" fn(&mut Object, Sel, *mut Object, *mut Object, *mut Object, *mut c_void);
 
+/// Refresh the playback-info panel text (time, resolution, bitrate, method). No-op while it is off.
 pub(crate) unsafe fn update_chip() {
     let ui = match UI.get_mut() {
         Some(u) => u,
         None => return,
     };
+    if !ui.cfg.settings.show_stats {
+        return;
+    }
     let pn = match ui.playing.as_ref() {
         Some(p) => p,
         None => return,
@@ -486,49 +504,40 @@ pub(crate) unsafe fn update_chip() {
         return; // item being swapped (KVO can fire mid-replace)
     }
     let mut s = String::new();
-    let tcs: NSInteger = msg_send![ui.player.get(), timeControlStatus];
-    if tcs == 1 {
-        s.push_str("Buffering…");
-    } else {
-        // position / duration
-        let t: CMTime = msg_send![ui.player.get(), currentTime];
-        let d: CMTime = msg_send![ui.pitem.get(), duration];
-        let dur = d.seconds();
-        s.push_str(&format!(
-            "{} / {}",
-            crate::jellyfin::urls::fmt_clock(t.seconds()),
-            crate::jellyfin::urls::fmt_clock(dur)
-        ));
-        // resolution
-        let sz: NSSize = msg_send![ui.pitem.get(), presentationSize];
-        if sz.w > 0.0 {
-            s.push_str(&format!("  ·  {}×{}", sz.w as i64, sz.h as i64));
-        }
-        // bitrate from access log (last event)
-        let log: *mut Object = msg_send![ui.pitem.get(), accessLog];
-        if !log.is_null() {
-            let events: *mut Object = msg_send![log, events];
-            if !events.is_null() {
-                let n: NSUInteger = msg_send![events, count];
-                if n > 0 {
-                    let ev: *mut Object = msg_send![events, objectAtIndex: n - 1];
-                    let br: f64 = msg_send![ev, indicatedBitrate];
-                    if br > 0.0 {
-                        s.push_str(&format!("  ·  {:.1} Mb/s", br / 1_000_000.0));
-                    }
+    let t: CMTime = msg_send![ui.player.get(), currentTime];
+    let d: CMTime = msg_send![ui.pitem.get(), duration];
+    s.push_str(&format!(
+        "{} / {}",
+        crate::jellyfin::urls::fmt_clock(t.seconds()),
+        crate::jellyfin::urls::fmt_clock(d.seconds())
+    ));
+    let sz: NSSize = msg_send![ui.pitem.get(), presentationSize];
+    if sz.w > 0.0 {
+        s.push_str(&format!("  ·  {}×{}", sz.w as i64, sz.h as i64));
+    }
+    let log: *mut Object = msg_send![ui.pitem.get(), accessLog];
+    if !log.is_null() {
+        let events: *mut Object = msg_send![log, events];
+        if !events.is_null() {
+            let n: NSUInteger = msg_send![events, count];
+            if n > 0 {
+                let ev: *mut Object = msg_send![events, objectAtIndex: n - 1];
+                let br: f64 = msg_send![ev, indicatedBitrate];
+                if br > 0.0 {
+                    s.push_str(&format!("  ·  {:.1} Mb/s", br / 1_000_000.0));
                 }
             }
         }
-        s.push_str(&format!("  ·  {}", crate::transcode::decision::method_label(pn.method)));
     }
-    set_chip(&s, false);
-}
-
-pub(crate) unsafe fn set_chip(text: &str, is_err: bool) {
-    let ui = UI.get_mut().unwrap();
-    set_text(ui.chip_label.get(), text);
-    let col = if is_err { color_named("red") } else { color_named("label") };
-    let _: () = msg_send![ui.chip_label.get(), setTextColor: col];
+    s.push_str(&format!("  ·  {}", crate::transcode::decision::method_label(pn.method)));
+    set_text(ui.info_label.get(), &s);
+    // Fit the pill to its text (the label truncates if the window is too narrow).
+    let cell: *mut Object = msg_send![ui.info_label.get(), cell];
+    let tsz: NSSize = msg_send![cell, cellSize];
+    let w = (tsz.w.ceil() + 2. * crate::ui::theme::SP2 + 2.).min(bounds_of(ui.player_host.get()).size.w - 2. * crate::ui::theme::SP4);
+    let f = frame_of(ui.info_panel.get());
+    set_frame(ui.info_panel.get(), rect(f.origin.x, f.origin.y, w, f.size.h));
+    set_frame(ui.info_label.get(), rect(crate::ui::theme::SP2, 5., w - 2. * crate::ui::theme::SP2, 16.));
 }
 
 pub(crate) extern "C" fn fullscreen(_t: &mut Object, _c: Sel, _s: *mut Object) {
@@ -980,6 +989,16 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         player_host: Ptr(nil()),
         top_bar: Ptr(nil()),
         top_title: Ptr(nil()),
+        top_sub: Ptr(nil()),
+        toast_icon: Ptr(nil()),
+        info_panel: Ptr(nil()),
+        info_label: Ptr(nil()),
+        info_item: Ptr(nil()),
+        backdrop: Ptr(nil()),
+        backdrop_poster: Ptr(nil()),
+        backdrop_spin: Ptr(nil()),
+        last_mouse: None,
+        bar_shown: false,
         chip: Ptr(nil()),
         chip_label: Ptr(nil()),
         back_btn: Ptr(nil()),

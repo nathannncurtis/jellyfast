@@ -219,8 +219,9 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(state, sbtn);
     ui.state_btn = Ptr(sbtn);
 
-    // --- Player host (AVKit) + top bar + chip ---
-    let ph: *mut Object = msg_send![class!(NSView), alloc];
+    // --- Player host (AVKit) + chrome ---
+    let pcls = *crate::ui::player::PLAYER_HOST_CLASS.get().unwrap();
+    let ph: *mut Object = msg_send![pcls, alloc];
     let ph: *mut Object = msg_send![ph, initWithFrame: b];
     set_autoresize(ph, RESIZE_W | RESIZE_H);
     add_sub(content, ph);
@@ -244,44 +245,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.player = Ptr::retained(player);
     let _: () = msg_send![avv, setPlayer: player];
     let _: () = msg_send![player, setVolume: ui.cfg.volume.clamp(0.0, 1.0) as f32];
-
-    let bar = vev(MAT_HUD, BLEND_WITHIN);
-    let _: () = msg_send![bar, setAlphaValue: 0.92f64];
-    set_frame(bar, rect(0., b.size.h - 44., b.size.w, 44.));
-    set_autoresize(bar, RESIZE_W | MARGIN_MINY);
-    add_sub(ph, bar);
-    ui.top_bar = Ptr(bar);
-    let l = layer_of(bar);
-    let _: () = msg_send![l, setMasksToBounds: YES];
-
-    let back: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("‹  Back")
-        target: ui.ctl.get() action: sel!(goBack:)];
-    set_frame(back, rect(12., 8., 72., 28.));
-    let _: () = msg_send![back, setBordered: NO];
-    add_sub(bar, back);
-    ui.back_btn = Ptr(back);
-
-    let tt = make_label("", 14.0, true, false);
-    set_frame(tt, rect(96., 12., b.size.w - 560., 20.));
-    set_autoresize(tt, RESIZE_W);
-    let _: () = msg_send![tt, setTextColor: color_named("white")];
-    add_sub(bar, tt);
-    ui.top_title = Ptr(tt);
-
-    let chip = vev(MAT_HUD, BLEND_WITHIN);
-    let _: () = msg_send![chip, setAlphaValue: 0.8f64];
-    set_frame(chip, rect(b.size.w - 356., b.size.h - 78., 340., 24.));
-    set_autoresize(chip, MARGIN_MINX | MARGIN_MINY);
-    let cl = layer_of(chip);
-    let _: () = msg_send![cl, setCornerRadius: 8.0f64];
-    let _: () = msg_send![cl, setMasksToBounds: YES];
-    add_sub(ph, chip);
-    ui.chip = Ptr(chip);
-    let chip_l = make_label("", 11.5, false, true);
-    set_frame(chip_l, rect(6., 4., 328., 16.));
-    let _: () = msg_send![chip_l, setTextColor: color_named("white")];
-    add_sub(chip, chip_l);
-    ui.chip_label = Ptr(chip_l);
+    crate::ui::player::build_player_chrome(ph, avv, b);
 
     // --- Login card ---
     let card_w = 380.;
@@ -483,6 +447,13 @@ pub(crate) unsafe fn build_menus() {
     const CTRL_CMD: NSUInteger = (1 << 18) | (1 << 20);
     add(ctl_menu, "Play / Pause", sel!(playPause:), " ", 0usize, 0);
     add(ctl_menu, "Stop", sel!(stopPlayback:), ".", CMD, 0);
+    add(ctl_menu, "Show Playback Info", sel!(togglePlaybackInfo:), "i", CMD, 0);
+    {
+        let n: NSInteger = msg_send![ctl_menu, numberOfItems];
+        let it: *mut Object = msg_send![ctl_menu, itemAtIndex: n - 1];
+        ui.info_item = Ptr(it);
+        let _: () = msg_send![it, setState: ui.cfg.settings.show_stats as isize];
+    }
     add(ctl_menu, "Back 10s", sel!(seekBack:), "\u{F702}", CMD, 0);
     add(ctl_menu, "Forward 10s", sel!(seekFwd:), "\u{F703}", CMD, 0);
     add(ctl_menu, "Volume Up", sel!(volUp:), "\u{F700}", CMD, 0);
