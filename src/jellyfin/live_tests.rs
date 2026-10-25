@@ -290,3 +290,23 @@ async fn jf_live_client_endpoints() {
     assert!(!ch.is_empty());
     raw_dump(&l, &c, &format!("/LiveTv/Channels?UserId={}&Limit=500", c.user_id), "channels").await;
 }
+
+/// Sign-in only, against a real server: public info, password login, then one
+/// authenticated read to prove the token is accepted. Used by the CI live-auth job.
+/// Read-only; the password is read from JF_LIVE_PASS_FILE and never printed.
+///   cargo test -- --ignored live_login --test-threads=1
+#[tokio::test]
+#[ignore]
+async fn jf_live_login() {
+    let Some(l) = live_env() else { return eprintln!("JF_LIVE_* not set; skipping") };
+    let _e = TestEnv::new();
+
+    let info = JellyfinClient::public_info(&l.url).await.expect("public_info");
+    assert_eq!(info.product_name.as_deref(), Some("Jellyfin Server"));
+
+    let (c, auth) = login(&l).await;
+    assert!(!auth.user.name.is_empty());
+    assert!(!auth.access_token.is_empty());
+    let views = c.views().await.expect("authenticated views request");
+    eprintln!("signed in to Jellyfin {:?}; {} views", info.version, views.len());
+}

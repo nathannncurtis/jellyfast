@@ -867,6 +867,30 @@ mod tests {
         assert!(matches!(c.request("movie", 996).await, Err(SeerrError::Api(500, _))));
     }
 
+    /// Sign-in only, against a real server: status (public), then /auth/me with
+    /// the password login. Used by the CI live-auth job. Read-only: the only POST
+    /// is the sign-in itself, and the password is never printed.
+    ///   SEERR_LIVE_URL=https://seerr.example SEERR_LIVE_USER=name \
+    ///   SEERR_LIVE_PASS_FILE=/path/to/password-file \
+    ///   cargo test -- --ignored seerr_live_login --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn seerr_live_login() {
+        let (Ok(url), Ok(user), Ok(pf)) = (
+            std::env::var("SEERR_LIVE_URL"),
+            std::env::var("SEERR_LIVE_USER"),
+            std::env::var("SEERR_LIVE_PASS_FILE"),
+        ) else {
+            panic!("set SEERR_LIVE_URL, SEERR_LIVE_USER and SEERR_LIVE_PASS_FILE");
+        };
+        let pass = std::fs::read_to_string(&pf).expect("password file");
+        let c = SeerrClient::with_login(&url, &user, pass.trim_end_matches(['\r', '\n'])).unwrap();
+        let (st, me) = c.verify().await.expect("status + sign-in");
+        println!("seerr {} signed in as id={}", st.version, me.id);
+        assert!(!st.version.is_empty());
+        assert!(me.id > 0 && !me.display_name.is_empty());
+    }
+
     /// Read-only smoke test against a real server. Never creates or deletes
     /// anything (the only POST is the sign-in itself).
     ///   SEERR_LIVE_URL=https://seerr.example SEERR_LIVE_USER=name \

@@ -1,0 +1,72 @@
+name: live-auth
+
+# Read-only sign-in checks against the real Jellyfin and Seerr servers, so a broken
+# login is caught without anyone opening the app. Runs only the #[ignore]d
+# `live_login` tests (Jellyfin and Seerr sign-in). Nothing is created, changed or deleted.
+# Forks and runs without the secrets skip with a notice instead of failing.
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-auth-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  login:
+    if: github.repository == 'nathannncurtis/jellyfast'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check the secrets
+        id: check
+        env:
+          JF_LIVE_URL: ${{ secrets.JF_LIVE_URL }}
+          JF_LIVE_USER: ${{ secrets.JF_LIVE_USER }}
+          SEERR_LIVE_URL: ${{ secrets.SEERR_LIVE_URL }}
+          LIVE_PASS: ${{ secrets.LIVE_PASS }}
+        run: |
+          if [ -z "$JF_LIVE_URL" ] || [ -z "$JF_LIVE_USER" ] || [ -z "$SEERR_LIVE_URL" ] || [ -z "$LIVE_PASS" ]; then
+            echo "::notice::Live sign-in secrets are not set (forks have none), so the live checks are skipped."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Write the password to a temp file
+        if: steps.check.outputs.run == 'true'
+        env:
+          LIVE_PASS: ${{ secrets.LIVE_PASS }}
+        run: |
+          # The file lives in the runner temp directory and is deleted at the end of the job.
+          printf '%s' "$LIVE_PASS" > "$RUNNER_TEMP/live_pass"
+          chmod 600 "$RUNNER_TEMP/live_pass"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.check.outputs.run == 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: live-auth-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: live-auth-${{ runner.os }}-${{ runner.arch }}-
+      - name: Sign in to Jellyfin and Seerr
+        if: steps.check.outputs.run == 'true'
+        timeout-minutes: 10
+        env:
+          JF_LIVE_URL: ${{ secrets.JF_LIVE_URL }}
+          JF_LIVE_USER: ${{ secrets.JF_LIVE_USER }}
+          JF_LIVE_PASS_FILE: ${{ runner.temp }}/live_pass
+          SEERR_LIVE_URL: ${{ secrets.SEERR_LIVE_URL }}
+          # The Seerr account is the same person as the Jellyfin account.
+          SEERR_LIVE_USER: ${{ secrets.JF_LIVE_USER }}
+          SEERR_LIVE_PASS_FILE: ${{ runner.temp }}/live_pass
+        run: cargo test --locked -- --ignored live_login --test-threads=1
+      - name: Remove the password file
+        if: always() && steps.check.outputs.run == 'true'
+        run: rm -f "$RUNNER_TEMP/live_pass"
