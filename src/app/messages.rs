@@ -25,8 +25,16 @@ pub enum UiCmd {
         name: String,
         collection_type: Option<String>,
     },
+    /// Filter the grid on screen by `q`. `parent_id` and `types` scope it to that grid
+    /// (see `library_query::filter_scope`); the sort comes from the worker's config.
     Search {
         q: String,
+        parent_id: Option<String>,
+        types: Option<String>,
+    },
+    /// The header sort popup changed. The UI saved it; this keeps the worker's copy in step.
+    SetSort {
+        sort_by: String,
     },
     Episodes {
         series_id: String,

@@ -298,6 +298,8 @@ pub struct Ui {
     pub side_stack: Ptr,
     pub search: Ptr,
     pub sort_popup: Ptr,
+    /// False while a grid the sort popup does not apply to is showing (album tracks).
+    pub sort_applies: bool,
     pub header: Ptr,
     pub header_title: Ptr,
     pub header_count: Ptr,
@@ -817,26 +819,60 @@ pub(crate) extern "C" fn sign_out(_t: &mut Object, _c: Sel, _s: *mut Object) {
 }
 pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
-        let ui = UI.get_mut().unwrap();
-        if ui.home.active {
-            crate::ui::home::reload();
-            return;
-        }
-        if ui.browse_active {
-            begin_load(false);
-            let _ = ui.ui_tx.send(UiCmd::LoadBrowse);
-            return;
-        }
-        if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
-            begin_load(false);
-            let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-        }
+        load_filtered_or_place();
     }
+}
+/// Reload the current place (Home, Browse or a library) and leave the filter text alone.
+pub(crate) unsafe fn reload_place() {
+    let ui = UI.get_mut().unwrap();
+    if ui.home.active {
+        crate::ui::home::reload();
+    } else if ui.browse_active {
+        begin_load(false);
+        let _ = UI.get_mut().unwrap().ui_tx.send(UiCmd::LoadBrowse);
+    } else if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+        begin_load(false);
+        let _ = UI.get_mut().unwrap().ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+    } else {
+        // Filter results from Home or Browse with nothing open behind them: show Home.
+        crate::ui::home::enter();
+    }
+}
+/// Load what the grid should show: the filter's results while its text is set, otherwise
+/// the current place. Used by the filter (debounced), the sort popup and Refresh.
+pub(crate) unsafe fn load_filtered_or_place() {
+    let ui = UI.get_mut().unwrap();
+    let q = read_field(ui.search.get());
+    if q.trim().is_empty() {
+        reload_place();
+        return;
+    }
+    let view = ui.mode_stack.last().map(|m| (m.0.as_str(), m.2.as_deref()));
+    let (parent_id, types) = crate::app::library_query::filter_scope(ui.browse_active, view);
+    begin_load(false);
+    let _ = UI.get_mut().unwrap().ui_tx.send(UiCmd::Search {
+        q,
+        parent_id,
+        types: types.map(String::from),
+    });
+}
+/// Empty the filter field and drop a debounced search that has not fired yet.
+pub(crate) unsafe fn clear_filter() {
+    let ui = UI.get_mut().unwrap();
+    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ui.ctl.get()
+        selector: sel!(jrSearchNow:) object: nil()];
+    set_text(ui.search.get(), "");
 }
 pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if ui.home.active {
+            return;
+        }
+        // Back from filter results: clear the filter and show the place again.
+        if !read_field(ui.search.get()).trim().is_empty() {
+            clear_filter();
+            reload_place();
             return;
         }
         if ui.mode_stack.len() > 1 {
@@ -858,7 +894,9 @@ pub(crate) unsafe fn select_view(idx: usize) {
         sidebar_refresh_selection();
         ui.cfg.last_view = Some(id.clone());
         crate::config::save_config_keeping_session(&ui.cfg);
+        clear_filter();
         begin_load(true);
+        let ui = UI.get_mut().unwrap();
         let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
     }
 }
@@ -897,6 +935,7 @@ unsafe fn activate(it: ListItem) {
             let _ = ui.ui_tx.send(UiCmd::OpenDetail { item_id: it.id.clone() });
         }
         "MusicAlbum" => {
+            ui.sort_applies = false;
             let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
         }
         "LiveTvChannel" => {
@@ -978,10 +1017,13 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
 pub(crate) extern "C" fn sort_changed(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
-            begin_load(false);
-            let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-        }
+        let index: NSInteger = msg_send![ui.sort_popup.get(), indexOfSelectedItem];
+        let (by, _) = crate::app::library_query::sort_for_index(index.max(0) as usize);
+        ui.cfg.sort_by = Some(by.to_string());
+        crate::config::save_config_keeping_session(&ui.cfg);
+        let _ = ui.ui_tx.send(UiCmd::SetSort { sort_by: by.to_string() });
+        // Re-run whatever is on screen so the order applies, filter included.
+        load_filtered_or_place();
     }
 }
 pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Object) {
@@ -1001,16 +1043,7 @@ pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Objec
 }
 pub(crate) extern "C" fn search_now(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
-        let ui = UI.get_mut().unwrap();
-        let q = read_field(ui.search.get());
-        begin_load(false);
-        if q.trim().is_empty() {
-            if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
-                let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-            }
-        } else {
-            let _ = ui.ui_tx.send(UiCmd::Search { q });
-        }
+        load_filtered_or_place();
     }
 }
 
@@ -1163,6 +1196,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         side_stack: Ptr(nil()),
         search: Ptr(nil()),
         sort_popup: Ptr(nil()),
+        sort_applies: true,
         header: Ptr(nil()),
         header_title: Ptr(nil()),
         header_count: Ptr(nil()),

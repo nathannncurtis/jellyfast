@@ -1,5 +1,6 @@
 pub mod controller;
 pub mod libraries;
+pub mod library_query;
 pub mod home;
 pub mod messages;
 pub mod worker;
