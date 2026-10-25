@@ -7,6 +7,10 @@
 //! the item, the width or the appearance changes. Artwork views are registered
 //! as targets and filled from `Ui.poster_cache` when their key arrives. All
 //! state lives in `Ui.detail`; the views are only touched on the main thread.
+//!
+//! A series adds a season section below the overview: a season popup and the
+//! selected season's episodes as rows (thumbnail, number and title, runtime,
+//! overview snippet, watched or progress state). A row plays its episode.
 #![allow(unsafe_code)]
 use crate::app::messages::*;
 use crate::jellyfin::urls::fmt_runtime;
@@ -29,6 +33,14 @@ const AVATAR: f64 = 96.;
 /// Avatar, gap, name line, gap, role line.
 const CAST_H: f64 = AVATAR + SP2 + 16. + 2. + 14.;
 const BUTTON_H: f64 = 28.;
+const THUMB_W: f64 = 160.;
+const THUMB_H: f64 = 90.;
+const ROW_PAD: f64 = SP3;
+const TITLE_H: f64 = 18.;
+const META_H: f64 = 16.;
+const PROGRESS_H: f64 = 3.;
+/// Overview snippet length for episode rows, in characters.
+const SNIPPET_CHARS: usize = 180;
 
 /// An artwork view waiting for its image. Raw pointers: valid only until the
 /// next `render`, which clears the list before it removes those views.
@@ -45,8 +57,26 @@ pub struct DetailUi {
     pub doc: Ptr,
     pub item: Option<DetailView>,
     pub open: bool,
+    /// Season picker and episode list of a series page.
+    pub seasons: SeasonsUi,
+    /// The season popup of the current layout (null when the page shows none).
+    pub season_popup: Ptr,
     laid_w: f64,
     targets: Vec<Target>,
+}
+
+/// Season state of a series page. Replaced as a whole when a season arrives.
+#[derive(Clone, Default)]
+pub struct SeasonsUi {
+    pub seasons: Vec<SeasonEntry>,
+    /// Index into `seasons` of the season being shown.
+    pub selected: usize,
+    /// The seasons request has been answered (successfully or not).
+    pub loaded: bool,
+    /// Episodes of the selected season; None while they load.
+    pub episodes: Option<Vec<EpisodeRow>>,
+    /// A failure to show in place of the episode list.
+    pub error: Option<String>,
 }
 
 impl DetailUi {
@@ -57,6 +87,8 @@ impl DetailUi {
             doc: Ptr(std::ptr::null_mut()),
             item: None,
             open: false,
+            seasons: SeasonsUi::default(),
+            season_popup: Ptr(std::ptr::null_mut()),
             laid_w: 0.,
             targets: Vec::new(),
         }
@@ -118,14 +150,43 @@ extern "C" fn on_watched(_t: &mut Object, _c: Sel, _s: *mut Object) {
     }
 }
 
-extern "C" fn on_episodes(_t: &mut Object, _c: Sel, _s: *mut Object) {
+/// The season popup changed: load the chosen season's episodes.
+extern "C" fn on_season(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
-        let Some(item) = ui.detail.item.as_ref() else { return };
-        let (id, name) = (item.id.clone(), item.name.clone());
-        close(ui);
+        let idx: isize = msg_send![sender, indexOfSelectedItem];
+        let Ok(idx) = usize::try_from(idx) else { return };
+        let Some(series_id) = ui.detail.item.as_ref().map(|i| i.id.clone()) else { return };
+        let s = &mut ui.detail.seasons;
+        let Some(season_id) = s.seasons.get(idx).map(|x| x.id.clone()) else { return };
+        if idx == s.selected && s.episodes.is_some() {
+            return;
+        }
+        s.selected = idx;
+        s.episodes = None;
+        s.error = None;
+        let _ = ui.ui_tx.send(UiCmd::SeasonEpisodes { series_id, season_id });
+        render(ui);
+    }
+}
+
+/// An episode row was clicked (its tag is the row index): play that episode.
+extern "C" fn on_episode(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    unsafe {
+        let Some(ui) = UI.get_mut() else { return };
+        let tag: isize = msg_send![sender, tag];
+        let Some(item_id) = ui
+            .detail
+            .seasons
+            .episodes
+            .as_ref()
+            .and_then(|eps| usize::try_from(tag).ok().and_then(|i| eps.get(i)))
+            .map(|e| e.id.clone())
+        else {
+            return;
+        };
         crate::platform::appkit::set_busy(true);
-        let _ = ui.ui_tx.send(UiCmd::Episodes { series_id: id, series_name: name });
+        let _ = ui.ui_tx.send(UiCmd::Play { item_id });
     }
 }
 
@@ -136,7 +197,8 @@ pub(crate) unsafe fn register_detail_classes() {
     h.add_method(sel!(detailBack:), on_back as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailPlay:), on_play as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailWatched:), on_watched as extern "C" fn(&mut Object, Sel, *mut Object));
-    h.add_method(sel!(detailEpisodes:), on_episodes as extern "C" fn(&mut Object, Sel, *mut Object));
+    h.add_method(sel!(detailSeason:), on_season as extern "C" fn(&mut Object, Sel, *mut Object));
+    h.add_method(sel!(detailEpisode:), on_episode as extern "C" fn(&mut Object, Sel, *mut Object));
     h.register();
     let mut d = ClassDecl::new("JRDetailDoc", class!(NSView)).unwrap();
     d.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
@@ -202,14 +264,19 @@ pub(crate) unsafe fn build(content_host: *mut Object, frame: NSRect) {
 pub(crate) fn show(view: DetailView) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
+        let series_id = (view.item_type == "Series").then(|| view.id.clone());
         ui.detail.item = Some(view);
         ui.detail.open = true;
         ui.detail.laid_w = 0.;
+        ui.detail.seasons = SeasonsUi::default();
         set_hidden(ui.header.get(), true);
         set_hidden(ui.lib_scroll.get(), true);
         set_hidden(ui.state_host.get(), true);
         set_hidden(ui.detail.host.get(), false);
         render(ui);
+        if let Some(series_id) = series_id {
+            let _ = ui.ui_tx.send(UiCmd::Seasons { series_id });
+        }
         let doc = ui.detail.doc.get();
         let _: () = msg_send![doc, scrollPoint: NSPoint { x: 0., y: 0. }];
     }
@@ -227,6 +294,8 @@ unsafe fn close(ui: &mut Ui) {
     }
     ui.detail.open = false;
     ui.detail.item = None;
+    ui.detail.seasons = SeasonsUi::default();
+    ui.detail.season_popup = Ptr(std::ptr::null_mut());
     ui.detail.targets.clear();
     set_hidden(ui.detail.host.get(), true);
     set_hidden(ui.header.get(), false);
@@ -235,6 +304,62 @@ unsafe fn close(ui: &mut Ui) {
 
 pub fn is_open() -> bool {
     UI.get().map(|u| u.detail.open).unwrap_or(false)
+}
+
+/// Whether the page is open on the series `series_id`.
+fn showing(ui: &Ui, series_id: &str) -> bool {
+    ui.detail.open && ui.detail.item.as_ref().map(|i| i.id == series_id).unwrap_or(false)
+}
+
+/// The seasons of the open series page arrived; `selected` is the one to show first.
+pub fn seasons_loaded(series_id: String, seasons: Vec<SeasonEntry>, selected: usize) {
+    unsafe {
+        let Some(ui) = UI.get_mut() else { return };
+        if !showing(ui, &series_id) {
+            return;
+        }
+        let selected = selected.min(seasons.len().saturating_sub(1));
+        let first = seasons.get(selected).map(|s| s.id.clone());
+        ui.detail.seasons = SeasonsUi { seasons, selected, loaded: true, episodes: None, error: None };
+        match first {
+            Some(season_id) => {
+                let _ = ui.ui_tx.send(UiCmd::SeasonEpisodes { series_id, season_id });
+            }
+            None => ui.detail.seasons.episodes = Some(Vec::new()),
+        }
+        render(ui);
+    }
+}
+
+/// Episodes of a season arrived. Dropped unless that season is still the selected one.
+pub fn episodes_loaded(series_id: String, season_id: String, episodes: Vec<EpisodeRow>) {
+    unsafe {
+        let Some(ui) = UI.get_mut() else { return };
+        if !showing(ui, &series_id) {
+            return;
+        }
+        let s = &mut ui.detail.seasons;
+        if s.seasons.get(s.selected).map(|x| x.id.as_str()) != Some(season_id.as_str()) {
+            return;
+        }
+        s.episodes = Some(episodes);
+        render(ui);
+    }
+}
+
+/// Seasons or episodes of the open series page could not be loaded.
+pub fn seasons_failed(series_id: String, message: String) {
+    unsafe {
+        let Some(ui) = UI.get_mut() else { return };
+        if !showing(ui, &series_id) {
+            return;
+        }
+        let s = &mut ui.detail.seasons;
+        s.loaded = true;
+        s.episodes = None;
+        s.error = Some(message);
+        render(ui);
+    }
 }
 
 /// Artwork for `key` arrived: fill every page view waiting for it.
@@ -436,12 +561,6 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
     let (b, bw) = action_button(watched, "checkmark.circle", sel!(detailWatched:), host, false);
     set_frame(b, rect(bx, y, bw, BUTTON_H));
     add_sub(doc, b);
-    bx += bw + SP2;
-    if is_series {
-        let (b, bw) = action_button("Episodes", "list.bullet", sel!(detailEpisodes:), host, true);
-        set_frame(b, rect(bx, y, bw, BUTTON_H));
-        add_sub(doc, b);
-    }
     y += BUTTON_H + SP5;
 
     if let Some(ov) = item.overview.as_deref() {
@@ -453,6 +572,10 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
         y += th;
     }
     let mut sy = (poster_y + POSTER_H).max(y) + SP8;
+
+    if is_series {
+        sy = build_seasons(ui, doc, host, w, sy) + SP4;
+    }
 
     // Cast & Crew: one horizontally scrolling row of circular portraits.
     if !item.people.is_empty() {
@@ -492,6 +615,240 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
         sy += row_h + SP6;
     }
     sy + SP8
+}
+
+/// Season picker and the selected season's episodes. Returns the y below them.
+unsafe fn build_seasons(ui: &mut Ui, doc: *mut Object, host: *mut Object, w: f64, mut y: f64) -> f64 {
+    let st = ui.detail.seasons.clone();
+    let content_w = w - 2. * EDGE;
+    let head_h = 24.;
+    let line = |y: f64| y + 18. + SP8;
+    let mut head_w = content_w;
+    ui.detail.season_popup = Ptr(std::ptr::null_mut());
+    if !st.seasons.is_empty() {
+        let pop = season_popup(&st, host);
+        let pf = frame_of(pop);
+        set_frame(pop, rect(w - EDGE - pf.size.w, y + (head_h - pf.size.h) / 2., pf.size.w, pf.size.h));
+        add_sub(doc, pop);
+        ui.detail.season_popup = Ptr(pop);
+        head_w -= pf.size.w + SP4;
+    }
+    let head = label("Episodes", T_TITLE, C_TEXT, ALIGN_LEFT);
+    set_frame(head, rect(EDGE, y, head_w.max(40.), head_h));
+    add_sub(doc, head);
+    y += head_h + SP4;
+
+    if !st.loaded {
+        place_text(doc, "Loading seasons…", T_CALLOUT, C_TEXT2, rect(EDGE, y, content_w, 18.));
+        return line(y);
+    }
+    if let Some(msg) = st.error.as_deref() {
+        let v = wrapping_label(&format!("Couldn't load this season. {}", msg), T_CALLOUT, C_TEXT2, ALIGN_LEFT);
+        let th = text_height(v, content_w);
+        set_frame(v, rect(EDGE, y, content_w, th));
+        add_sub(doc, v);
+        return y + th + SP8;
+    }
+    if st.seasons.is_empty() {
+        place_text(doc, "No seasons yet.", T_CALLOUT, C_TEXT2, rect(EDGE, y, content_w, 18.));
+        return line(y);
+    }
+    match st.episodes.as_deref() {
+        None => {
+            place_text(doc, "Loading episodes…", T_CALLOUT, C_TEXT2, rect(EDGE, y, content_w, 18.));
+            line(y)
+        }
+        Some([]) => {
+            place_text(doc, "No episodes in this season.", T_CALLOUT, C_TEXT2, rect(EDGE, y, content_w, 18.));
+            line(y)
+        }
+        Some(eps) => {
+            for (i, ep) in eps.iter().enumerate() {
+                y = episode_row(ui, doc, host, ep, i, w, y);
+            }
+            y
+        }
+    }
+}
+
+/// Season popup: lists the seasons; choosing one loads its episodes.
+unsafe fn season_popup(st: &SeasonsUi, host: *mut Object) -> *mut Object {
+    let pop: *mut Object = msg_send![class!(NSPopUpButton), alloc];
+    let pop: *mut Object = msg_send![pop, initWithFrame: rect(0., 0., 160., 24.) pullsDown: NO];
+    let names: *mut Object = msg_send![class!(NSMutableArray), array];
+    for s in &st.seasons {
+        let _: () = msg_send![names, addObject: ns(&s.name)];
+    }
+    let _: () = msg_send![pop, addItemsWithTitles: names];
+    let _: () = msg_send![pop, selectItemAtIndex: st.selected as isize];
+    let _: () = msg_send![pop, setTarget: host];
+    let _: () = msg_send![pop, setAction: sel!(detailSeason:)];
+    let _: () = msg_send![pop, sizeToFit];
+    autorel(pop)
+}
+
+/// One episode row: thumbnail (progress bar underneath), number and title, runtime,
+/// overview snippet, and a check when watched. A transparent button over the whole
+/// row plays it; it is added last so it sits on top. Returns the y below the row.
+unsafe fn episode_row(ui: &mut Ui, doc: *mut Object, host: *mut Object, ep: &EpisodeRow, idx: usize, w: f64, y: f64) -> f64 {
+    let rw = w - 2. * EDGE;
+    let text_x = ROW_PAD + THUMB_W + SP4;
+    let check_w = if ep.played { 18. } else { 0. };
+    let text_w = (rw - text_x - ROW_PAD - check_w - SP2).max(120.);
+    let title = match ep.number {
+        Some(n) => format!("E{}  {}", n, ep.name),
+        None => ep.name.clone(),
+    };
+    let snippet = ep.overview.as_deref().map(|o| overview_snippet(o, SNIPPET_CHARS)).filter(|s| !s.is_empty());
+    let overview = snippet.as_ref().map(|t| {
+        let v = wrapping_label(t, T_CALLOUT, C_TEXT2, ALIGN_LEFT);
+        (v, text_height(v, text_w))
+    });
+    let overview_h = overview.map(|(_, h)| SP1 + h).unwrap_or(0.);
+    let text_h = TITLE_H + SP1 + META_H + overview_h;
+    let row_h = (text_h.max(THUMB_H) + 2. * ROW_PAD).ceil();
+
+    let row = flip_view(rect(EDGE, y, rw, row_h));
+    add_sub(row, surface(rect(0., 0., rw, row_h), C_CARD, R_ROW));
+
+    let thumb = art_view(rect(ROW_PAD, ROW_PAD, THUMB_W, THUMB_H), R_THUMB);
+    add_sub(row, thumb);
+    let glyph = glyph_in(rect(ROW_PAD, ROW_PAD, THUMB_W, THUMB_H), "play.rectangle", 28.);
+    add_sub(row, glyph);
+    bind(ui, ep.image_key, thumb, glyph);
+    if let Some(frac) = progress_fraction(ep) {
+        let track_y = ROW_PAD + THUMB_H - PROGRESS_H;
+        let track = new_view(rect(ROW_PAD, track_y, THUMB_W, PROGRESS_H));
+        let _: () = msg_send![layer_of(track), setBackgroundColor: cg_black(0.4)];
+        add_sub(row, track);
+        let fill = new_view(rect(ROW_PAD, track_y, THUMB_W * frac, PROGRESS_H));
+        let _: () = msg_send![layer_of(fill), setBackgroundColor: cg(C_ACCENT)];
+        add_sub(row, fill);
+    }
+
+    let t = label(&title, T_BODY_EM, C_TEXT, ALIGN_LEFT);
+    let _: () = msg_send![t, setToolTip: ns(&title)];
+    set_frame(t, rect(text_x, ROW_PAD, text_w, TITLE_H));
+    add_sub(row, t);
+    let meta = episode_meta(ep);
+    if !meta.is_empty() {
+        place_text(row, &meta, T_CALLOUT, C_TEXT2, rect(text_x, ROW_PAD + TITLE_H + SP1, text_w, META_H));
+    }
+    if let Some((v, h)) = overview {
+        set_frame(v, rect(text_x, ROW_PAD + TITLE_H + SP1 + META_H + SP1, text_w, h));
+        add_sub(row, v);
+    }
+    if ep.played {
+        let g = glyph_in(rect(rw - ROW_PAD - check_w, ROW_PAD, check_w, check_w), "checkmark.circle.fill", 16.);
+        let _: () = msg_send![g, setContentTintColor: color(C_OK)];
+        add_sub(row, g);
+    }
+
+    let hit: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("") target: host action: sel!(detailEpisode:)];
+    let _: () = msg_send![hit, setBordered: NO];
+    let _: () = msg_send![hit, setTag: idx as isize];
+    let _: () = msg_send![hit, setToolTip: ns(&title)];
+    set_frame(hit, rect(0., 0., rw, row_h));
+    add_sub(row, hit);
+
+    add_sub(doc, row);
+    y + row_h + SP2
+}
+
+/// Fraction watched for the progress bar: None when the episode is watched or unstarted.
+fn progress_fraction(ep: &EpisodeRow) -> Option<f64> {
+    let run = ep.run_time_ticks.filter(|r| *r > 0)?;
+    if ep.played || ep.position_ticks <= 0 {
+        return None;
+    }
+    Some((ep.position_ticks as f64 / run as f64).clamp(0., 1.))
+}
+
+/// Runtime, and minutes left when partly watched (ticks are 100 ns; 600 million per minute).
+fn episode_meta(ep: &EpisodeRow) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let rt = fmt_runtime(ep.run_time_ticks);
+    if !rt.is_empty() {
+        parts.push(rt);
+    }
+    if let Some(run) = ep.run_time_ticks.filter(|r| *r > 0) {
+        if !ep.played && ep.position_ticks > 0 {
+            let left = (run - ep.position_ticks).max(0) / 600_000_000;
+            if left > 0 {
+                parts.push(format!("{}m left", left));
+            }
+        }
+    }
+    parts.join("  ·  ")
+}
+
+/// The first `max` characters of `text` with whitespace collapsed, cut at a word
+/// boundary and ended with an ellipsis when it is longer than that.
+pub fn overview_snippet(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let cut: String = flat.chars().take(max).collect();
+    let kept = match cut.rfind(' ') {
+        Some(i) if i > max / 2 => &cut[..i],
+        _ => cut.as_str(),
+    };
+    format!("{}…", kept.trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippet_keeps_short_text_and_collapses_whitespace() {
+        assert_eq!(overview_snippet("  A  quiet
+
+start. ", 180), "A quiet start.");
+        assert_eq!(overview_snippet("", 180), "");
+    }
+
+    #[test]
+    fn snippet_cuts_at_a_word_with_ellipsis() {
+        let long = "word ".repeat(100);
+        let s = overview_snippet(&long, 50);
+        assert!(s.ends_with('…'), "{s}");
+        assert!(s.chars().count() <= 51, "{s}");
+        assert!(!s.trim_end_matches('…').ends_with(' '), "{s}");
+        assert!(s.trim_end_matches('…').split(' ').all(|w| w == "word" || w.is_empty()), "{s}");
+    }
+
+    #[test]
+    fn snippet_handles_multibyte_text() {
+        let s = overview_snippet(&"é".repeat(300), 10);
+        assert_eq!(s.chars().count(), 11);
+    }
+
+    #[test]
+    fn progress_only_for_started_unwatched_episodes() {
+        let mut ep = EpisodeRow {
+            id: "e".into(),
+            number: Some(1),
+            name: "n".into(),
+            overview: None,
+            run_time_ticks: Some(12_000_000_000),
+            played: false,
+            position_ticks: 3_000_000_000,
+            image_key: None,
+        };
+        assert_eq!(progress_fraction(&ep), Some(0.25));
+        assert_eq!(episode_meta(&ep), "20m  ·  15m left");
+        ep.played = true;
+        assert_eq!(progress_fraction(&ep), None);
+        assert_eq!(episode_meta(&ep), "20m");
+        ep.played = false;
+        ep.position_ticks = 0;
+        assert_eq!(progress_fraction(&ep), None);
+        ep.run_time_ticks = None;
+        assert_eq!(progress_fraction(&ep), None);
+        assert_eq!(episode_meta(&ep), "");
+    }
 }
 
 // ---- Introspection for the self-test (read-only) ---------------------------

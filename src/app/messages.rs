@@ -38,6 +38,15 @@ pub enum UiCmd {
     OpenDetail {
         item_id: String,
     },
+    /// Load the seasons of a series shown on its detail page, and the one holding Next Up.
+    Seasons {
+        series_id: String,
+    },
+    /// Load the episodes of one season for the series detail page.
+    SeasonEpisodes {
+        series_id: String,
+        season_id: String,
+    },
     Play {
         item_id: String,
     },
@@ -112,6 +121,23 @@ pub enum MainMsg {
     DetailLoaded(Box<DetailView>),
     /// The detail page could not be loaded (shown as a toast).
     DetailError(String),
+    /// The series' seasons, and which one to show first (its Next Up season, else the first).
+    SeasonsLoaded {
+        series_id: String,
+        seasons: Vec<SeasonEntry>,
+        selected: usize,
+    },
+    /// Episodes of one season; their thumbnails follow as `PosterReady` keys.
+    SeasonEpisodesLoaded {
+        series_id: String,
+        season_id: String,
+        episodes: Vec<EpisodeRow>,
+    },
+    /// Seasons or episodes of a series page could not be loaded.
+    SeasonsError {
+        series_id: String,
+        message: String,
+    },
     PlaybackError(String),
     ServerUp,
     ServerDown,
@@ -176,6 +202,28 @@ pub struct DetailView {
     pub poster_key: Option<u64>,
     pub backdrop_key: Option<u64>,
     pub people: Vec<DetailPerson>,
+}
+
+/// One season in the series page's season picker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeasonEntry {
+    pub id: String,
+    pub name: String,
+}
+
+/// One episode row on the series page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodeRow {
+    pub id: String,
+    /// Episode number within its season.
+    pub number: Option<u32>,
+    pub name: String,
+    pub overview: Option<String>,
+    pub run_time_ticks: Option<i64>,
+    pub played: bool,
+    pub position_ticks: i64,
+    /// Thumbnail artwork key, when the episode has a still.
+    pub image_key: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -279,6 +279,52 @@ impl JellyfinClient {
         r.json().await.map_err(|e| JFError::Parse(e.to_string()))
     }
 
+    /// GET a JSON body with the session headers and the given query pairs.
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str, query: &[(&str, String)]) -> Result<T, JFError> {
+        let r = self
+            .http
+            .get(url)
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .query(query)
+            .send()
+            .await
+            .map_err(map_err)?;
+        let r = check(r).await?;
+        r.json().await.map_err(|e| JFError::Parse(e.to_string()))
+    }
+
+    /// The seasons of a series, in the server's order.
+    pub async fn seasons(&self, series_id: &str) -> Result<Vec<Season>, JFError> {
+        let url = format!("{}/Shows/{}/Seasons", self.base, enc(series_id));
+        let page: ItemsPage<Season> = self.get_json(&url, &[("UserId", self.user_id.clone())]).await?;
+        Ok(page.items)
+    }
+
+    /// The episodes of one season, in episode order, with their watched state.
+    pub async fn season_episodes(&self, series_id: &str, season_id: &str) -> Result<Vec<Episode>, JFError> {
+        let url = format!("{}/Shows/{}/Episodes", self.base, enc(series_id));
+        let query = [
+            ("UserId", self.user_id.clone()),
+            ("seasonId", season_id.to_string()),
+            ("Fields", "Overview".to_string()),
+        ];
+        let page: ItemsPage<Episode> = self.get_json(&url, &query).await?;
+        Ok(page.items)
+    }
+
+    /// The episode the user should watch next in a series, if the server has one.
+    pub async fn next_up(&self, series_id: &str) -> Result<Option<Episode>, JFError> {
+        let url = format!("{}/Shows/NextUp", self.base);
+        let query = [
+            ("UserId", self.user_id.clone()),
+            ("SeriesId", series_id.to_string()),
+            ("Limit", "1".to_string()),
+        ];
+        let page: ItemsPage<Episode> = self.get_json(&url, &query).await?;
+        Ok(page.items.into_iter().next())
+    }
+
     pub async fn image(&self, item_id: &str) -> Result<Vec<u8>, JFError> {
         let url = u::build_image_url(&self.base, item_id, &self.token, 400);
         let r = self.http.get(url).timeout(Duration::from_secs(30)).send().await.map_err(map_err)?;
