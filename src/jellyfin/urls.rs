@@ -1,5 +1,3 @@
-use crate::*;
-
 /// Normalize a server base URL: require http/https, strip trailing '/'.
 pub fn normalize_base_url(input: &str) -> Result<String, String> {
     let s = input.trim();
@@ -95,8 +93,9 @@ pub fn build_hls_url(
         pairs.push(("MaxHeight", "2160".into()));
     }
     if !subtitle_lang.is_empty() {
-        pairs.push(("SubtitleStreamIndex", "".into())); // resolved server-side via lang pref below
-        pairs.insert(pairs.len() - 2, ("SubtitleLanguage", subtitle_lang.into()));
+        // Unverified param name; see report. Previously also sent an empty
+        // SubtitleStreamIndex, which carried no meaning and was removed.
+        pairs.push(("SubtitleLanguage", subtitle_lang.into()));
     }
     format!("{}/Videos/{}/master.m3u8?{}", base, item_id, qs(&pairs))
 }
