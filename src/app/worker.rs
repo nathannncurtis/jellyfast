@@ -342,9 +342,9 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     }
                 },
             },
-            UiCmd::SaveSeerr { enabled, url, api_key } => {
+            UiCmd::SaveSeerr { enabled, url, username, password, api_key } => {
                 seerr = None;
-                let msg = save_seerr(&mut cfg, enabled, &url, api_key).await;
+                let msg = save_seerr(&mut cfg, enabled, &url, &username, password, api_key).await;
                 let _ = main_tx.send(msg);
             }
             UiCmd::SaveSettings { settings, reconnect } => {
@@ -411,6 +411,7 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
         return Err("Seerr is turned off. Enable it in Settings to search and request.".into());
     }
     let raw = cfg.settings.seerr_url.trim();
+    let user = cfg.settings.seerr_username.trim().to_string();
     if raw.is_empty() {
         return Err("Seerr URL is not set. Add it in Settings.".into());
     }
@@ -420,17 +421,34 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
             return Ok(c.clone());
         }
     }
-    let key = crate::config::load_seerr_key(&url)
-        .ok_or_else(|| "No Seerr API key saved. Add it in Settings.".to_string())?;
-    let c = SeerrClient::new(&url, &key).map_err(|e| e.to_string())?;
+    let c = if user.is_empty() {
+        let key = crate::config::load_seerr_key(&url)
+            .ok_or_else(|| "No Seerr API key saved. Add it in Settings.".to_string())?;
+        SeerrClient::new(&url, &key)
+    } else {
+        let pw = crate::config::load_seerr_login(&url)
+            .ok_or_else(|| "No Seerr password saved. Add it in Settings.".to_string())?;
+        SeerrClient::with_login(&url, &user, &pw)
+    }
+    .map_err(|e| e.to_string())?;
     *cache = Some(c.clone());
     Ok(c)
 }
 
 /// Handle SaveSeerr: validate before persisting anything when enabling.
-async fn save_seerr(cfg: &mut Config, enabled: bool, url: &str, api_key: Option<String>) -> MainMsg {
+async fn save_seerr(
+    cfg: &mut Config,
+    enabled: bool,
+    url: &str,
+    username: &str,
+    password: Option<String>,
+    api_key: Option<String>,
+) -> MainMsg {
     let fail = |m: String| MainMsg::SeerrStatus { ok: false, message: m };
     let key_in = api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    let pw_in = password.filter(|p| !p.is_empty());
+    let user = username.trim().to_string();
+    let use_login = !user.is_empty();
     let trimmed = url.trim();
     if !enabled {
         if !trimmed.is_empty() {
@@ -438,7 +456,11 @@ async fn save_seerr(cfg: &mut Config, enabled: bool, url: &str, api_key: Option<
             if let Some(k) = &key_in {
                 crate::config::store_seerr_key(&n, k);
             }
+            if let Some(p) = &pw_in {
+                crate::config::store_seerr_login(&n, p);
+            }
             cfg.settings.seerr_url = n;
+            cfg.settings.seerr_username = user;
         }
         cfg.settings.seerr_enabled = false;
         crate::config::save_config(cfg);
@@ -448,20 +470,33 @@ async fn save_seerr(cfg: &mut Config, enabled: bool, url: &str, api_key: Option<
         Ok(n) => n,
         Err(e) => return fail(format!("Invalid Seerr URL: {}", e)),
     };
-    let Some(key) = key_in.clone().or_else(|| crate::config::load_seerr_key(&n)) else {
-        return fail("Enter your Seerr API key (Seerr > Settings > General).".into());
+    let client = if use_login {
+        let Some(pw) = pw_in.clone().or_else(|| crate::config::load_seerr_login(&n)) else {
+            return fail("Enter your Seerr password (the one you use to sign in with your Jellyfin account).".into());
+        };
+        SeerrClient::with_login(&n, &user, &pw)
+    } else {
+        let Some(key) = key_in.clone().or_else(|| crate::config::load_seerr_key(&n)) else {
+            return fail("Enter your Seerr API key (Seerr > Settings > General), or sign in with your Jellyfin account.".into());
+        };
+        SeerrClient::new(&n, &key)
     };
-    let client = match SeerrClient::new(&n, &key) {
+    let client = match client {
         Ok(c) => c,
         Err(e) => return fail(e.to_string()),
     };
     match client.verify().await {
         Ok((st, me)) => {
-            if key_in.is_some() {
-                crate::config::store_seerr_key(&n, &key);
+            if use_login {
+                if let Some(p) = &pw_in {
+                    crate::config::store_seerr_login(&n, p);
+                }
+            } else if let Some(k) = &key_in {
+                crate::config::store_seerr_key(&n, k);
             }
             cfg.settings.seerr_enabled = true;
             cfg.settings.seerr_url = n;
+            cfg.settings.seerr_username = user;
             crate::config::save_config(cfg);
             MainMsg::SeerrStatus {
                 ok: true,
@@ -1684,7 +1719,7 @@ mod tests {
         let _env = TestEnv::new();
         let m = start_seerr(default_route).await;
         let mut h = H::start(base_cfg());
-        h.send(UiCmd::SaveSeerr { enabled: true, url: format!("{}/", m.url()), api_key: Some(" good-key ".into()) });
+        h.send(UiCmd::SaveSeerr { enabled: true, url: format!("{}/", m.url()), username: String::new(), password: None, api_key: Some(" good-key ".into()) });
         match h.next().await {
             MainMsg::SeerrStatus { ok, message } => {
                 assert!(ok, "{}", message);
@@ -1703,7 +1738,7 @@ mod tests {
         h.send(UiCmd::SeerrSearch { q: "x".into() });
         assert!(matches!(h.next().await, MainMsg::SeerrResults(_)));
         // re-save without a key reuses the stored one
-        h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), api_key: None });
+        h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), username: String::new(), password: None, api_key: None });
         assert!(matches!(h.next().await, MainMsg::SeerrStatus { ok: true, .. }));
     }
 
@@ -1712,7 +1747,7 @@ mod tests {
         let _env = TestEnv::new();
         let m = start_seerr(default_route).await;
         let mut h = H::start(base_cfg());
-        h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), api_key: Some("bad".into()) });
+        h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), username: String::new(), password: None, api_key: Some("bad".into()) });
         match h.next().await {
             MainMsg::SeerrStatus { ok, message } => {
                 assert!(!ok);
@@ -1731,14 +1766,14 @@ mod tests {
     async fn save_seerr_input_errors_and_unreachable() {
         let _env = TestEnv::new();
         let mut h = H::start(base_cfg());
-        h.send(UiCmd::SaveSeerr { enabled: true, url: "nope".into(), api_key: Some("k".into()) });
+        h.send(UiCmd::SaveSeerr { enabled: true, url: "nope".into(), username: String::new(), password: None, api_key: Some("k".into()) });
         assert!(matches!(h.next().await, MainMsg::SeerrStatus { ok: false, .. }));
-        h.send(UiCmd::SaveSeerr { enabled: true, url: "http://127.0.0.1:1".into(), api_key: None });
+        h.send(UiCmd::SaveSeerr { enabled: true, url: "http://127.0.0.1:1".into(), username: String::new(), password: None, api_key: None });
         match h.next().await {
             MainMsg::SeerrStatus { ok: false, message } => assert!(message.contains("API key")),
             o => panic!("{:?}", o),
         }
-        h.send(UiCmd::SaveSeerr { enabled: true, url: "http://127.0.0.1:1".into(), api_key: Some("k".into()) });
+        h.send(UiCmd::SaveSeerr { enabled: true, url: "http://127.0.0.1:1".into(), username: String::new(), password: None, api_key: Some("k".into()) });
         match h.next().await {
             MainMsg::SeerrStatus { ok: false, message } => assert!(message.contains("Could not reach"), "{}", message),
             o => panic!("{:?}", o),
@@ -1751,12 +1786,97 @@ mod tests {
         let _env = TestEnv::new();
         let m = start_seerr(default_route).await;
         let mut h = H::start(seerr_cfg(&m));
-        h.send(UiCmd::SaveSeerr { enabled: false, url: m.url(), api_key: None });
+        h.send(UiCmd::SaveSeerr { enabled: false, url: m.url(), username: String::new(), password: None, api_key: None });
         assert!(matches!(h.next().await, MainMsg::SeerrStatus { ok: true, .. }));
         assert!(!load_config().settings.seerr_enabled);
         assert_eq!(crate::config::load_seerr_key(&m.url()).as_deref(), Some("good-key"));
         h.send(UiCmd::SeerrSearch { q: "x".into() });
         assert!(seerr_err(h.next().await).contains("turned off"));
+        assert!(m.reqs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_seerr_login_mode_end_to_end() {
+        use crate::seerr::testutil::{login_route, LoginState};
+        let _env = TestEnv::new();
+        let st = LoginState::default();
+        let m = start_seerr(login_route("nathan", "pw", st.clone())).await;
+        let mut h = H::start(base_cfg());
+        // wrong password: nothing persisted
+        h.send(UiCmd::SaveSeerr {
+            enabled: true,
+            url: m.url(),
+            username: "nathan".into(),
+            password: Some("bad".into()),
+            api_key: None,
+        });
+        match h.next().await {
+            MainMsg::SeerrStatus { ok: false, message } => assert!(message.contains("sign-in failed"), "{}", message),
+            o => panic!("{:?}", o),
+        }
+        assert!(!load_config().settings.seerr_enabled);
+        assert_eq!(crate::config::load_seerr_login(&m.url()), None);
+        // missing password
+        h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), username: "nathan".into(), password: None, api_key: None });
+        match h.next().await {
+            MainMsg::SeerrStatus { ok: false, message } => assert!(message.contains("password"), "{}", message),
+            o => panic!("{:?}", o),
+        }
+        // good password
+        h.send(UiCmd::SaveSeerr {
+            enabled: true,
+            url: format!("{}/", m.url()),
+            username: " nathan ".into(),
+            password: Some("pw".into()),
+            api_key: None,
+        });
+        match h.next().await {
+            MainMsg::SeerrStatus { ok, message } => {
+                assert!(ok, "{}", message);
+                assert!(message.contains("Nathan"), "{}", message);
+            }
+            o => panic!("{:?}", o),
+        }
+        let c = load_config();
+        assert!(c.settings.seerr_enabled);
+        assert_eq!((c.settings.seerr_url.as_str(), c.settings.seerr_username.as_str()), (m.url().as_str(), "nathan"));
+        assert_eq!(crate::config::load_seerr_login(&m.url()).as_deref(), Some("pw"));
+        assert_eq!(crate::config::load_seerr_key(&m.url()), None);
+        let raw = std::fs::read_to_string(crate::config::config_path()).unwrap();
+        assert!(!raw.contains("\"pw\"") && !raw.contains("password"), "{}", raw);
+        // commands now use the stored password and survive session expiry
+        h.send(UiCmd::SeerrSearch { q: "x".into() });
+        assert!(matches!(h.next().await, MainMsg::SeerrResults(_)));
+        st.expire_sessions();
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 27205, title: "Inception".into() });
+        assert!(matches!(h.next().await, MainMsg::SeerrRequested { .. }));
+        // re-save with no password reuses the stored one
+        h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), username: "nathan".into(), password: None, api_key: None });
+        assert!(matches!(h.next().await, MainMsg::SeerrStatus { ok: true, .. }));
+        // switching to API-key mode clears the username
+        let k = start_seerr(default_route).await;
+        h.send(UiCmd::SaveSeerr {
+            enabled: true,
+            url: k.url(),
+            username: String::new(),
+            password: None,
+            api_key: Some("good-key".into()),
+        });
+        assert!(matches!(h.next().await, MainMsg::SeerrStatus { ok: true, .. }));
+        assert_eq!(load_config().settings.seerr_username, "");
+    }
+
+    #[tokio::test]
+    async fn seerr_login_mode_without_stored_password_makes_no_calls() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut c = base_cfg();
+        c.settings.seerr_enabled = true;
+        c.settings.seerr_url = m.url();
+        c.settings.seerr_username = "nathan".into();
+        let mut h = H::start(c);
+        h.send(UiCmd::SeerrRequests);
+        assert!(seerr_err(h.next().await).contains("password"));
         assert!(m.reqs().is_empty());
     }
 }

@@ -1,6 +1,7 @@
 use super::models::*;
 use crate::jellyfin::urls::{enc, normalize_base_url};
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,6 +14,8 @@ pub enum SeerrError {
     Auth(String),
     /// 409 or an "already requested" message.
     AlreadyRequested(String),
+    /// Jellyfin-account sign-in was refused (or the session could not be established).
+    Login(String),
     Api(u16, String),
     Parse(String),
     /// Caller passed something Seerr can't take (e.g. media type "person").
@@ -32,6 +35,7 @@ impl fmt::Display for SeerrError {
                 write!(f, "That address responded, but it does not look like a Seerr server.")
             }
             SeerrError::Auth(s) => write!(f, "Seerr rejected the API key: {}", s),
+            SeerrError::Login(s) => write!(f, "Seerr sign-in failed: {}", s),
             SeerrError::AlreadyRequested(s) => write!(f, "{}", s),
             SeerrError::Api(c, s) => write!(f, "Seerr error (HTTP {}): {}", c, s),
             SeerrError::Parse(s) => write!(f, "Unexpected Seerr response: {}", s),
@@ -92,14 +96,22 @@ fn check(code: u16, body: &str, what: &str) -> Result<(), SeerrError> {
 }
 
 #[derive(Clone)]
+enum Auth {
+    Key(String),
+    /// Jellyfin-account sign-in. `session` is the `Cookie` header value captured
+    /// from the login response (reqwest's `cookies` feature is not enabled).
+    Login { username: String, password: String, session: Arc<tokio::sync::Mutex<Option<String>>> },
+}
+
+#[derive(Clone)]
 pub struct SeerrClient {
     http: reqwest::Client,
     pub base: String,
-    api_key: String,
+    auth: Auth,
 }
 
 impl SeerrClient {
-    pub fn new(base: &str, api_key: &str) -> Result<Self, SeerrError> {
+    fn build(base: &str, auth: Auth) -> Result<Self, SeerrError> {
         let base = normalize_base_url(base).map_err(SeerrError::BadUrl)?;
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -107,20 +119,119 @@ impl SeerrClient {
             .user_agent("JellyfinMac/0.1.0")
             .build()
             .map_err(|e| SeerrError::Network(e.to_string()))?;
-        Ok(Self { http, base, api_key: api_key.trim().to_string() })
+        Ok(Self { http, base, auth })
     }
 
-    async fn send(&self, rb: reqwest::RequestBuilder, what: &str) -> Result<String, SeerrError> {
-        let r = rb
-            .header("X-Api-Key", &self.api_key)
+    /// API-key mode.
+    pub fn new(base: &str, api_key: &str) -> Result<Self, SeerrError> {
+        Self::build(base, Auth::Key(api_key.trim().to_string()))
+    }
+
+    /// Jellyfin-account mode: signs in lazily, reuses the session cookie, and
+    /// signs in again once if the server answers 401/403.
+    pub fn with_login(base: &str, username: &str, password: &str) -> Result<Self, SeerrError> {
+        Self::build(
+            base,
+            Auth::Login {
+                username: username.trim().to_string(),
+                password: password.to_string(),
+                session: Arc::new(tokio::sync::Mutex::new(None)),
+            },
+        )
+    }
+
+    /// POST /api/v1/auth/jellyfin; returns the `Cookie` header value to replay.
+    async fn login(&self, username: &str, password: &str) -> Result<String, SeerrError> {
+        let r = self
+            .http
+            .post(format!("{}/api/v1/auth/jellyfin", self.base))
             .header("Accept", "application/json")
+            .json(&serde_json::json!({"username": username, "password": password}))
             .send()
             .await
             .map_err(map_err)?;
         let code = r.status().as_u16();
+        let cookies: Vec<String> = r
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter_map(|v| v.split(';').next())
+            .map(|v| v.trim().to_string())
+            .filter(|v| v.contains('=') && !v.ends_with('='))
+            .collect();
         let body = r.text().await.map_err(|e| SeerrError::Network(e.to_string()))?;
-        check(code, &body, what)?;
-        Ok(body)
+        match check(code, &body, "POST /api/v1/auth/jellyfin") {
+            Ok(()) => {}
+            Err(SeerrError::Auth(m)) => {
+                let m = if m.starts_with("invalid API key") { "check your username and password".to_string() } else { m };
+                return Err(SeerrError::Login(m));
+            }
+            Err(SeerrError::Api(404, _)) => return Err(SeerrError::NotSeerr),
+            Err(e) => return Err(e),
+        }
+        if cookies.is_empty() {
+            return Err(SeerrError::Login("the server did not start a session".into()));
+        }
+        Ok(cookies.join("; "))
+    }
+
+    /// Current session cookie, signing in if there is none or if `stale` (the
+    /// cookie the caller just got a 401/403 with) is still the current one.
+    async fn session(&self, stale: Option<&str>) -> Result<String, SeerrError> {
+        let Auth::Login { username, password, session } = &self.auth else {
+            return Ok(String::new());
+        };
+        let mut g = session.lock().await;
+        if let Some(c) = g.as_ref() {
+            if stale != Some(c.as_str()) {
+                return Ok(c.clone());
+            }
+        }
+        let c = self.login(username, password).await?;
+        *g = Some(c.clone());
+        Ok(c)
+    }
+
+    /// `authed == false` skips credentials (public endpoints such as /status).
+    async fn send_with(&self, rb: reqwest::RequestBuilder, what: &str, authed: bool) -> Result<String, SeerrError> {
+        let rb = rb.header("Accept", "application/json");
+        let (code, body) = match &self.auth {
+            Auth::Key(k) => {
+                let r = rb.header("X-Api-Key", k).send().await.map_err(map_err)?;
+                let code = r.status().as_u16();
+                (code, r.text().await.map_err(|e| SeerrError::Network(e.to_string()))?)
+            }
+            Auth::Login { .. } if !authed => {
+                let r = rb.send().await.map_err(map_err)?;
+                let code = r.status().as_u16();
+                (code, r.text().await.map_err(|e| SeerrError::Network(e.to_string()))?)
+            }
+            Auth::Login { .. } => {
+                let mut cookie = self.session(None).await?;
+                let mut attempt = 0;
+                loop {
+                    let req = rb.try_clone().ok_or_else(|| SeerrError::Invalid("request not repeatable".into()))?;
+                    let r = req.header(reqwest::header::COOKIE, &cookie).send().await.map_err(map_err)?;
+                    let code = r.status().as_u16();
+                    let body = r.text().await.map_err(|e| SeerrError::Network(e.to_string()))?;
+                    if (code == 401 || code == 403) && attempt == 0 {
+                        attempt += 1;
+                        cookie = self.session(Some(&cookie)).await?; // session expired: sign in again, once
+                        continue;
+                    }
+                    break (code, body);
+                }
+            }
+        };
+        match check(code, &body, what) {
+            Err(SeerrError::Auth(m)) if matches!(self.auth, Auth::Login { .. }) => Err(SeerrError::Login(format!("not permitted ({})", m))),
+            r => r.map(|_| body),
+        }
+    }
+
+    async fn send(&self, rb: reqwest::RequestBuilder, what: &str) -> Result<String, SeerrError> {
+        self.send_with(rb, what, true).await
     }
 
     async fn get(&self, path: &str) -> Result<String, SeerrError> {
@@ -130,7 +241,9 @@ impl SeerrClient {
 
     /// GET /api/v1/status: unauthenticated health check; proves it's Seerr.
     pub async fn status(&self) -> Result<SeerrStatusInfo, SeerrError> {
-        let body = self.get("/api/v1/status").await?;
+        let body = self
+            .send_with(self.http.get(format!("{}/api/v1/status", self.base)), "GET /api/v1/status", false)
+            .await?;
         let s: RawStatus = serde_json::from_str(&body).map_err(|_| SeerrError::NotSeerr)?;
         match s.version.filter(|v| !v.is_empty()) {
             Some(version) => Ok(SeerrStatusInfo { version }),
@@ -440,5 +553,216 @@ mod tests {
         }
         let m = start(|_| Resp::text(200, "not json")).await;
         assert!(matches!(client(&m).await.search("x", 1).await, Err(SeerrError::Parse(_))));
+    }
+
+    // ---- Jellyfin-account login mode ---------------------------------------
+
+    async fn login_mock() -> (MockSeerr, LoginState) {
+        let st = LoginState::default();
+        let m = start(login_route("nathan", "pw", st.clone())).await;
+        (m, st)
+    }
+    fn logins(m: &MockSeerr) -> Vec<Req> {
+        m.find("POST", "/api/v1/auth/jellyfin")
+    }
+
+    #[tokio::test]
+    async fn login_signs_in_once_and_reuses_cookie() {
+        let (m, _st) = login_mock().await;
+        let c = SeerrClient::with_login(&m.url(), " nathan ", "pw").unwrap();
+        let (st, me) = c.verify().await.unwrap();
+        assert_eq!((st.version.as_str(), me.display_name.as_str()), ("2.7.2", "Nathan"));
+        c.search("x", 1).await.unwrap();
+        c.requests(20, 0).await.unwrap(); // concurrent detail calls must not log in again
+        c.request("movie", 27205).await.unwrap();
+        let l = logins(&m);
+        assert_eq!(l.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&l[0].body).unwrap();
+        assert_eq!(body, serde_json::json!({"username": "nathan", "password": "pw"}));
+        for r in m.reqs().iter().filter(|r| r.path != "/api/v1/auth/jellyfin" && r.path != "/api/v1/status") {
+            assert_eq!(r.headers["cookie"], "connect.sid=s0; locale=en", "{} {}", r.method, r.path);
+            assert!(!r.headers.contains_key("x-api-key"));
+        }
+        // status is public: no credentials, and it did not trigger the login
+        assert!(!m.find("GET", "/api/v1/status")[0].headers.contains_key("cookie"));
+    }
+
+    #[tokio::test]
+    async fn login_wrong_password_is_a_login_error() {
+        let (m, _st) = login_mock().await;
+        let c = SeerrClient::with_login(&m.url(), "nathan", "nope").unwrap();
+        match c.verify().await.unwrap_err() {
+            SeerrError::Login(msg) => assert!(msg.contains("Invalid credentials"), "{}", msg),
+            e => panic!("{:?}", e),
+        }
+        assert!(matches!(c.search("x", 1).await, Err(SeerrError::Login(_))));
+        assert!(SeerrError::Login("x".into()).to_string().starts_with("Seerr sign-in failed"));
+        // 401 with no message gets a friendly one
+        let m2 = start(|r| if r.path == "/api/v1/status" { default_route(r) } else { Resp::text(401, "") }).await;
+        match SeerrClient::with_login(&m2.url(), "a", "b").unwrap().verify().await.unwrap_err() {
+            SeerrError::Login(msg) => assert!(msg.contains("username and password"), "{}", msg),
+            e => panic!("{:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_not_a_seerr_server() {
+        let m = start(|_| Resp::json(404, serde_json::json!({"message": "nope"}))).await;
+        let c = SeerrClient::with_login(&m.url(), "a", "b").unwrap();
+        assert_eq!(c.me().await.unwrap_err(), SeerrError::NotSeerr);
+    }
+
+    #[tokio::test]
+    async fn login_session_expiry_relogs_in_once_and_retries() {
+        let (m, st) = login_mock().await;
+        let c = SeerrClient::with_login(&m.url(), "nathan", "pw").unwrap();
+        c.me().await.unwrap();
+        assert_eq!(logins(&m).len(), 1);
+        st.expire_sessions();
+        let page = c.search("x", 1).await.unwrap(); // 403 -> login -> retry
+        assert_eq!(page.results.len(), 3);
+        assert_eq!(logins(&m).len(), 2);
+        let searches = m.find("GET", "/api/v1/search");
+        assert_eq!(searches.len(), 2);
+        assert_eq!(searches[0].headers["cookie"], "connect.sid=s0; locale=en");
+        assert_eq!(searches[1].headers["cookie"], "connect.sid=s1; locale=en");
+        // a POST body survives the retry intact
+        st.expire_sessions();
+        c.request("tv", 1399).await.unwrap();
+        let posts = m.find("POST", "/api/v1/request");
+        assert_eq!(posts.len(), 2);
+        assert_eq!(posts[0].body, posts[1].body);
+        assert!(posts[1].body.contains("\"seasons\":\"all\""));
+        assert_eq!(logins(&m).len(), 3);
+        // the new session is reused afterwards
+        c.me().await.unwrap();
+        assert_eq!(logins(&m).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn login_relogin_failure_and_persistent_403_do_not_loop() {
+        let (m, st) = login_mock().await;
+        let c = SeerrClient::with_login(&m.url(), "nathan", "pw").unwrap();
+        c.me().await.unwrap();
+        st.expire_sessions();
+        st.deny_login.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(c.me().await, Err(SeerrError::Login(_))));
+        assert_eq!(logins(&m).len(), 2); // initial + exactly one retry
+        st.deny_login.store(false, std::sync::atomic::Ordering::SeqCst);
+        // a genuine permission error (403 even with a fresh session) is reported after one relogin
+        match c.request("movie", 997).await.unwrap_err() {
+            SeerrError::Login(msg) => assert!(msg.contains("quota"), "{}", msg),
+            e => panic!("{:?}", e),
+        }
+        assert_eq!(m.find("POST", "/api/v1/request").len(), 2);
+        assert_eq!(logins(&m).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn login_without_set_cookie_is_an_error() {
+        let m = start(|r| {
+            if r.path == "/api/v1/auth/jellyfin" { Resp::json(200, serde_json::json!({"id": 1})) } else { default_route(r) }
+        })
+        .await;
+        let c = SeerrClient::with_login(&m.url(), "a", "b").unwrap();
+        assert!(matches!(c.me().await, Err(SeerrError::Login(m)) if m.contains("session")));
+    }
+
+    #[tokio::test]
+    async fn login_mode_maps_other_errors_like_key_mode() {
+        let (m, _st) = login_mock().await;
+        let c = SeerrClient::with_login(&m.url(), "nathan", "pw").unwrap();
+        assert!(matches!(c.request("movie", 999).await, Err(SeerrError::AlreadyRequested(_))));
+        assert!(matches!(c.request("movie", 996).await, Err(SeerrError::Api(500, _))));
+    }
+
+    /// Read-only smoke test against a real server. Never creates or deletes
+    /// anything (the only POST is the sign-in itself).
+    ///   SEERR_LIVE_URL=https://seerr.example SEERR_LIVE_USER=name \
+    ///   SEERR_LIVE_PASS_FILE=/path/to/password-file \
+    ///   cargo test -- --ignored seerr_live --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn seerr_live() {
+        let (Ok(url), Ok(user), Ok(pf)) = (
+            std::env::var("SEERR_LIVE_URL"),
+            std::env::var("SEERR_LIVE_USER"),
+            std::env::var("SEERR_LIVE_PASS_FILE"),
+        ) else {
+            panic!("set SEERR_LIVE_URL, SEERR_LIVE_USER and SEERR_LIVE_PASS_FILE");
+        };
+        let pass = std::fs::read_to_string(&pf).expect("password file");
+        let c = SeerrClient::with_login(&url, &user, pass.trim_end_matches(['\r', '\n'])).unwrap();
+
+        let st = c.status().await.expect("status");
+        println!("status: version {}", st.version);
+        assert!(!st.version.is_empty());
+
+        let me = c.me().await.expect("me (login)");
+        println!("me: id={} name={}", me.id, me.display_name);
+        assert!(me.id > 0 && !me.display_name.is_empty());
+
+        for (q, expect) in [("dune", "dune"), ("the office", "office")] {
+            let page = c.search(q, 1).await.expect("search");
+            println!("search {:?}: page {}/{} total {} -> {} kept", q, page.page, page.total_pages, page.total_results, page.results.len());
+            assert!(page.page == 1 && page.total_pages >= 1 && page.total_results > 0);
+            assert!(!page.results.is_empty());
+            assert!(page.results.iter().any(|r| r.title.to_lowercase().contains(expect)), "no title containing {:?}", expect);
+            for r in page.results.iter().take(8) {
+                println!(
+                    "  {:5} {:>7} {:<40} year={:?} avail={:?} req={:?} poster={:?}",
+                    r.media_type, r.tmdb_id, r.title, r.year, r.availability, r.request_status, r.poster_path
+                );
+            }
+            for r in &page.results {
+                assert!(r.media_type == "movie" || r.media_type == "tv");
+                assert!(r.tmdb_id > 0 && !r.title.is_empty(), "{:?}", r);
+                if let Some(y) = r.year {
+                    assert!((1870..=2100).contains(&y), "{:?}", r);
+                }
+                if let Some(p) = &r.poster_path {
+                    assert!(p.starts_with('/'), "{:?}", r);
+                    assert!(poster_url(p).starts_with("https://image.tmdb.org/"));
+                }
+            }
+            // availability/request_status must agree with each other
+            for r in &page.results {
+                if r.request_status.is_some() {
+                    assert_ne!(r.availability, Availability::NotRequested, "{:?}", r);
+                }
+            }
+        }
+
+        let reqs = c.requests(20, 0).await.expect("requests");
+        println!("requests: {} items", reqs.len());
+        for r in reqs.iter().take(20) {
+            println!(
+                "  #{:<5} {:5} {:>7} {:<40} year={:?} status={:?} avail={:?} by={:?} at={}",
+                r.request_id, r.media_type, r.tmdb_id, r.title, r.year, r.status, r.availability, r.requested_by, r.created_at
+            );
+        }
+        for r in &reqs {
+            assert!(r.request_id > 0 && r.tmdb_id > 0);
+            assert!(r.media_type == "movie" || r.media_type == "tv", "{:?}", r);
+            assert!(!r.title.starts_with("TMDB #"), "title enrichment failed: {:?}", r);
+            assert!(r.status != RequestStatus::Unknown, "{:?}", r);
+            assert!(!r.requested_by.is_empty(), "{:?}", r);
+            assert!(r.created_at.starts_with("20"), "{:?}", r);
+        }
+        // A title that has a request must show up as requested/available in search.
+        if let Some(first) = reqs.first() {
+            let page = c.search(&first.title, 1).await.expect("search for requested title");
+            let hit = page
+                .results
+                .iter()
+                .find(|r| r.tmdb_id == first.tmdb_id && r.media_type == first.media_type)
+                .unwrap_or_else(|| panic!("{:?} not found in its own search", first.title));
+            println!("cross-check {:?}: avail={:?} req={:?}", hit.title, hit.availability, hit.request_status);
+            assert_eq!(hit.availability, first.availability);
+            assert_ne!(hit.availability, Availability::NotRequested);
+        }
+        // newest first
+        let times: Vec<&str> = reqs.iter().map(|r| r.created_at.as_str()).collect();
+        assert!(times.windows(2).all(|w| w[0] >= w[1]), "not newest-first: {:?}", times);
     }
 }
