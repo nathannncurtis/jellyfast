@@ -145,7 +145,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     let pop: *mut Object = msg_send![class!(NSPopUpButton), alloc];
     let pop: *mut Object = msg_send![pop, initWithFrame: rect(0., 0., 120., 24.) pullsDown: NO];
     let arr: *mut Object = msg_send![class!(NSMutableArray), array];
-    for t in ["Name", "Date Added", "Rating", "Last Played"] {
+    for (t, _, _) in crate::app::library_query::SORT_CHOICES {
         let _: () = msg_send![arr, addObject: ns(t)];
     }
     let _: () = msg_send![pop, addItemsWithTitles: arr];
@@ -157,6 +157,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(header, pop);
     autorel(pop);
     ui.sort_popup = Ptr(pop);
+    sync_sort_popup();
 
     // Grid scroll view
     let grid_area = rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h - TITLEBAR_H - HEADER_H - SP3);
@@ -170,6 +171,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     autorel(sc);
     ui.lib_scroll = Ptr(sc);
     crate::ui::home::build_scroll(content_host, grid_area);
+    crate::ui::seerr::build_host(content_host, grid_area);
 
     let grid_cls = *GRID_CLASS.get().unwrap();
     let grid: *mut Object = msg_send![grid_cls, alloc];
@@ -254,8 +256,16 @@ pub(crate) unsafe fn build_window_and_ui() {
     // about:blank won't play; we replace the item on every real playback.
     ui.player = Ptr::retained(player);
     let _: () = msg_send![avv, setPlayer: player];
+    // AirPlay: the player may send video to an AirPlay receiver. While an external display is
+    // mirrored, keep playback here (NO), so a plugged-in monitor does not take the video.
+    let _: () = msg_send![player, setAllowsExternalPlayback: YES];
+    let _: () = msg_send![player, setUsesExternalPlaybackWhileExternalScreenIsActive: NO];
+    let _: () = msg_send![player, addObserver: ui.ctl.get()
+        forKeyPath: ns("externalPlaybackActive") options: 1usize context: nil()];
     let _: () = msg_send![player, setVolume: ui.cfg.volume.clamp(0.0, 1.0) as f32];
     crate::ui::player::build_player_chrome(ph, avv, b);
+    // Play On remote bar: above the player and the library, so it is added last.
+    crate::ui::cast::build(content, b);
 
     // --- Login card ---
     let card_w = 380.;
@@ -393,6 +403,7 @@ pub(crate) unsafe fn build_window_and_ui() {
         selector: sel!(jrTick:) userInfo: nil() repeats: YES];
     ui.timer = Ptr(timer);
 
+    load_themes();
     apply_theme();
     // Launch state: only the login card (the library chrome is hidden until a
     // session exists); `app_did_finish_launch` turns it into a connecting state.
@@ -403,25 +414,116 @@ pub(crate) unsafe fn add_arranged(stack: *mut Object, v: *mut Object, _top: CGFl
     let _: () = msg_send![stack, addArrangedSubview: v];
 }
 
+/// Apply the saved Appearance, Theme and Accent app-wide. Safe to call again at any
+/// time: colours resolve through the active palette, so live views repaint.
+/// Note shown on the Settings Theme row when the selection fell back (missing or invalid
+/// palette, or a palette of the wrong base). Empty when all is well.
+pub(crate) static THEME_NOTE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// Dark state the last `apply_theme` resolved under Follow system (polled by `sync_system_appearance`).
+static SYSTEM_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Theme setting in effect. Self-test only: JELLYFAST_APPEARANCE=light|dark pins
+/// Follow system to that appearance, so screenshots can be taken per mode. A chosen
+/// theme is never overridden.
+unsafe fn theme_selection(ui: &crate::platform::appkit::Ui) -> String {
+    let cfg = if ui.cfg.settings.theme.is_empty() { "system".to_string() } else { ui.cfg.settings.theme.clone() };
+    if cfg != "system" {
+        return cfg;
+    }
+    let forced = if crate::app::selftest::enabled() { std::env::var("JELLYFAST_APPEARANCE").ok() } else { None };
+    forced.filter(|f| f == "light" || f == "dark").unwrap_or(cfg)
+}
+
+/// Whether the system (or self-test) appearance is dark right now.
+unsafe fn effective_is_dark() -> bool {
+    let app = NSApp_obj();
+    let ap: *mut Object = msg_send![app, effectiveAppearance];
+    if ap.is_null() {
+        return false;
+    }
+    let name: *mut Object = msg_send![ap, name];
+    !name.is_null() && to_str(name).contains("Dark")
+}
+
+unsafe fn NSApp_obj() -> *mut Object {
+    msg_send![class!(NSApplication), sharedApplication]
+}
+
+/// Apply the saved Appearance and Theme app-wide: the palette, the NSApp appearance and
+/// a repaint of every window. Safe to call at any time; playback is not touched.
 pub(crate) unsafe fn apply_theme() {
     let ui = UI.get_mut().unwrap();
-    // Self-test only: JELLYFAST_APPEARANCE=light|dark pins the appearance for screenshots.
-    let forced = if crate::app::selftest::enabled() { std::env::var("JELLYFAST_APPEARANCE").ok() } else { None };
-    let theme = forced.unwrap_or_else(|| ui.cfg.settings.theme.clone());
-    let appearance: *mut Object = match theme.as_str() {
-        "light" => {
-            let a: *mut Object =
-                msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameAqua")];
-            a
-        }
-        "dark" => {
-            let a: *mut Object =
-                msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameDarkAqua")];
-            a
-        }
-        _ => nil(),
+    let sel = theme_selection(ui);
+    let cache = ui.cfg.palette_cache.clone();
+    let app = ui.app.get();
+    let (pick, want) = if sel == "system" {
+        // Follow macOS: drop any override first so the effective appearance is the system's.
+        let _: () = msg_send![app, setAppearance: nil()];
+        let dark = effective_is_dark();
+        SYSTEM_DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+        let s = &ui.cfg.settings;
+        let pick = if dark {
+            if s.system_dark.is_empty() { "dark".to_string() } else { s.system_dark.clone() }
+        } else if s.system_light.is_empty() {
+            "light".to_string()
+        } else {
+            s.system_light.clone()
+        };
+        (pick, Some(dark))
+    } else {
+        (sel.clone(), None)
     };
-    let _: () = msg_send![ui.app.get(), setAppearance: appearance];
+    let r = crate::ui::palettes::resolve(&pick, want, &cache);
+    crate::ui::theme::set_active(r.theme.as_ref());
+    if let Ok(mut n) = THEME_NOTE.lock() {
+        *n = r.note.clone().unwrap_or_default();
+    }
+    if want.is_none() {
+        let ap = if r.dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
+        let a: *mut Object = msg_send![class!(NSAppearance), appearanceNamed: ns(ap)];
+        let _: () = msg_send![app, setAppearance: a];
+    }
+    // Same-appearance swaps (Midnight to Warm) do not notify views, so repaint every
+    // window's tree by hand. Layers re-resolve their colours in that pass.
+    let wins: *mut Object = msg_send![app, windows];
+    let n: usize = msg_send![wins, count];
+    for i in 0..n {
+        let w: *mut Object = msg_send![wins, objectAtIndex: i];
+        let cv: *mut Object = msg_send![w, contentView];
+        crate::ui::theme::refresh_appearance_tree(cv);
+    }
+}
+
+/// Seed and scan the palette folder, keeping last accepted palettes in the config cache.
+/// Saves the config only when the cache actually changed.
+pub(crate) unsafe fn load_themes() {
+    let ui = UI.get_mut().unwrap();
+    let before = ui.cfg.palette_cache.clone();
+    let n = crate::ui::palettes::load_all(&mut ui.cfg.palette_cache);
+    tracing::info!("themes: {n} palette(s) loaded");
+    if ui.cfg.palette_cache != before {
+        crate::config::save_config_keeping_session(&ui.cfg);
+    }
+}
+
+/// Rescan palettes, re-apply the theme, and refresh the Settings pickers.
+pub(crate) unsafe fn reload_themes() {
+    load_themes();
+    apply_theme();
+    let ui = UI.get_mut().unwrap();
+    crate::ui::settings::fill_theme_popups(&ui.cfg);
+}
+
+/// Called from the 1 s UI tick: under Follow system, switch palettes when macOS flips
+/// between light and dark. Cheap; does nothing otherwise.
+pub(crate) unsafe fn sync_system_appearance() {
+    let ui = UI.get_mut().unwrap();
+    if theme_selection(ui) != "system" {
+        return;
+    }
+    if effective_is_dark() != SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed) {
+        apply_theme();
+    }
 }
 
 /// Native menu bar, generated from `ui::shortcuts::SHORTCUTS`.
@@ -510,7 +612,7 @@ pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, ta
     let cls = *ROW_CLASS.get().unwrap();
     let row: *mut Object = msg_send![cls, alloc];
     let row: *mut Object = msg_send![row, initWithFrame: rect(0., 0., w, SIDEBAR_ROW_H)];
-    let bg = surface(rect(0., 0., w, SIDEBAR_ROW_H), C_FILL_SEL, R_ROW);
+    let bg = surface(rect(0., 0., w, SIDEBAR_ROW_H), C_FILL_ACTIVE, R_ROW);
     let _: () = msg_send![bg, setTransparent: YES];
     set_autoresize(bg, RESIZE_W | RESIZE_H);
     add_sub(row, bg);
@@ -555,6 +657,9 @@ pub(crate) unsafe fn sidebar_refresh_selection() {
     }
     if !ui.browse_row.get().is_null() {
         row_set_selected(ui.browse_row.get(), ui.browse_active);
+    }
+    if !ui.seerr.row.get().is_null() {
+        row_set_selected(ui.seerr.row.get(), ui.seerr.active);
     }
     for (i, (row, _)) in ui.rows.iter().enumerate() {
         row_set_selected(*row, ui.selected_view == Some(i));
@@ -604,6 +709,7 @@ pub(crate) unsafe fn set_layout_mode(mode: crate::config::LayoutMode) {
     } else {
         sidebar_refresh_selection();
     }
+    crate::ui::home::layout_changed();
 }
 
 /// Rebuild the sidebar rows from `ui.views`. Callers set `ui.views` first.
@@ -634,20 +740,28 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
     ui.browse_row = Ptr(nil());
 
     if unified {
-        // One big library: Browse, Search and Requests replace the library list.
+        // One big library: Browse replaces the library list.
         let browse = sidebar_row("Browse", "square.grid.2x2", sel!(browseSelected:), -1);
         let _: () = msg_send![stack, addView: browse inGravity: 1isize];
         ui.side_dyn.push(browse);
         ui.browse_row = Ptr(browse);
         row_set_selected(browse, ui.browse_active);
-        for (title, symbol_name, action) in [
-            ("Search", "magnifyingglass", sel!(focusSearch:)),
-            ("Requests", "tray.full", sel!(openRequests:)),
-        ] {
-            let r = sidebar_row(title, symbol_name, action, -1);
-            let _: () = msg_send![stack, addView: r inGravity: 1isize];
-            ui.side_dyn.push(r);
-        }
+    }
+    // Requests: a full-size tab in both layouts, present once Seerr is set up.
+    let configured = crate::ui::seerr::is_configured(&ui.cfg.settings);
+    ui.seerr.in_sidebar = configured;
+    ui.seerr.row = Ptr(nil());
+    if configured {
+        let req = sidebar_row("Requests", "tray.full", sel!(requestsSelected:), -1);
+        let _: () = msg_send![stack, addView: req inGravity: 1isize];
+        ui.side_dyn.push(req);
+        ui.seerr.row = Ptr(req);
+        row_set_selected(req, ui.seerr.active);
+    }
+    if unified {
+        let r = sidebar_row("Search", "magnifyingglass", sel!(focusSearch:), -1);
+        let _: () = msg_send![stack, addView: r inGravity: 1isize];
+        ui.side_dyn.push(r);
     }
     if !unified {
         // Library list (separate layout): a header, then one row per library.
@@ -679,12 +793,7 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
         }
     }
 
-    // Footer (bottom gravity): Request (separate layout only), hairline, user row.
-    if !unified {
-        let req = sidebar_row("Request…", "plus.magnifyingglass", sel!(openSeerr:), 0);
-        let _: () = msg_send![stack, addView: req inGravity: 3isize];
-        ui.side_dyn.push(req);
-    }
+    // Footer (bottom gravity): hairline, user row.
     let hl = hairline(rect(0., 0., SIDEBAR_W - 2. * SP3, 1.));
     fix_height(hl, 1.);
     let _: () = msg_send![stack, addView: hl inGravity: 3isize];
@@ -855,8 +964,7 @@ mod tests {
 }
 
 unsafe fn color_a_black_fn(a: f64) -> *mut Object {
-    let b: *mut Object = msg_send![class!(NSColor), blackColor];
-    msg_send![b, colorWithAlphaComponent: a]
+    crate::ui::theme::color_a(crate::ui::theme::Col::Scrim, a)
 }
 
 // ---- Header band ----------------------------------------------------------------------
@@ -974,11 +1082,20 @@ pub(crate) unsafe fn show_state(symbol_name: &str, title: &str, body: &str, retr
     set_hidden(ui.status_label.get(), false);
 }
 
+/// Show the saved sort choice in the header popup (on launch, and whenever it changes).
+pub(crate) unsafe fn sync_sort_popup() {
+    let ui = UI.get_mut().unwrap();
+    let index = crate::app::library_query::sort_index(ui.cfg.sort_by.as_deref());
+    let _: () = msg_send![ui.sort_popup.get(), selectItemAtIndex: index as isize];
+}
+
 /// Called when a load begins. `first` = a different view (skeleton), otherwise keep
 /// what is on screen and spin in the header.
 pub(crate) unsafe fn begin_load(first: bool) {
     crate::ui::home::leave();
+    crate::ui::seerr::leave();
     let ui = UI.get_mut().unwrap();
+    ui.sort_applies = true;
     hide_state();
     if first || ui.items.is_empty() {
         ui.items.clear();

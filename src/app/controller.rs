@@ -57,6 +57,11 @@ pub(crate) fn handle_main(msg: MainMsg) {
                     None if unified && last.as_deref() == Some(crate::ui::home::BROWSE_ID) => {
                         crate::ui::home::enter_browse()
                     }
+                    None if last.as_deref() == Some(crate::ui::seerr::REQUESTS_ID)
+                        && crate::ui::seerr::is_configured(&ui.cfg.settings) =>
+                    {
+                        crate::ui::seerr::enter()
+                    }
                     None => crate::ui::home::enter(),
                 }
                 // First successful login with no layout chosen yet: ask how to browse.
@@ -74,7 +79,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
         },
         MainMsg::Resuming { url } => login_connecting(&url),
         MainMsg::HomeLoaded(home) => unsafe {
-            crate::ui::home::set_rows(home.rows);
+            crate::ui::home::set_rows(home);
         },
         MainMsg::ItemsLoaded { title, items, can_go_back } => unsafe {
             crate::ui::detail::hide();
@@ -85,6 +90,8 @@ pub(crate) fn handle_main(msg: MainMsg) {
             set_text(ui.header_title.get(), &title);
             set_hidden(ui.lib_back.get(), !can_go_back);
             set_busy(false);
+            // The sort popup orders libraries, Browse and filter results; not album tracks.
+            set_hidden(ui.sort_popup.get(), !ui.sort_applies);
             set_count(&count_label(&items), false);
             if items.is_empty() {
                 let q = read_field(ui.search.get());
@@ -164,6 +171,8 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::SeerrRequestList(v) => crate::ui::seerr::on_request_list(v),
         MainMsg::SeerrPoster { path, bytes } => crate::ui::seerr::on_poster(path, &bytes),
         MainMsg::SeerrError(m) => crate::ui::seerr::on_error(m),
+        MainMsg::SessionsLoaded(list) => crate::ui::cast::on_sessions(list),
+        MainMsg::CastError(e) => crate::ui::cast::on_error(e),
         MainMsg::SeerrStatus { ok, message } => unsafe {
             crate::ui::seerr::on_save_status(ok, message);
         },

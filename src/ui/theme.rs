@@ -113,6 +113,11 @@ pub unsafe fn font(t: TypeStyle) -> *mut Object {
 }
 
 // ---- Colour roles ------------------------------------------------------------
+//
+// Every role resolves through a dynamic NSColor whose provider reads the active
+// palette (set by `set_active`, applied by shell::apply_theme). Views keep the colour
+// object they were built with, so switching theme repaints them without a rebuild;
+// layer-backed colours re-resolve through `refresh_appearance_tree`.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Col {
     Text,
@@ -123,13 +128,22 @@ pub enum Col {
     Separator,
     FillSel,
     FillHover,
+    FillActive,
     Accent,
+    AccentHover,
+    OnAccent,
     Danger,
     Ok,
     Warn,
     OnMedia,
     OnMedia2,
     Clear,
+    /// Black scrims behind artwork and video chrome (palette `overlay`).
+    Scrim,
+    /// Drop-shadow colour (palette `shadow`).
+    Shadow,
+    /// Backdrop behind the video while a title loads (palette `tint`).
+    PlayerBackdrop,
 }
 pub const C_TEXT: Col = Col::Text;
 pub const C_TEXT2: Col = Col::Text2;
@@ -139,6 +153,7 @@ pub const C_CARD: Col = Col::Card;
 pub const C_SEPARATOR: Col = Col::Separator;
 pub const C_FILL_SEL: Col = Col::FillSel;
 pub const C_FILL_HOVER: Col = Col::FillHover;
+pub const C_FILL_ACTIVE: Col = Col::FillActive;
 pub const C_ACCENT: Col = Col::Accent;
 pub const C_DANGER: Col = Col::Danger;
 pub const C_OK: Col = Col::Ok;
@@ -146,8 +161,78 @@ pub const C_WARN: Col = Col::Warn;
 pub const C_ON_MEDIA: Col = Col::OnMedia;
 pub const C_ON_MEDIA2: Col = Col::OnMedia2;
 
-/// Semantic NSColor for a role (autoreleased / shared, never freed by us).
-pub unsafe fn color(c: Col) -> *mut Object {
+/// Every role, in the order the provider blocks are numbered.
+const ALL_ROLES: [Col; 21] = [
+    Col::Text,
+    Col::Text2,
+    Col::Text3,
+    Col::Canvas,
+    Col::Card,
+    Col::Separator,
+    Col::FillSel,
+    Col::FillHover,
+    Col::FillActive,
+    Col::Accent,
+    Col::AccentHover,
+    Col::OnAccent,
+    Col::Danger,
+    Col::Ok,
+    Col::Warn,
+    Col::OnMedia,
+    Col::OnMedia2,
+    Col::Clear,
+    Col::Scrim,
+    Col::Shadow,
+    Col::PlayerBackdrop,
+];
+
+/// Palette slot (index into `palettes::KEYS`) a role reads, if it is palette-driven.
+fn slot_of(c: Col) -> Option<usize> {
+    Some(match c {
+        Col::Card => 0,          // window
+        Col::Canvas => 1,        // panel
+        Col::FillSel => 2,       // surface
+        Col::FillHover => 3,     // surface_hover
+        Col::FillActive => 4,    // surface_active
+        Col::Separator => 5,     // outline
+        Col::Text => 6,
+        Col::Text2 => 7,         // secondary
+        Col::Text3 => 8,         // dim
+        Col::Accent => 9,
+        Col::AccentHover => 10,
+        Col::OnAccent => 11,
+        Col::Danger => 12,
+        Col::Warn => 13,         // warning
+        Col::Scrim => 14,        // overlay
+        Col::Shadow => 15,
+        Col::PlayerBackdrop => 16, // tint
+        Col::Ok => 17,
+        Col::OnMedia | Col::OnMedia2 | Col::Clear => return None,
+    })
+}
+
+/// Colours of the active palette, indexed by `palettes::KEYS`. `None` means the
+/// Jellyfast built-in (system colours, following the appearance).
+static ACTIVE: std::sync::RwLock<Option<[crate::ui::palettes::Rgba; crate::ui::palettes::SLOTS]>> =
+    std::sync::RwLock::new(None);
+
+/// Make `theme` the active palette (`None` = Jellyfast Light/Dark). Views repaint on
+/// their next draw; call `refresh_appearance_tree` to re-resolve layers now.
+pub fn set_active(theme: Option<&crate::ui::palettes::Theme>) {
+    if let Ok(mut a) = ACTIVE.write() {
+        *a = theme.map(|t| t.colors);
+    }
+}
+
+unsafe fn rgb_color(v: u32, alpha: f64) -> *mut Object {
+    let r = ((v >> 16) & 0xff) as f64 / 255.;
+    let g = ((v >> 8) & 0xff) as f64 / 255.;
+    let b = (v & 0xff) as f64 / 255.;
+    msg_send![class!(NSColor), colorWithSRGBRed: r green: g blue: b alpha: alpha]
+}
+
+/// System colour for a role under the Jellyfast built-ins (adapts to the appearance).
+unsafe fn system_color(c: Col) -> *mut Object {
     let cls = class!(NSColor);
     match c {
         Col::Text => msg_send![cls, labelColor],
@@ -156,7 +241,7 @@ pub unsafe fn color(c: Col) -> *mut Object {
         Col::Canvas => msg_send![cls, controlBackgroundColor],
         Col::Card => msg_send![cls, windowBackgroundColor],
         Col::Separator => msg_send![cls, separatorColor],
-        Col::FillSel => {
+        Col::FillSel | Col::FillActive => {
             let ok: BOOL = msg_send![cls, respondsToSelector: sel!(tertiarySystemFillColor)];
             if ok == YES {
                 msg_send![cls, tertiarySystemFillColor]
@@ -172,32 +257,117 @@ pub unsafe fn color(c: Col) -> *mut Object {
                 msg_send![cls, quaternaryLabelColor]
             }
         }
-        Col::Accent => msg_send![cls, controlAccentColor],
-        Col::Danger => msg_send![cls, systemRedColor],
-        Col::Ok => msg_send![cls, systemGreenColor],
-        Col::Warn => msg_send![cls, systemOrangeColor],
-        Col::OnMedia => msg_send![cls, whiteColor],
+        Col::Accent | Col::AccentHover => msg_send![cls, controlAccentColor],
+        Col::OnAccent | Col::OnMedia => msg_send![cls, whiteColor],
         Col::OnMedia2 => {
             let w: *mut Object = msg_send![cls, whiteColor];
             msg_send![w, colorWithAlphaComponent: 0.72f64]
         }
+        Col::Danger => msg_send![cls, systemRedColor],
+        Col::Ok => msg_send![cls, systemGreenColor],
+        Col::Warn => msg_send![cls, systemOrangeColor],
         Col::Clear => msg_send![cls, clearColor],
+        Col::Scrim | Col::Shadow => msg_send![cls, blackColor],
+        Col::PlayerBackdrop => rgb_color(0x212121, 1.0),
     }
+}
+
+/// Resolve one role under the active palette, or the system colour for the built-ins.
+unsafe fn resolve_role(c: Col) -> *mut Object {
+    let slot = slot_of(c);
+    let palette = ACTIVE.read().ok().and_then(|a| *a);
+    match (palette, slot) {
+        (Some(p), Some(s)) => {
+            let (v, a) = p[s];
+            rgb_color(v, a as f64 / 255.)
+        }
+        _ => system_color(c),
+    }
+}
+
+/// Block passed to `colorWithName:dynamicProvider:`. A hand-built block with no
+/// captures (never copied, leaked once per role); the role index sits after the
+/// descriptor.
+#[repr(C)]
+struct RoleBlock {
+    isa: *const std::os::raw::c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: unsafe extern "C" fn(*mut RoleBlock, *mut Object) -> *mut Object,
+    desc: *const BlockDesc,
+    role: usize,
+}
+#[repr(C)]
+struct BlockDesc {
+    reserved: u64,
+    size: u64,
+}
+static BLOCK_DESC: BlockDesc = BlockDesc { reserved: 0, size: std::mem::size_of::<RoleBlock>() as u64 };
+#[link(name = "System", kind = "dylib")]
+extern "C" {
+    static _NSConcreteGlobalBlock: *const std::os::raw::c_void;
+}
+
+unsafe extern "C" fn role_provider(b: *mut RoleBlock, _appearance: *mut Object) -> *mut Object {
+    resolve_role(ALL_ROLES[(*b).role])
+}
+
+thread_local! {
+    static ROLE_COLORS: std::cell::RefCell<[usize; 21]> = const { std::cell::RefCell::new([0; 21]) };
+}
+
+/// Semantic colour for a role (autoreleased; the dynamic object itself is kept alive).
+pub unsafe fn color(c: Col) -> *mut Object {
+    let idx = ALL_ROLES.iter().position(|r| *r == c).unwrap_or(0);
+    let cached = ROLE_COLORS.with(|v| v.borrow()[idx]);
+    if cached != 0 {
+        return cached as *mut Object;
+    }
+    let blk: *mut RoleBlock = Box::leak(Box::new(RoleBlock {
+        isa: _NSConcreteGlobalBlock,
+        flags: 1 << 28, // BLOCK_IS_GLOBAL: the runtime never copies or frees it
+        reserved: 0,
+        invoke: role_provider,
+        desc: &BLOCK_DESC,
+        role: idx,
+    }));
+    let name = ns(&format!("jf.role.{idx}"));
+    let obj: *mut Object = msg_send![class!(NSColor), colorWithName: name dynamicProvider: blk as *mut Object];
+    let _: () = msg_send![obj, retain];
+    ROLE_COLORS.with(|v| v.borrow_mut()[idx] = obj as usize);
+    obj
 }
 /// Role colour with alpha (autoreleased).
 pub unsafe fn color_a(c: Col, a: f64) -> *mut Object {
     let base = color(c);
     msg_send![base, colorWithAlphaComponent: a]
 }
-/// Resolved CGColor for a role under the *current* appearance. Layers that
-/// must follow light/dark need this re-applied from `apply_theme`.
+/// Resolved CGColor for a role under the active palette. Layers that must follow the
+/// theme need this re-applied from `apply_theme` (see `refresh_appearance_tree`).
 pub unsafe fn cg(c: Col) -> *mut Object {
     msg_send![color(c), CGColor]
 }
+pub unsafe fn cg_a(c: Col, alpha: f64) -> *mut Object {
+    msg_send![color_a(c, alpha), CGColor]
+}
 pub unsafe fn cg_black(alpha: f64) -> *mut Object {
-    let b: *mut Object = msg_send![class!(NSColor), blackColor];
-    let c: *mut Object = msg_send![b, colorWithAlphaComponent: alpha];
-    msg_send![c, CGColor]
+    cg_a(Col::Scrim, alpha)
+}
+
+/// Re-resolve layer-backed colours and redraw every view under `root`. Needed when the
+/// palette changes without an appearance flip, since AppKit only notifies on flips.
+pub unsafe fn refresh_appearance_tree(root: *mut Object) {
+    if root.is_null() {
+        return;
+    }
+    let _: () = msg_send![root, viewDidChangeEffectiveAppearance];
+    let _: () = msg_send![root, setNeedsDisplay: YES];
+    let subs: *mut Object = msg_send![root, subviews];
+    let n: usize = msg_send![subs, count];
+    for i in 0..n {
+        let v: *mut Object = msg_send![subs, objectAtIndex: i];
+        refresh_appearance_tree(v);
+    }
 }
 
 // ---- Shadows ---------------------------------------------------------------------

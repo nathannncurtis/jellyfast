@@ -149,6 +149,25 @@ extern "C" fn on_skip_intros(_t: &mut Object, _c: Sel, sender: *mut Object) {
     }
 }
 
+/// Cast button: Play On menu for the open movie, episode or series.
+extern "C" fn on_cast(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    unsafe {
+        let Some(ui) = UI.get_mut() else { return };
+        let Some(item) = ui.detail.item.as_ref() else { return };
+        let series = item.item_type == "Series";
+        let cast_item = crate::ui::cast::CastItem {
+            id: item.id.clone(),
+            title: item.name.clone(),
+            subtitle: meta_line(item),
+            // A series starts at its Next Up episode, so no saved position applies.
+            start_secs: if series { 0. } else { crate::jellyfin::urls::secs_from_ticks(item.resume_ticks) },
+            run_secs: crate::jellyfin::urls::secs_from_ticks(item.run_time_ticks.unwrap_or(0)),
+            series,
+        };
+        crate::ui::cast::open_menu(sender, cast_item);
+    }
+}
+
 extern "C" fn on_watched(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
@@ -210,6 +229,7 @@ pub(crate) unsafe fn register_detail_classes() {
     h.add_method(sel!(detailBack:), on_back as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailPlay:), on_play as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailWatched:), on_watched as extern "C" fn(&mut Object, Sel, *mut Object));
+    h.add_method(sel!(detailCast:), on_cast as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailSeason:), on_season as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailEpisode:), on_episode as extern "C" fn(&mut Object, Sel, *mut Object));
     h.add_method(sel!(detailSkipIntros:), on_skip_intros as extern "C" fn(&mut Object, Sel, *mut Object));
@@ -571,6 +591,11 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
         add_sub(doc, b);
         bx += bw + SP2;
     }
+    // Cast: a movie or episode, or a series (its Next Up episode goes to the device).
+    let (c, cw) = action_button("Cast", "tv", sel!(detailCast:), host, false);
+    set_frame(c, rect(bx, y, cw, BUTTON_H));
+    add_sub(doc, c);
+    bx += cw + SP2;
     let watched = if item.played { "Mark as unwatched" } else { "Mark as watched" };
     let (b, bw) = action_button(watched, "checkmark.circle", sel!(detailWatched:), host, false);
     set_frame(b, rect(bx, y, bw, BUTTON_H));

@@ -1,0 +1,24 @@
+{
+  "base": "dark",
+  "name": "Rose Pine",
+  "colors": {
+    "window": "#191724",
+    "panel": "#1F1D2E",
+    "surface": "#26233A",
+    "surface_hover": "#403D52",
+    "surface_active": "#524F67",
+    "outline": "#403D52",
+    "text": "#E0DEF4",
+    "secondary": "#908CAA",
+    "dim": "#8E8AA8",
+    "accent": "#C4A7E7",
+    "accent_hover": "#EBBCBA",
+    "on_accent": "#191724",
+    "danger": "#EB6F92",
+    "warning": "#F6C177",
+    "overlay": "#0F0E17B3",
+    "shadow": "#00000066",
+    "tint": "#1F1D2E",
+    "ok": "#9CCFD8"
+  }
+}

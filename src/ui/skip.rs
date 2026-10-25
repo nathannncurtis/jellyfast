@@ -275,11 +275,7 @@ unsafe fn sync_series_item() {
 
 /// Seek the current item to `secs`.
 unsafe fn seek(secs: f64) {
-    let ui = UI.get_mut().unwrap();
-    let tm = CMTimeMakeWithSeconds(secs.max(0.), 600);
-    // Zero tolerance: the plain seekToTime: snapped back to 0 in the self-test build.
-    let zero = CMTimeMakeWithSeconds(0.0, 600);
-    let _: () = msg_send![ui.player.get(), seekToTime: tm toleranceBefore: zero toleranceAfter: zero];
+    crate::platform::avkit::seek_to_secs(secs);
 }
 
 pub(crate) unsafe fn position() -> f64 {

@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::jellyfin::models::{ImageTags, ListItem, UserData};
 use crate::platform::appkit::*;
 use crate::platform::avkit::*;
+use crate::ui::cast::STRIP_H;
 use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
 use crate::jellyfin::segments::{NextUp, Segment, SegmentKind};
@@ -157,6 +158,12 @@ fn steps() -> Vec<Step> {
         ("unified: browse grid", s_unified_browse, 150),
         ("unified: sidebar actions and Home", s_unified_actions, 100),
         ("unified: login restores Browse", s_unified_login, 100),
+        ("unified tabs: segmented control on Home", s_tabs_home, 100),
+        ("unified tabs: Movies shows only movies", s_tabs_movies, 100),
+        ("unified tabs: grid re-flows on resize", s_tabs_resize, 150),
+        ("unified tabs: TV Shows shows only series", s_tabs_shows, 100),
+        ("unified tabs: back to Home", s_tabs_home_again, 100),
+        ("unified tabs: tab remembered on return", s_tabs_remember, 100),
         ("settings: layout back to separate", s_layout_settings, 100),
         ("connected: Home wins over a remembered library", s_connected_library, 100),
         ("items: movies", s_items_movies, 100),
@@ -190,24 +197,30 @@ fn steps() -> Vec<Step> {
         ("shortcuts: grid focus (Tab, Return enabled)", s_shortcuts_grid, 50),
         ("shortcuts: help window", s_shortcuts_help, 150),
         ("sort/search/refresh/back", s_nav_actions, 50),
+        ("sort + filter: order, filter, clear", s_sort_filter, 50),
         ("mark watched / open web", s_misc_actions, 50),
         ("detail: movie (long strings, art, actions)", s_detail_movie, 150),
         ("detail: resize relayout, back", s_detail_resize, 150),
         ("detail: series page", s_detail_series, 150),
         ("detail: seasons (picker, episodes, play)", s_detail_seasons, 300),
         ("detail: error toast", s_detail_error, 50),
+        ("cast: detail Cast button and Play On menu", s_cast_detail, 150),
+        ("cast: remote bar controls and audit", s_cast_bar, 200),
+        ("cast: error strip in the library", s_cast_error, 150),
+        ("cast: series Cast button sends the series", s_cast_series, 150),
         ("stop when not playing", s_stop_idle, 50),
         ("playback error (idle)", s_playback_error, 50),
         ("server down/up while idle", s_server_idle, 50),
         ("seerr: open while disabled (inline hint)", s_seerr_disabled, 100),
         ("seerr: open while enabled", s_seerr_enabled, 100),
+        ("seerr: login restores Requests", s_seerr_login_restore, 100),
         ("seerr: results (all availabilities)", s_seerr_results, 100),
         ("seerr: type in search field", s_seerr_typing, 50),
         ("seerr: click Request", s_seerr_request, 100),
         ("seerr: requested + error", s_seerr_replies, 100),
         ("seerr: My requests tab", s_seerr_requests_tab, 100),
         ("seerr: resize window", s_seerr_resize, 150),
-        ("seerr: close and reopen", s_seerr_reopen, 100),
+        ("seerr: leave and return", s_seerr_reopen, 100),
         ("seerr: empty results", s_seerr_empty, 100),
         ("seerr: settings save (open)", s_seerr_settings_open, 700),
         ("seerr: settings status failure", s_seerr_settings_fail, 100),
@@ -223,6 +236,10 @@ fn steps() -> Vec<Step> {
         ("home: back to a library", s_home_leave, 100),
         ("settings: open+cancel", s_settings_cancel, 600),
         ("settings: open+save", s_settings_save, 600),
+        ("themes: load palette from folder", s_themes_palette, 300),
+        ("themes: follow system pickers", s_themes_follow, 300),
+        ("themes: palette screenshots", s_themes_shots, 300),
+        ("themes: restore", s_themes_restore, 100),
         ("libraries: sidebar order + hidden, settings controls", s_library_prefs, 300),
         ("playback: start", s_play_start, 2500),
         // The start-up fade-in of the bars runs for M_FAST (0.12 s) and alphaValue reads
@@ -232,7 +249,10 @@ fn steps() -> Vec<Step> {
         ("player bar: buttons, menus, hover", s_player_bar_buttons, 300),
         ("player bar: auto-hide arm", s_pb_hide_arm, 600),
         ("player bar: auto-hide check", s_pb_hide_check, 50),
+        ("seek: scrubber lands near 50%", s_seek_scrub, 500),
+        ("seek: scrubber landed", s_seek_scrub_check, 500),
         ("playback: controls", s_play_controls, 300),
+        ("player: AirPlay button and external card", s_player_airplay, 150),
         ("playback: subtitle/audio cycle", s_play_cycle, 2300),
         ("playback: toast hides itself", s_toast_hidden, 50),
         ("audit: player (long title, toast, info)", s_audit_player, 200),
@@ -263,6 +283,7 @@ fn steps() -> Vec<Step> {
         ("up next: stop after autoplay", s_upnext_stop, 200),
         ("settings: autoplay and skip default controls", s_settings_skip_controls, 100),
         ("detail: series skip toggle persists", s_detail_skip_toggle, 300),
+        ("cast: player menu casts and stops local playback", s_player_cast, 200),
         ("audio: start (now-playing bar)", s_audio_start, 1500),
         ("audio: bar layout + audit", s_audio_bar, 100),
         ("audio: stop", s_audio_stop, 200),
@@ -271,6 +292,303 @@ fn steps() -> Vec<Step> {
         ("signed out", s_signed_out, 100),
         ("quit", s_quit_prep, 50),
     ]
+}
+
+
+// ---- casting ----------------------------------------------------------------
+const OWN_DEVICE: &str = "dev-self";
+
+/// `GET /Sessions` body: this app's own session, a TV playing an episode, and a web browser.
+fn sessions_json(paused: bool) -> String {
+    serde_json::json!([
+        {"Id": "sess-me", "DeviceId": OWN_DEVICE, "DeviceName": "This Mac", "Client": "Jellyfast", "SupportsRemoteControl": true},
+        {"Id": "sess-tv", "DeviceId": "tv-1", "DeviceName": "Living Room", "Client": "Jellyfin Android TV",
+         "SupportsRemoteControl": true,
+         "NowPlayingItem": {"Id": "ep-1", "Name": "Pilot", "SeriesName": "Show", "RunTimeTicks": 1_200_000_000i64},
+         "PlayState": {"PositionTicks": 300_000_000i64, "IsPaused": paused}},
+        {"Id": "sess-web", "DeviceId": "web-1", "DeviceName": "Office", "Client": "Jellyfin Web", "SupportsRemoteControl": true}
+    ])
+    .to_string()
+}
+
+/// The list the worker would send: parsed by the real filter, with this app's device as own.
+fn own_device_sessions(paused: bool) -> Vec<crate::jellyfin::sessions::RemoteSession> {
+    unsafe {
+        UI.get_mut().unwrap().cfg.device_id = OWN_DEVICE.into();
+    }
+    crate::jellyfin::sessions::parse_sessions(&sessions_json(paused), OWN_DEVICE).unwrap()
+}
+
+/// First NSButton under `v` whose action is `action`.
+unsafe fn find_action(v: *mut Object, action: objc::runtime::Sel, depth: u32) -> *mut Object {
+    if v.is_null() || depth > 8 {
+        return nil();
+    }
+    let is: BOOL = msg_send![v, isKindOfClass: class!(NSButton)];
+    if is == YES {
+        let a: objc::runtime::Sel = msg_send![v, action];
+        if a == action {
+            return v;
+        }
+    }
+    let subs: *mut Object = msg_send![v, subviews];
+    let n: NSUInteger = msg_send![subs, count];
+    for i in 0..n {
+        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let f = find_action(c, action, depth + 1);
+        if !f.is_null() {
+            return f;
+        }
+    }
+    nil()
+}
+
+fn s_cast_detail() {
+    take_cmds();
+    handle_main(MainMsg::DetailLoaded(Box::new(detail_view(false))));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let btn = find_action(ui.detail.doc.get(), sel!(detailCast:), 0);
+        state_check("detail: Cast button sits in the Play row", !btn.is_null());
+        act_with(detail_host(), sel!(detailCast:), btn);
+        state_check(
+            "cast: opening the menu asks the server for sessions",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::LoadSessions { silent: false })),
+        );
+        handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+        let (titles, n) = crate::ui::cast::menu_titles();
+        state_check(
+            "cast menu lists the other Jellyfin devices",
+            titles.iter().any(|t| t == "Living Room · Jellyfin Android TV") && titles.iter().any(|t| t == "Office · Jellyfin Web"),
+        );
+        state_check("cast menu excludes this device", !titles.iter().any(|t| t.contains("This Mac")));
+        state_check("cast menu has no AirPlay row off the player", !titles.iter().any(|t| t == "AirPlay"));
+        state_check("cast menu: header plus two devices", n == 3);
+        let picked = crate::ui::cast::choose_row_for_test(0);
+        state_check(
+            "choosing the first device picks the TV session",
+            picked.as_ref().map(|s| s.id.as_str()) == Some("sess-tv"),
+        );
+        let sent = take_cmds();
+        state_check(
+            "choosing a device sends PlayNow for the item from the start",
+            sent.iter().any(|c| matches!(c, UiCmd::CastPlay { session_id, item_id, start_secs }
+                if session_id == "sess-tv" && item_id == "detail-long" && *start_secs == 0.0)),
+        );
+        state_check("remote bar shows after a cast", crate::ui::cast::remote_visible());
+        let r = crate::ui::cast::remote_state();
+        state_check("remote bar names the device", r.as_ref().map(|r| r.device.as_str()) == Some("Living Room · Jellyfin Android TV"));
+    }
+    strip_no_overlap("detail page");
+    audit("cast/detail page with remote bar");
+}
+
+/// The remote strip sits below the library side: the content host stops at its top edge,
+/// so nothing under it is covered.
+fn strip_no_overlap(what: &str) {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let host = frame_of(ui.content_host.get());
+        let bar = frame_of(ui.cast.bar.get());
+        state_check(
+            &format!("{}: library side stops above the remote bar", what),
+            (host.origin.y - STRIP_H).abs() < 0.5 && bar.origin.y + bar.size.h <= host.origin.y + 0.5,
+        );
+        let c: *mut Object = msg_send![ui.cast.bar.get(), superview];
+        let cb = bounds_of(c);
+        state_check(
+            &format!("{}: remote bar is inside the window", what),
+            bar.origin.x >= 0.0 && bar.origin.x + bar.size.w <= cb.size.w + 0.5 && bar.origin.y >= 0.0,
+        );
+        state_check(
+            &format!("{}: remote strip spans the full window width", what),
+            bar.origin.x.abs() < 0.5 && (bar.size.w - cb.size.w).abs() < 0.5,
+        );
+    }
+}
+
+fn s_cast_bar() {
+    take_cmds();
+    // The poll reports the episode playing, 30 s in, of 120 s.
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    let r = crate::ui::cast::remote_state().expect("remote state");
+    state_check("remote: title from the session's now playing", r.title.as_deref() == Some("Show · Pilot"));
+    state_check("remote: position and length from the session", (r.pos_secs - 30.0).abs() < 0.01 && (r.run_secs - 120.0).abs() < 0.01);
+    state_check("remote: playing, not paused", !r.paused && r.online);
+    state_check("remote bar visible", crate::ui::cast::remote_visible());
+    let (bar, play, stop, scrub, close, title) = {
+        let ui = UI.get().unwrap();
+        (ui.cast.bar.get(), ui.cast.play.get(), ui.cast.stop.get(), ui.cast.scrub.get(), ui.cast.close.get(), ui.cast.title.get())
+    };
+    unsafe {
+        let a: objc::runtime::Sel = msg_send![play, action];
+        state_check("remote: play button wired", a == sel!(jrCastPlayPause:));
+        state_check("remote: scrubber enabled with a length", { let e: BOOL = msg_send![scrub, isEnabled]; e == YES });
+        state_check("remote: title shown", read_field(title) == "Show · Pilot");
+        act(sel!(jrCastPlayPause:), nil());
+        state_check(
+            "remote: play/pause sends Pause while playing",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { session_id, action: crate::jellyfin::sessions::RemoteAction::Pause } if session_id == "sess-tv")),
+        );
+        act(sel!(jrCastPlayPause:), nil());
+        state_check(
+            "remote: play/pause sends Unpause after that",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { action: crate::jellyfin::sessions::RemoteAction::Unpause, .. })),
+        );
+        let _: () = msg_send![scrub, setDoubleValue: 0.5f64];
+        act_with(ctl(), sel!(jrCastScrub:), scrub);
+        state_check(
+            "remote: scrub to half sends a seek to 60 s",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { action: crate::jellyfin::sessions::RemoteAction::SeekSecs(s), .. } if (*s - 60.0).abs() < 0.01)),
+        );
+    }
+    audit("cast/remote bar (playing)");
+    unsafe {
+        act(sel!(jrCastStop:), nil());
+        state_check(
+            "remote: stop sends Stop",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { action: crate::jellyfin::sessions::RemoteAction::Stop, .. })),
+        );
+        state_check("remote: stopped shows nothing playing", read_field(title) == "Nothing playing");
+        let _: () = msg_send![stop, setEnabled: YES];
+    }
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(true)));
+    state_check("remote: poll reports a paused session", crate::ui::cast::remote_state().map(|r| r.paused).unwrap_or(false));
+    // The device drops off the server's list: the bar says so rather than showing stale state.
+    let only_web: Vec<_> = own_device_sessions(false).into_iter().filter(|s| s.id != "sess-tv").collect();
+    handle_main(MainMsg::SessionsLoaded(only_web));
+    state_check("remote: offline device says so", unsafe { read_field(title) } == "Not available right now");
+    audit("cast/remote bar (offline)");
+    // Over the library grid: the grid's bottom edge moves up, so no card sits under the strip.
+    crate::ui::detail::hide();
+    strip_no_overlap("library grid");
+    audit("cast/remote bar over library grid");
+    unsafe {
+        act(sel!(jrCastClose:), nil());
+        state_check("remote bar hides on close", !crate::ui::cast::remote_visible() && is_hidden_or_gone(bar));
+        let _ = close;
+    }
+    let host = unsafe { UI.get().unwrap().content_host.get() };
+    state_check("library side returns to full height on close", unsafe { frame_of(host).origin.y.abs() < 0.5 });
+}
+
+fn s_cast_error() {
+    crate::ui::cast::on_error("Couldn't reach Living Room: the session has ended".into());
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("cast error: strip shows in the library", crate::ui::cast::remote_visible());
+        state_check(
+            "cast error: the message is the strip's text",
+            read_field(ui.cast.title.get()).starts_with("Couldn't reach Living Room"),
+        );
+        state_check("cast error: controls step aside", is_hidden(ui.cast.play.get()));
+    }
+    strip_no_overlap("error strip");
+    audit("cast/error strip (library)");
+    unsafe { act(sel!(jrCastClose:), nil()) };
+    state_check("cast error: × dismisses it", !crate::ui::cast::remote_visible());
+    let host = unsafe { UI.get().unwrap().content_host.get() };
+    state_check("cast error: library returns to full height", unsafe { frame_of(host).origin.y.abs() < 0.5 });
+}
+
+fn s_cast_series() {
+    take_cmds();
+    let series = detail_view(true);
+    let series_id = series.id.clone();
+    handle_main(MainMsg::DetailLoaded(Box::new(series)));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let btn = find_action(ui.detail.doc.get(), sel!(detailCast:), 0);
+        state_check("series page: Cast button shown", !btn.is_null());
+        act_with(detail_host(), sel!(detailCast:), btn);
+    }
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    let picked = crate::ui::cast::choose_row_for_test(0);
+    state_check("series cast: picks the TV", picked.map(|s| s.id == "sess-tv").unwrap_or(false));
+    state_check(
+        "series cast sends CastSeries (server resolves Next Up)",
+        take_cmds().iter().any(|c| matches!(c, UiCmd::CastSeries { session_id, series_id: sid } if session_id == "sess-tv" && *sid == series_id)),
+    );
+    crate::ui::detail::hide();
+    unsafe { act(sel!(jrCastClose:), nil()) };
+}
+
+fn is_hidden_or_gone(v: *mut Object) -> bool {
+    v.is_null() || unsafe { is_hidden(v) }
+}
+
+fn s_player_airplay() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let route = ui.pbar.route.get();
+        let is_route: BOOL = msg_send![route, isKindOfClass: class!(AVRoutePickerView)];
+        state_check("player bar: AirPlay route picker built", is_route == YES);
+        let sup: *mut Object = msg_send![route, superview];
+        state_check("player bar: route picker sits in the bar", sup == ui.pbar.bar.get());
+        state_check("player bar: route picker visible", !is_hidden(route));
+        let cast = ui.pbar.cast.get();
+        let a: objc::runtime::Sel = msg_send![cast, action];
+        state_check("player bar: cast button opens the cast menu", a == sel!(showCastMenu:));
+        state_check("player bar: cast button visible", !is_hidden(cast));
+        let cfg: BOOL = msg_send![ui.player.get(), allowsExternalPlayback];
+        state_check("AVPlayer allows external (AirPlay) playback", cfg == YES);
+        state_check("AirPlay card hidden while playing here", is_hidden(ui.ext.view.get()));
+    }
+    unsafe { crate::ui::player::set_external(true) };
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("AirPlay card covers the video while external", !is_hidden(ui.ext.view.get()));
+        state_check("AirPlay card says where it plays", read_field(ui.ext.label.get()).starts_with("Playing on "));
+    }
+    audit("player/airplay card");
+    unsafe { crate::ui::player::set_external(false) };
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("AirPlay card hides when playback comes back", is_hidden(ui.ext.view.get()));
+    }
+}
+
+fn s_player_cast() {
+    handle_main(playback(0.0, 6.0));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("cast from player: playing", ui.playing.is_some());
+        let cast = ui.pbar.cast.get();
+        take_cmds();
+        act_with(ctl(), sel!(showCastMenu:), cast);
+        state_check(
+            "player cast: asks for sessions",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::LoadSessions { silent: false })),
+        );
+    }
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    let (titles, n) = crate::ui::cast::menu_titles();
+    state_check("player cast menu starts with AirPlay", titles.first().map(String::as_str) == Some("AirPlay"));
+    state_check("player cast menu: AirPlay, header, two devices", n == 5 && titles.len() == 4);
+    state_check("player cast menu lists devices after AirPlay", titles.iter().any(|t| t == "Office · Jellyfin Web"));
+    take_cmds();
+    let _ = crate::ui::cast::choose_row_for_test(0);
+    let sent = take_cmds();
+    state_check(
+        "player cast sends PlayNow for the playing item",
+        sent.iter().any(|c| matches!(c, UiCmd::CastPlay { session_id, item_id, .. } if session_id == "sess-tv" && item_id == "movie-1")),
+    );
+    let (idle, library) = unsafe { (UI.get().unwrap().playing.is_none(), !is_hidden(UI.get().unwrap().content_host.get())) };
+    state_check("casting stops local playback", idle);
+    state_check("library is back after casting", library);
+    state_check("remote bar shows after a player cast", crate::ui::cast::remote_visible());
+    // Video fills the window: the strip steps away (its state is kept) and comes back afterwards.
+    handle_main(playback(0.0, 6.0));
+    state_check("strip hides while video fills the window", !crate::ui::cast::remote_visible());
+    state_check("library side is full height while video plays", unsafe { frame_of(UI.get().unwrap().content_host.get()).origin.y.abs() < 0.5 });
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    state_check("video: remote session still tracked", crate::ui::cast::remote_state().is_some());
+    unsafe { act(sel!(stopPlayback:), nil()) };
+    state_check("strip returns when video stops", crate::ui::cast::remote_visible());
+    strip_no_overlap("after video");
+    unsafe {
+        act_with(ctl(), sel!(jrCastClose:), nil());
+    }
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -295,11 +613,12 @@ fn item(id: &str, name: &str, ty: &str, played: bool, pos: i64, run: i64) -> Lis
         year: Some(1999),
         season: Some(1),
         episode: Some(2),
-        user_data: Some(UserData { played, position_ticks: pos }),
+        user_data: Some(UserData { played, position_ticks: pos, last_played_date: None }),
         aspect: Some(0.667),
         image_tags: Some(ImageTags { primary: Some("tag".into()), thumb: None }),
         backdrop_tags: None,
         run_time_ticks: Some(run),
+        date_created: None,
     }
 }
 fn items_of(ty: &str, n: usize) -> Vec<ListItem> {
@@ -375,6 +694,18 @@ fn playback(resume: f64, run: f64) -> MainMsg {
     next_up: None,
 })
 }
+/// Resolved sRGB components of a colour under the current appearance (for comparisons).
+pub(crate) unsafe fn srgb(c: *mut Object) -> [i64; 4] {
+    let space: *mut Object = msg_send![class!(NSColorSpace), sRGBColorSpace];
+    let r: *mut Object = msg_send![c, colorUsingColorSpace: space];
+    if r.is_null() {
+        return [-1; 4];
+    }
+    let (mut a, mut b, mut g, mut al) = (0f64, 0f64, 0f64, 0f64);
+    let _: () = msg_send![r, getRed: &mut a green: &mut g blue: &mut b alpha: &mut al];
+    [(a * 1000.).round() as i64, (g * 1000.).round() as i64, (b * 1000.).round() as i64, (al * 1000.).round() as i64]
+}
+
 fn state_check(what: &str, ok: bool) {
     log(&format!("  check {}: {}", what, if ok { "ok" } else { "FAILED" }));
     if !ok {
@@ -841,6 +1172,7 @@ fn s_home_rows() {
             HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: items_of("Movie", 2) },
             HomeRow { title: "Recently Added in Movies".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 3) },
         ],
+        ..Default::default()
     }));
     unsafe {
         let ui = UI.get().unwrap();
@@ -1139,7 +1471,7 @@ fn s_debounce_done() {
     state_check("exactly one Search after the debounce", search_cmds(&cmds) == 1);
     state_check(
         "debounced Search carries the last text",
-        cmds.iter().any(|c| matches!(c, UiCmd::Search { q } if q == "abc")),
+        cmds.iter().any(|c| matches!(c, UiCmd::Search { q, .. } if q == "abc")),
     );
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -1186,6 +1518,181 @@ fn s_nav_actions() {
         act(sel!(refresh:), nil());
         act(sel!(goBack:), nil());
         act(sel!(signOut:), nil());
+    }
+}
+/// Three movies. Name order starts with Alpha; Date Added (year as the stand-in date,
+/// newest first) starts with Charlie.
+fn sort_fixture() -> Vec<ListItem> {
+    [("Alpha", 2001), ("Bravo", 1999), ("Charlie", 2010)]
+        .iter()
+        .map(|(name, year)| {
+            let mut it = item(&format!("m-{}", name), name, "Movie", false, 0, 6_000_000_000);
+            it.year = Some(*year);
+            it
+        })
+        .collect()
+}
+/// Stands in for Jellyfin: applies the SearchTerm, SortBy and SortOrder the UI-side
+/// query carries, so the grid shows what the server would return for that query.
+fn fake_server(items: &[ListItem], q: &crate::jellyfin::models::ItemQuery) -> Vec<ListItem> {
+    let needle = q.search.as_deref().map(str::to_lowercase);
+    let mut out: Vec<ListItem> = items
+        .iter()
+        .filter(|i| needle.as_ref().map_or(true, |n| i.name.to_lowercase().contains(n)))
+        .cloned()
+        .collect();
+    match q.sort_by.as_str() {
+        "DateCreated" => out.sort_by_key(|i| i.year),
+        _ => out.sort_by(|a, b| a.name.cmp(&b.name)),
+    }
+    if q.sort_order == "Descending" {
+        out.reverse();
+    }
+    out
+}
+fn grid_names() -> Vec<String> {
+    unsafe { UI.get_mut().unwrap().items.iter().map(|i| i.name.clone()).collect() }
+}
+fn header_count_text() -> String {
+    unsafe { read_field(UI.get_mut().unwrap().header_count.get()) }
+}
+fn cfg_sort() -> Option<String> {
+    unsafe { UI.get_mut().unwrap().cfg.sort_by.clone() }
+}
+fn last_set_sort(cmds: &[UiCmd]) -> Option<String> {
+    cmds.iter().rev().find_map(|c| match c {
+        UiCmd::SetSort { sort_by } => Some(sort_by.clone()),
+        _ => None,
+    })
+}
+fn last_search(cmds: &[UiCmd]) -> Option<(String, Option<String>, Option<String>)> {
+    cmds.iter().rev().find_map(|c| match c {
+        UiCmd::Search { q, parent_id, types } => Some((q.clone(), parent_id.clone(), types.clone())),
+        _ => None,
+    })
+}
+fn has_load_view(cmds: &[UiCmd], id: &str) -> bool {
+    cmds.iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == id))
+}
+/// Pick a popup row and fire its action, as a click does.
+fn pick_sort(index: isize) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: () = msg_send![ui.sort_popup.get(), selectItemAtIndex: index];
+    }
+    unsafe { act(sel!(sortChanged:), nil()) };
+}
+/// Put `text` in the filter field and fire the (debounced) search now.
+fn type_filter(text: &str) {
+    unsafe {
+        set_text(UI.get_mut().unwrap().search.get(), text);
+        act(sel!(jrSearchNow:), nil());
+    }
+}
+fn s_sort_filter() {
+    use crate::app::library_query::{filter_query, library_query};
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let saved_sort = ui.cfg.sort_by.clone();
+        let saved_stack = ui.mode_stack.clone();
+        crate::ui::home::leave();
+        ui.browse_active = false;
+        ui.mode_stack = vec![("lib-movies".into(), "Movies".into(), Some("movies".into()))];
+        take_cmds();
+
+        let fixture = sort_fixture();
+        send_items("Movies", fake_server(&fixture, &library_query("lib-movies", Some("movies"), None)), false);
+        state_check("sort: starts in Name order", grid_names().first().map(String::as_str) == Some("Alpha"));
+
+        // Date Added: the choice reaches the worker and the library reloads.
+        pick_sort(1);
+        let cmds = take_cmds();
+        let by = last_set_sort(&cmds);
+        state_check("sort: popup choice sent to the worker", by.as_deref() == Some("DateCreated"));
+        state_check("sort: library reloads", has_load_view(&cmds, "lib-movies"));
+        state_check("sort: choice saved in config", cfg_sort().as_deref() == Some("DateCreated"));
+        send_items("Movies", fake_server(&fixture, &library_query("lib-movies", Some("movies"), by.as_deref())), false);
+        state_check("sort: first item changes Alpha -> Charlie", grid_names().first().map(String::as_str) == Some("Charlie"));
+        state_check("sort: count unchanged", header_count_text() == "3 movies");
+
+        // Filter: typing searches inside this library and the grid shows only the matches.
+        type_filter("l");
+        let cmds = take_cmds();
+        let (q, parent, types) = last_search(&cmds).unwrap_or_default();
+        state_check("filter: Search sent with the text", q == "l");
+        state_check(
+            "filter: scoped to this library",
+            parent.as_deref() == Some("lib-movies") && types.as_deref() == Some("Movie"),
+        );
+        let fq = filter_query(&q, parent.as_deref(), types.as_deref(), cfg_sort().as_deref());
+        send_items("Results for “l”", fake_server(&fixture, &fq.unwrap()), true);
+        state_check("filter: visible count drops 3 -> 2", grid_names() == ["Charlie", "Alpha"]);
+        state_check("filter: header count follows", header_count_text() == "2 movies");
+
+        // Sorting while filtered keeps the filter and re-orders the matches.
+        pick_sort(0);
+        let cmds = take_cmds();
+        let (q, parent, types) = last_search(&cmds).unwrap_or_default();
+        state_check("sort with a filter: filter still applied", q == "l" && last_set_sort(&cmds).as_deref() == Some("SortName"));
+        let fq = filter_query(&q, parent.as_deref(), types.as_deref(), cfg_sort().as_deref());
+        send_items("Results for “l”", fake_server(&fixture, &fq.unwrap()), true);
+        state_check("sort with a filter: Name order (Alpha first)", grid_names() == ["Alpha", "Charlie"]);
+
+        // Clearing the field restores the library in the chosen order.
+        type_filter("");
+        let cmds = take_cmds();
+        state_check("clear: library reloads, no Search", last_search(&cmds).is_none() && has_load_view(&cmds, "lib-movies"));
+        send_items("Movies", fake_server(&fixture, &library_query("lib-movies", Some("movies"), cfg_sort().as_deref())), false);
+        state_check("clear: all items back", grid_names().len() == 3 && header_count_text() == "3 movies");
+
+        // Back from filter results clears the field and shows the library again.
+        type_filter("x");
+        take_cmds();
+        act(sel!(goBack:), nil());
+        let cmds = take_cmds();
+        state_check(
+            "back from filter results: field cleared and library reloaded",
+            read_field(UI.get_mut().unwrap().search.get()).is_empty() && has_load_view(&cmds, "lib-movies"),
+        );
+
+        // Switching library clears the filter text.
+        type_filter("l");
+        take_cmds();
+        if !UI.get_mut().unwrap().views.is_empty() {
+            crate::platform::appkit::select_view(0);
+            state_check(
+                "switching library clears the filter",
+                read_field(UI.get_mut().unwrap().search.get()).is_empty(),
+            );
+        } else {
+            log("  (no libraries connected; library switch check skipped)");
+        }
+        take_cmds();
+
+        // Album tracks are not sorted: the popup is hidden over them and back for libraries.
+        ui.sort_applies = false;
+        send_items("Album", items_of("Audio", 2), true);
+        let pop: *mut Object = UI.get_mut().unwrap().sort_popup.get();
+        let hidden: BOOL = msg_send![pop, isHidden];
+        state_check("album tracks hide the sort popup", hidden == YES);
+        UI.get_mut().unwrap().sort_applies = true;
+        send_items("Movies", fixture.clone(), false);
+        let hidden: BOOL = msg_send![pop, isHidden];
+        state_check("library shows the sort popup", hidden == NO);
+
+        // Relaunch: the popup opens on the saved choice.
+        UI.get_mut().unwrap().cfg.sort_by = Some("DatePlayed".into());
+        crate::ui::shell::sync_sort_popup();
+        let idx: isize = msg_send![pop, indexOfSelectedItem];
+        state_check("popup shows the saved choice (Last Played)", idx == 3);
+
+        // Put the saved state back.
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.sort_by = saved_sort;
+        ui.mode_stack = saved_stack;
+        crate::config::save_config_keeping_session(&ui.cfg);
+        crate::ui::shell::sync_sort_popup();
+        take_cmds();
     }
 }
 fn s_shortcuts_menu() {
@@ -1346,6 +1853,7 @@ fn detail_view(series: bool) -> DetailView {
         overview: Some(OVERVIEW.into()),
         played: false,
         resume: !series,
+        resume_ticks: 0,
         poster_key: Some(poster_key(id)),
         backdrop_key: Some(poster_key(&format!("{}#backdrop", id))),
         people: detail_people(14),
@@ -1610,7 +2118,7 @@ fn s_home_open() {
     state_check("home: asks the worker for rows", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadHome)));
 }
 fn s_home_fake() {
-    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows() }));
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
     unsafe {
         let ui = UI.get().unwrap();
         state_check("home: five rows built", ui.home.views.len() == 5);
@@ -1668,7 +2176,7 @@ fn s_home_empty() {
         state_check("home: empty title", read_field(ui.status_label.get()) == "Nothing here yet");
     }
     audit_both("home empty");
-    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows() }));
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
     unsafe {
         let ui = UI.get().unwrap();
         state_check("home: rows back, state hidden", !visible(ui.state_host.get()) && ui.home.views.len() == 5);
@@ -1914,16 +2422,14 @@ fn s_unified_actions() {
         let fr: *mut Object = msg_send![ui.win.get(), firstResponder];
         let editing: *mut Object = msg_send![ui.search.get(), currentEditor];
         state_check("unified: Search focuses the search field", fr == ui.search.get() || !editing.is_null());
-        act(sel!(openRequests:), nil());
-        state_check("unified: Requests opens My requests", ui.seerr.requests_mode);
+        // Seerr is off in this run, so Requests shows its setup state and has no sidebar row.
+        act(sel!(requestsSelected:), nil());
+        state_check("unified: Requests tab opens", UI.get().unwrap().seerr.active);
+        state_check("unified: no Requests row while Seerr is off", UI.get().unwrap().seerr.row.get().is_null());
         let _ = take_cmds();
-        // Back to the search tab, so later Seerr steps start from their usual state.
-        let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 0isize];
-        act(sel!(seerrTab:), ui.seerr.tabs.get());
-        let _: () = msg_send![ui.seerr.win.get(), orderOut: nil()];
         act(sel!(homeSelected:), nil());
         let ui = UI.get().unwrap();
-        state_check("unified: Home is back", ui.home.active && !ui.browse_active);
+        state_check("unified: Home is back", ui.home.active && !ui.browse_active && !ui.seerr.active);
         state_check("unified: Browse row not selected", !row_selected(ui.browse_row.get()));
         let cmds = take_cmds();
         state_check("unified: LoadHome sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
@@ -1961,12 +2467,148 @@ fn s_layout_settings() {
         state_check("settings: library rows are back", ui.rows.len() == 5);
         state_check("settings: Browse row removed", ui.browse_row.get().is_null());
         state_check("settings: Home still the place", ui.home.active);
+        state_check("settings: home tabs hidden in the separate layout", is_hidden(ui.home.seg.get()));
         let cmds = take_cmds();
         state_check(
             "settings: worker told the layout",
             cmds.iter().any(|c| matches!(c, UiCmd::SetLayoutMode { mode: crate::config::LayoutMode::Separate })),
         );
     }
+}
+/// Unified Home tabs: the segmented control, and each tab's rows and grid.
+fn s_tabs_home() {
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: segmented control exists", !ui.home.seg.get().is_null());
+        state_check("tabs: control shown on Home", visible(ui.home.seg.get()));
+        let idx: NSInteger = msg_send![ui.home.seg.get(), selectedSegment];
+        state_check("tabs: Home selected", idx == 0 && ui.home.section == crate::config::HomeSection::Home);
+        state_check("tabs: Home has no grid", ui.home.grid.is_empty());
+        state_check("tabs: Home rows built", ui.home.views.len() == 5);
+    }
+    take_cmds();
+    audit_both("unified home tabs");
+}
+fn s_tabs_movies() {
+    use crate::config::HomeSection;
+    // Clicking the control (the segment path), then the Go menu path below.
+    unsafe {
+        let ui = UI.get().unwrap();
+        let _: () = msg_send![ui.home.seg.get(), setSelectedSegment: 1isize];
+        act(sel!(homeSegment:), ui.home.seg.get());
+    }
+    let cmds = take_cmds();
+    state_check("tabs: Movies asks for movie content", cmds.iter().any(|c| matches!(c, UiCmd::LoadHomeSection { section: HomeSection::Movies })));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: header reads Movies", read_field(ui.header_title.get()) == "Movies");
+        state_check("tabs: Home rows cleared", ui.home.views.is_empty());
+        state_check("tabs: loading state shown", visible(ui.state_host.get()) && read_field(ui.status_label.get()) == "Loading Movies…");
+        state_check("tabs: Movies remembered in config", ui.cfg.home_section == Some(HomeSection::Movies));
+    }
+    // A Home reply that arrives after the switch is dropped.
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
+    unsafe { state_check("tabs: stale Home reply ignored", UI.get().unwrap().home.views.is_empty()) };
+    // The Movies reply is mixed on purpose: series must not show on this tab.
+    let mut mixed = items_of("Movie", 14);
+    mixed.extend(items_of("Series", 4));
+    handle_main(MainMsg::HomeLoaded(HomeRows {
+        section: HomeSection::Movies,
+        rows: vec![
+            HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: items_of("Movie", 3) },
+            HomeRow { title: "Recently Added".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 6) },
+        ],
+        grid: mixed,
+    }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: movie rows and grid built", ui.home.views.len() == 3);
+        state_check("tabs: only movies on the Movies tab", ui.home.flat.iter().all(|i| i.item_type == "Movie"));
+        state_check("tabs: all 14 movies in the grid", ui.home.grid.len() == 14 && ui.home.views[2].cells.len() == 14);
+        state_check("tabs: no loading state once loaded", !visible(ui.state_host.get()));
+    }
+    // The Go menu path: Movies is already selected, so this is a repeat (no reload).
+    unsafe { act(sel!(showHomeSection:), tagged_button(1)) };
+    state_check("tabs: repeat Movies pick does not reload", !take_cmds().iter().any(|c| matches!(c, UiCmd::LoadHomeSection { .. })));
+    audit_both("unified movies tab");
+}
+fn s_tabs_resize() {
+    use crate::ui::library::grid_metrics;
+    unsafe {
+        let ui = UI.get().unwrap();
+        for (w, h) in [(1700.0, 1000.0), (960.0, 600.0)] {
+            let _: () = msg_send![ui.win.get(), setContentSize: size(w, h)];
+            let _: () = msg_send![ui.win.get(), displayIfNeeded];
+            let doc = ui.home.doc.get();
+            let dw = bounds_of(doc).size.w;
+            let m = grid_metrics(bounds_of(ui.home.scroll.get()).size.w.max(200.), crate::ui::theme::POSTER_ASPECT);
+            let cells = &ui.home.views[2].cells;
+            let right = cells.iter().map(|c| frame_of(c.container)).fold(0.0f64, |a, f| a.max(f.origin.x + f.size.w));
+            state_check(&format!("tabs: grid fits {}x{}", w, h), right <= dw - crate::ui::theme::EDGE + 0.5 && cells[0].container.is_null() == false);
+            state_check(&format!("tabs: grid columns match {}x{}", w, h), cells.len() == 14 && m.cols >= 1);
+        }
+    }
+    unsafe { set_content_size(1280.0, 800.0) };
+}
+fn s_tabs_shows() {
+    use crate::config::HomeSection;
+    unsafe { act(sel!(showHomeSection:), tagged_button(2)) };
+    let cmds = take_cmds();
+    state_check("tabs: TV Shows asks for series", cmds.iter().any(|c| matches!(c, UiCmd::LoadHomeSection { section: HomeSection::TvShows })));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: header reads TV Shows", read_field(ui.header_title.get()) == "TV Shows");
+        let idx: NSInteger = msg_send![ui.home.seg.get(), selectedSegment];
+        state_check("tabs: TV Shows selected in the control", idx == 2);
+    }
+    let mut mixed = items_of("Series", 12);
+    mixed.extend(items_of("Movie", 3));
+    handle_main(MainMsg::HomeLoaded(HomeRows {
+        section: HomeSection::TvShows,
+        rows: vec![
+            HomeRow { title: "Next Up".into(), kind: HomeRowKind::NextUp, items: items_of("Episode", 4) },
+            HomeRow { title: "Recently Added".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Series", 5) },
+        ],
+        grid: mixed,
+    }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: series rows and grid built", ui.home.views.len() == 3);
+        state_check("tabs: only series and episodes on TV Shows", ui.home.flat.iter().all(|i| matches!(i.item_type.as_str(), "Series" | "Episode")));
+        state_check("tabs: all 12 series in the grid", ui.home.grid.len() == 12);
+    }
+    audit_both("unified tv tab");
+}
+fn s_tabs_home_again() {
+    unsafe { act(sel!(showHomeSection:), tagged_button(0)) };
+    let cmds = take_cmds();
+    state_check("tabs: Home asks for LoadHome", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tabs: Home remembered in config", ui.cfg.home_section == Some(crate::config::HomeSection::Home));
+        let idx: NSInteger = msg_send![ui.home.seg.get(), selectedSegment];
+        state_check("tabs: Home selected in the control", idx == 0);
+    }
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
+    unsafe { state_check("tabs: Home rows back", UI.get().unwrap().home.views.len() == 5 && UI.get().unwrap().home.grid.is_empty()) };
+}
+fn s_tabs_remember() {
+    use crate::config::HomeSection;
+    unsafe {
+        act(sel!(showHomeSection:), tagged_button(2));
+        take_cmds();
+        // Leave for Browse, then come back from the sidebar: the TV tab is shown again.
+        act(sel!(browseSelected:), nil());
+        state_check("tabs: Browse leaves Home", !UI.get().unwrap().home.active);
+        act(sel!(homeSelected:), nil());
+        let ui = UI.get().unwrap();
+        state_check("tabs: Home reopens on the remembered tab", ui.home.section == HomeSection::TvShows);
+    }
+    let cmds = take_cmds();
+    state_check("tabs: reopening asks for TV content", cmds.iter().any(|c| matches!(c, UiCmd::LoadHomeSection { section: HomeSection::TvShows })));
+    unsafe { act(sel!(showHomeSection:), tagged_button(0)) };
+    take_cmds();
 }
 fn s_play_start() {
     handle_main(playback(0.0, 6.0));
@@ -2087,6 +2729,28 @@ fn s_player_bar_buttons() {
         // PiP and full screen are fired too (off-screen they only count the press).
         act(sel!(togglePiP:), pip.get());
         state_check("pip button fires its action", UI.get().unwrap().pbar.pip_presses == 1);
+        // The button follows the controller for this video: enabled exactly when AVKit can start PiP.
+        // Nothing is started here, so no window appears; off-screen the press above only counted.
+        pb::refresh_pip_button();
+        let pc = UI.get().unwrap().pbar.pip_ctl.get();
+        state_check("pip controller exists for the video layer", !pc.is_null());
+        if !pc.is_null() {
+            let possible: BOOL = msg_send![pc, isPictureInPicturePossible];
+            let en: BOOL = msg_send![pip.get(), isEnabled];
+            state_check(
+                &format!("pip button enabled matches isPictureInPicturePossible (possible: {})", possible == YES),
+                (possible == YES) == (en == YES),
+            );
+            let active: BOOL = msg_send![pc, isPictureInPictureActive];
+            state_check("pip is not showing in self-test", active == NO);
+        }
+        let hid: BOOL = msg_send![pip.get(), isHidden];
+        state_check("pip button shown on this Mac", hid == NO);
+        let btn_on: BOOL = msg_send![pip.get(), isEnabled];
+        state_check("pip menu item follows the button", crate::ui::shortcuts::item_enabled("togglePiP:", 0, crate::ui::shortcuts::ALT | crate::ui::shortcuts::CMD) == (btn_on == YES));
+        state_check("pip shortcut is ⌥⌘P in the table", crate::ui::shortcuts::SHORTCUTS.iter().any(|e| {
+            e.action == "togglePiP:" && e.key == "p" && e.mods == crate::ui::shortcuts::ALT | crate::ui::shortcuts::CMD
+        }));
         act(sel!(fullscreen:), full.get());
         state_check("full screen button fires its action", UI.get().unwrap().pbar.full_presses == 1);
         // Play/pause: one press flips the rate, the next flips it back.
@@ -2433,6 +3097,26 @@ fn intro_to(end: f64) -> Vec<Segment> {
 fn mock_next() -> NextUp {
     NextUp { id: "ep-next".into(), name: "The Next One".into(), season: Some(1), number: Some(3), image_key: None }
 }
+/// Scrubber seeks go through pb::seek_frac; the landing is read a step later, once the seek completes.
+/// (A +/-10 s check is left out: the 6 s mock item clamps every such seek, so it would prove nothing.)
+fn seek_playing_dur() -> f64 {
+    unsafe { UI.get().unwrap().playing.as_ref().map(|p| p.duration_secs).unwrap_or(0.0) }
+}
+fn seek_now() -> f64 {
+    unsafe {
+        let t: CMTime = msg_send![UI.get().unwrap().player.get(), currentTime];
+        t.seconds()
+    }
+}
+fn s_seek_scrub() {
+    unsafe { crate::ui::playerbar::seek_frac(0.5) };
+}
+fn s_seek_scrub_check() {
+    let dur = seek_playing_dur();
+    let p = seek_now();
+    state_check(&format!("seek: scrubber landed near 50% (at {:.2}s of {:.2}s)", p, dur * 0.5),
+        dur > 0.0 && (p - dur * 0.5).abs() < 1.0);
+}
 fn in_segment_pos() -> f64 {
     unsafe { crate::ui::skip::position() }
 }
@@ -2444,6 +3128,9 @@ fn s_skip_audit() {
     unsafe {
         state_check("skip: button shown inside the intro", crate::ui::skip::button_visible());
         state_check("skip: label is Skip Intro", crate::ui::skip::button_label() == "Skip Intro");
+        // Resume seek (1.5 s) must land there, not at 0: about 0.7 s has played since.
+        let p = in_segment_pos();
+        state_check(&format!("resume: playhead landed near 1.5 s (at {:.2}s)", p), p >= 1.2 && p <= 3.2);
     }
     audit_both("skip button");
 }
@@ -2642,8 +3329,8 @@ fn s_signed_out() {
         let ui = UI.get().unwrap();
         let c: *mut Object = msg_send![ui.login_err.get(), textColor];
         let sec: *mut Object = msg_send![class!(NSColor), secondaryLabelColor];
-        let eq: BOOL = msg_send![c, isEqual: sec];
-        state_check("signed-out message is neutral (secondary colour)", eq == YES);
+        // Theme colours are dynamic objects, so compare what they resolve to.
+        state_check("signed-out message is neutral (secondary colour)", srgb(c) == srgb(sec));
         let t: *mut Object = msg_send![ui.win.get(), title];
         state_check("window title still Jellyfast after playback", to_str(t) == "Jellyfast");
     }
@@ -2688,11 +3375,11 @@ fn seerr_hidden(v: *mut Object) -> bool {
         h == YES
     }
 }
-fn seerr_visible_win() -> bool {
+/// Requests is the visible screen in the main window (not a window or sheet of its own).
+fn seerr_on_screen() -> bool {
     unsafe {
         let ui = UI.get().unwrap();
-        let v: BOOL = msg_send![ui.seerr.win.get(), isVisible];
-        v == YES
+        ui.seerr.active && visible(ui.seerr.host.get()) && visible(ui.seerr.doc.get())
     }
 }
 fn sheet_open() -> bool {
@@ -2721,7 +3408,7 @@ unsafe fn seerr_subviews(row: *mut Object, cls: &str, pred: &dyn Fn(*mut Object)
 fn seerr_button_rows() -> usize {
     unsafe {
         let ui = UI.get().unwrap();
-        ui.seerr.rows.iter().filter(|r| seerr_subviews(**r, "NSButton", &|_| true) > 0).count()
+        ui.seerr.cards.iter().filter(|r| seerr_subviews(**r, "NSButton", &|_| true) > 0).count()
     }
 }
 /// Status pills (NSBox with corner radius 10) across all rows.
@@ -2729,7 +3416,7 @@ fn seerr_pills() -> usize {
     unsafe {
         let ui = UI.get().unwrap();
         ui.seerr
-            .rows
+            .cards
             .iter()
             .map(|r| {
                 seerr_subviews(*r, "NSBox", &|b| {
@@ -2740,10 +3427,44 @@ fn seerr_pills() -> usize {
             .sum()
     }
 }
-fn seerr_row_heights_ok() -> bool {
+/// Every card in the grid has the same height (rows line up).
+fn seerr_card_heights_ok() -> bool {
     unsafe {
         let ui = UI.get().unwrap();
-        ui.seerr.rows.iter().all(|r| (frame_of(*r).size.h - 76.).abs() < 0.01)
+        // Cards in one grid row share a height and a top edge; every card has a height.
+        ui.seerr.cards.iter().all(|c| {
+            let f = frame_of(*c);
+            f.size.h > 0. && ui.seerr.cards.iter().filter(|o| (frame_of(**o).origin.y - f.origin.y).abs() < 0.5).all(|o| (frame_of(*o).size.h - f.size.h).abs() < 0.01)
+        })
+    }
+}
+/// Each result card has a Request button exactly when it is not requested, and a pill otherwise.
+fn seerr_kinds_match() -> bool {
+    unsafe {
+        let ui = UI.get().unwrap();
+        ui.seerr.cards.len() == ui.seerr.results.len()
+            && ui.seerr.cards.iter().zip(ui.seerr.results.iter()).all(|(card, r)| {
+                let want_button = r.availability == Availability::NotRequested;
+                let has_button = seerr_subviews(*card, "NSButton", &|_| true) > 0;
+                let has_pill = seerr_subviews(*card, "NSBox", &|b| {
+                    let rad: f64 = msg_send![b, cornerRadius];
+                    (rad - 10.).abs() < 0.01
+                }) > 0;
+                has_button == want_button && has_pill == !want_button
+            })
+    }
+}
+/// Whether the Requests row exists in the sidebar and is a sidebar row.
+fn seerr_sidebar_row_ok() -> bool {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let row = ui.seerr.row.get();
+        if row.is_null() {
+            return false;
+        }
+        let cls = objc::runtime::Class::get("JRSidebarRow").unwrap();
+        let k: BOOL = msg_send![row, isKindOfClass: cls];
+        k == YES
     }
 }
 fn seerr_empty_shown() -> Option<(String, String)> {
@@ -2771,13 +3492,22 @@ fn s_seerr_disabled() {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.seerr_enabled = false;
         ui.cfg.settings.seerr_url = String::new();
-        act(sel!(openSeerr:), nil());
-        state_check("seerr window visible", seerr_visible_win());
-        state_check("hint shown when disabled", !seerr_hidden(ui.seerr.hint.get()));
+        act(sel!(requestsSelected:), nil());
+        let ui = UI.get().unwrap();
+        state_check("requests tab shown when disabled (setup state)", seerr_on_screen());
+        state_check("no sidebar Requests row when disabled", ui.seerr.row.get().is_null());
+        state_check("setup state shown when disabled", !seerr_hidden(ui.seerr.hint.get()));
         state_check("search hidden when disabled", seerr_hidden(ui.seerr.search.get()));
+        state_check("Home not selected on Requests", !ui.home.active && !visible(ui.home.scroll.get()));
+        state_check("Requests remembered as last place", ui.cfg.last_view.as_deref() == Some("requests"));
+        audit("requests setup state");
+    }
+    unsafe {
+        let ui = UI.get_mut().unwrap();
         ui.cfg.settings.seerr_enabled = true; // enabled but no URL is still unconfigured
         act(sel!(openSeerr:), nil());
-        state_check("hint shown when URL empty", !seerr_hidden(ui.seerr.hint.get()));
+        let ui = UI.get().unwrap();
+        state_check("setup state when URL empty", !seerr_hidden(ui.seerr.hint.get()));
         // Messages that arrive while unconfigured must not crash.
         handle_main(MainMsg::SeerrError("Seerr is turned off. Enable it in Settings to search and request.".into()));
         handle_main(MainMsg::SeerrResults(vec![]));
@@ -2789,28 +3519,71 @@ fn s_seerr_enabled() {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.seerr_enabled = true;
         ui.cfg.settings.seerr_url = "http://seerr.example:5055".into();
-        act(sel!(openSeerr:), nil()); // same window reused
-        check_offscreen("seerr window");
-        state_check("hint hidden when configured", seerr_hidden(ui.seerr.hint.get()));
+        act(sel!(requestsSelected:), nil()); // the sidebar entry appears and is selected
+        let ui = UI.get().unwrap();
+        state_check("sidebar Requests row shown when configured", seerr_sidebar_row_ok());
+        state_check("Requests row selected", row_selected(ui.seerr.row.get()));
+        state_check("Home row not selected", !row_selected(ui.home.row.get()));
+        state_check("requests view on screen", seerr_on_screen());
+        state_check("header reads Requests", read_field(ui.header_title.get()) == "Requests");
+        state_check("library grid hidden", !visible(ui.lib_scroll.get()));
+        state_check("sort popup hidden", !visible(ui.sort_popup.get()));
+        check_offscreen("requests tab");
+        state_check("setup state hidden when configured", seerr_hidden(ui.seerr.hint.get()));
         state_check("search visible", !seerr_hidden(ui.seerr.search.get()));
-        state_check("no rows", ui.seerr.rows.is_empty());
+        state_check("no cards yet", ui.seerr.cards.is_empty());
         state_check(
             "hint state: search prompt",
             seerr_empty_shown().map(|(_, b)| b == "Search for a movie or show to request.") == Some(true),
         );
+        state_check("remembered as last place", ui.cfg.last_view.as_deref() == Some("requests"));
+    }
+    audit("requests empty");
+}
+fn s_seerr_login_restore() {
+    unsafe {
+        take_cmds();
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.settings.seerr_enabled = true;
+        ui.cfg.settings.seerr_url = "http://seerr.example:5055".into();
+        ui.cfg.last_view = Some(crate::ui::seerr::REQUESTS_ID.into());
+    }
+    // Same libraries as the other connect steps, so later library steps see the usual set.
+    handle_main(MainMsg::Connected {
+        user_name: "tester".into(),
+        views: vec![
+            ("v1".into(), "Movies".into(), Some("movies".into())),
+            ("v2".into(), "Shows".into(), Some("tvshows".into())),
+            ("v3".into(), "Music".into(), Some("music".into())),
+            ("v4".into(), "Live TV".into(), Some("livetv".into())),
+            ("v5".into(), "Misc".into(), None),
+        ],
+        has_live_tv: true,
+    });
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("login restores Requests over Home", ui.seerr.active && seerr_on_screen());
+        state_check("login: Home inactive", !ui.home.active);
+        state_check("login: no LoadHome", !take_cmds().iter().any(|c| matches!(c, UiCmd::LoadHome)));
+        act(sel!(homeSelected:), nil());
+        state_check("back to Home from Requests", UI.get().unwrap().home.active && !seerr_on_screen());
     }
 }
 fn s_seerr_results() {
+    unsafe { act(sel!(requestsSelected:), nil()) };
+    state_check("requests on screen before results", seerr_on_screen());
     handle_main(MainMsg::SeerrResults(seerr_mixed()));
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("7 rows", ui.seerr.rows.len() == 7);
+        state_check("7 cards", ui.seerr.cards.len() == 7);
         state_check("2 request buttons (NotRequested only)", seerr_button_rows() == 2);
-        state_check("rows are 76 tall", seerr_row_heights_ok());
-        state_check("a pill per row without a Request button", seerr_pills() == 7 - seerr_button_rows());
+        state_check("requestable cards: Request button, no pill; others: pill", seerr_kinds_match());
+        state_check("cards share one height", seerr_card_heights_ok());
+        state_check("a pill per card without a Request button", seerr_pills() == 7 - seerr_button_rows());
         state_check("empty state hidden with rows", seerr_empty_shown().is_none());
         state_check("thumbnail waits for the poster", unsafe { crate::ui::seerr::thumb_has_image("/p11.jpg") } == Some(false));
     }
+    audit("requests results");
     // The worker would fetch these through the Seerr server; fake its reply (no network).
     handle_main(MainMsg::SeerrPoster { path: "/p11.jpg".into(), bytes: TEST_PNG.to_vec() });
     handle_main(MainMsg::SeerrPoster { path: "/bad.jpg".into(), bytes: vec![1, 2, 3] });
@@ -2818,7 +3591,6 @@ fn s_seerr_results() {
         state_check("thumbnail image set after poster reply", crate::ui::seerr::thumb_has_image("/p11.jpg") == Some(true));
         state_check("other thumbnail still a placeholder", crate::ui::seerr::thumb_has_image("/p22.jpg") == Some(false));
     }
-    audit("seerr results");
 }
 fn s_seerr_typing() {
     unsafe {
@@ -2906,7 +3678,7 @@ fn s_seerr_requests_tab() {
         let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 1isize];
         act(sel!(seerrTab:), ui.seerr.tabs.get());
         state_check("SeerrRequests emitted", matches!(take_cmds().as_slice(), [UiCmd::SeerrRequests]));
-        state_check("loading: no rows, no empty state", ui.seerr.rows.is_empty() && seerr_empty_shown().is_none());
+        state_check("loading: no rows, no empty state", ui.seerr.cards.is_empty() && seerr_empty_shown().is_none());
         handle_main(MainMsg::SeerrRequestList(vec![
             seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending),
             seerr_request_item(2, "Two", RequestStatus::Approved, Availability::Processing),
@@ -2915,14 +3687,14 @@ fn s_seerr_requests_tab() {
             seerr_request_item(5, "Five", RequestStatus::Completed, Availability::Available),
             seerr_request_item(6, "Six", RequestStatus::Unknown, Availability::Blocklisted),
         ]));
-        state_check("6 request rows", ui.seerr.rows.len() == 6);
+        state_check("6 request rows", ui.seerr.cards.len() == 6);
         state_check("no request buttons in My requests", seerr_button_rows() == 0);
         state_check("a pill per request row", seerr_pills() == 6);
         audit("seerr my requests");
         handle_main(MainMsg::SeerrRequestList(vec![]));
         state_check(
             "empty requests state",
-            ui.seerr.rows.is_empty()
+            ui.seerr.cards.is_empty()
                 && seerr_empty_shown() == Some(("No requests yet".into(), "You haven't requested anything yet.".into())),
         );
         handle_main(MainMsg::SeerrRequestList(vec![seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending)]));
@@ -2941,33 +3713,51 @@ fn s_seerr_requests_tab() {
         take_cmds();
         let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 0isize];
         act(sel!(seerrTab:), ui.seerr.tabs.get());
-        state_check("back on search tab", !ui.seerr.requests_mode && ui.seerr.rows.len() == 7);
+        state_check("back on search tab", !ui.seerr.requests_mode && ui.seerr.cards.len() == 7);
     }
 }
+/// The grid reflows with the window: column count follows the width, nothing overflows,
+/// and the layout audit is clean at the minimum, a mid size and a large size.
 fn s_seerr_resize() {
-    unsafe {
-        let ui = UI.get_mut().unwrap();
-        for (w, h) in [(520.0, 420.0), (900.0, 800.0), (680.0, 680.0)] {
-            let _: () = msg_send![ui.seerr.win.get(), setContentSize: size(w, h)];
-            let _: () = msg_send![ui.seerr.win.get(), displayIfNeeded];
-            let _: () = msg_send![ui.seerr.doc.get(), layoutSubtreeIfNeeded];
-            handle_main(MainMsg::SeerrResults(seerr_mixed())); // rebuild at the new width
-            audit(&format!("seerr @{}x{}", w, h));
+    for (w, h) in [(960.0, 600.0), (1700.0, 1000.0), (1280.0, 800.0)] {
+        set_content_size(w, h);
+        handle_main(MainMsg::SeerrResults(seerr_mixed())); // rebuild at the new width
+        unsafe {
+            let ui = UI.get().unwrap();
+            let doc_w = frame_of(ui.seerr.doc.get()).size.w;
+            let (cols, _) = crate::ui::seerr::card_columns(doc_w);
+            let first_y = frame_of(ui.seerr.cards[0]).origin.y;
+            let on_first_row = ui.seerr.cards.iter().filter(|c| (frame_of(**c).origin.y - first_y).abs() < 0.5).count();
+            state_check(
+                &format!("columns follow width @{}x{}", w, h),
+                on_first_row == cols.min(ui.seerr.cards.len()),
+            );
+            let fits = ui.seerr.cards.iter().all(|c| {
+                let f = frame_of(*c);
+                f.origin.x >= 0. && f.origin.x + f.size.w <= doc_w + 0.5
+            });
+            state_check(&format!("cards inside the grid width @{}x{}", w, h), fits);
         }
+        audit(&format!("requests @{}x{}", w, h));
     }
+    set_content_size(1280.0, 800.0);
 }
 fn s_seerr_reopen() {
+    unsafe { act(sel!(homeSelected:), nil()) };
     unsafe {
-        let ui = UI.get_mut().unwrap();
-        let w = ui.seerr.win.get();
-        let _: () = msg_send![w, close];
-        state_check("window closed", !seerr_visible_win());
-        // messages while the window is hidden are applied, not dropped
-        handle_main(MainMsg::SeerrRequested { title: "Fresh Show".into() });
-        act(sel!(openSeerr:), nil());
-        state_check("window reopened", seerr_visible_win());
-        state_check("same window instance", ui.seerr.win.get() == w);
-        state_check("results survive close/reopen", ui.seerr.results.len() == 7 && ui.seerr.rows.len() == 7);
+        let ui = UI.get().unwrap();
+        state_check("leaving Requests hides it", !seerr_on_screen() && !ui.seerr.active);
+        state_check("Home is the screen again", ui.home.active && visible(ui.home.scroll.get()));
+        state_check("Home remembered as last place", ui.cfg.last_view.as_deref() == Some("home"));
+    }
+    // messages while Requests is away are applied, not dropped
+    handle_main(MainMsg::SeerrRequested { title: "Fresh Show".into() });
+    unsafe { act(sel!(requestsSelected:), nil()) };
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("Requests comes back", seerr_on_screen());
+        state_check("results survive leaving", ui.seerr.results.len() == 7 && ui.seerr.cards.len() == 7);
+        state_check("Requests remembered again", ui.cfg.last_view.as_deref() == Some("requests"));
     }
 }
 fn s_seerr_empty() {
@@ -2977,12 +3767,12 @@ fn s_seerr_empty() {
         handle_main(MainMsg::SeerrResults(vec![]));
         state_check(
             "no results state",
-            ui.seerr.rows.is_empty()
+            ui.seerr.cards.is_empty()
                 && seerr_empty_shown() == Some(("No results".into(), "No matches for “zzzz”.".into())),
         );
         set_text(ui.seerr.search.get(), "");
         handle_main(MainMsg::SeerrResults(vec![]));
-        state_check("blank search state", ui.seerr.rows.is_empty() && seerr_empty_shown().map(|t| t.0) == Some("Find a title".into()));
+        state_check("blank search state", ui.seerr.cards.is_empty() && seerr_empty_shown().map(|t| t.0) == Some("Find a title".into()));
         take_cmds();
     }
 }
@@ -3068,7 +3858,7 @@ fn s_seerr_settings_ok() {
                 && ui.cfg.settings.seerr_url == "http://seerr.example:5055"
                 && ui.cfg.settings.seerr_username == "nathan",
         );
-        state_check("seerr window shows search UI", seerr_hidden(ui.seerr.hint.get()));
+        state_check("requests shows the search UI", seerr_hidden(ui.seerr.hint.get()));
         state_check("success message in seerr status line", seerr_status_text().starts_with("Connected to Seerr"));
     }
     // A stray status with nothing pending must be harmless.
@@ -3140,9 +3930,113 @@ fn s_seerr_settings_key() {
     });
 }
 fn s_seerr_end() {
+    unsafe { act(sel!(homeSelected:), nil()) };
+    take_cmds();
+    state_check("Requests left for Home", !unsafe { UI.get().unwrap().seerr.active });
+}
+
+// ---- themes -----------------------------------------------------------------
+fn theme_ocean_json() -> &'static str {
+    r##"{"base":"dark","name":"Selftest Ocean","colors":{"window":"#0B1620","panel":"#0F1D2A","surface":"#1A2D3D","surface_hover":"#243B4E","surface_active":"#2E4A61","outline":"#2E4A61","text":"#E6F7FF","secondary":"#A9C8D8","dim":"#8FB0C2","accent":"#4FC3F7","accent_hover":"#81D4FA","on_accent":"#0B1620","danger":"#FF6B6B","warning":"#FFD166","overlay":"#000000B3","shadow":"#00000066","tint":"#0F1D2A","ok":"#7BD88F"}}"##
+}
+/// Resolved sRGB (thousandths) of a 0xRRGGBB value, as `srgb()` reports it.
+fn expect_srgb(v: u32) -> [i64; 4] {
+    let c = |s: u32| (((v >> s) & 0xff) as f64 / 255. * 1000.).round() as i64;
+    [c(16), c(8), c(0), 1000]
+}
+fn popup_titles(p: *mut Object) -> Vec<String> {
+    unsafe {
+        let t: *mut Object = msg_send![p, itemTitles];
+        let n: usize = msg_send![t, count];
+        (0..n).map(|i| to_str(msg_send![t, objectAtIndex: i])).collect()
+    }
+}
+fn s_themes_palette() {
+    let dir = std::env::temp_dir().join(format!("jf-selftest-themes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("selftest-ocean.json"), theme_ocean_json()).unwrap();
+    std::fs::write(dir.join("broken.json"), "{ not json").unwrap();
+    std::env::set_var("JELLYFAST_THEMES_DIR", &dir);
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let _: () = msg_send![ui.seerr.win.get(), close];
-        take_cmds();
+        ui.cfg.settings.theme = "selftest-ocean".into();
+        crate::ui::shell::reload_themes();
+        let reg = crate::ui::palettes::registry();
+        state_check("themes: valid palette loaded", reg.iter().any(|t| t.id == "selftest-ocean"));
+        state_check("themes: invalid palette skipped", !reg.iter().any(|t| t.id == "broken"));
+        let titles = popup_titles(ui.s_theme.get());
+        state_check("themes: picker lists palette by name", titles.iter().any(|t| t == "Selftest Ocean"));
+        state_check("themes: picker starts with Follow system", titles.first().map(|t| t == "Follow system").unwrap_or(false));
+        state_check("themes: palette text colour applied", srgb(crate::ui::theme::color(crate::ui::theme::Col::Text)) == expect_srgb(0xE6F7FF));
+        state_check("themes: palette window colour applied", srgb(crate::ui::theme::color(crate::ui::theme::Col::Card)) == expect_srgb(0x0B1620));
+        state_check("themes: palette accent applied", srgb(crate::ui::theme::color(crate::ui::theme::Col::Accent)) == expect_srgb(0x4FC3F7));
+        state_check("themes: representative label follows palette", srgb(msg_send![ui.s_theme_note.get(), textColor]) == expect_srgb(0xA9C8D8));
+        state_check("themes: single theme hides follow pickers", is_hidden(ui.s_light.get()));
+    }
+    audit("theme: selftest ocean");
+}
+fn s_themes_follow() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let base_h = ui.s_follow.base_h;
+        ui.cfg.settings.theme = "system".into();
+        ui.cfg.settings.system_light = "light".into();
+        ui.cfg.settings.system_dark = "selftest-ocean".into();
+        crate::ui::settings::fill_theme_popups(&ui.cfg);
+        state_check("themes: follow system shows light picker", !is_hidden(ui.s_light.get()));
+        state_check("themes: follow system shows dark picker", !is_hidden(ui.s_dark.get()));
+        let light = popup_titles(ui.s_light.get());
+        let dark = popup_titles(ui.s_dark.get());
+        state_check("themes: light picker starts with Jellyfast Light", light.first().map(|t| t == "Jellyfast Light").unwrap_or(false));
+        state_check("themes: light picker has no dark palette", !light.iter().any(|t| t == "Selftest Ocean"));
+        state_check("themes: dark picker has the dark palette", dark.iter().any(|t| t == "Selftest Ocean"));
+        ui.cfg.settings.theme = "dark".into();
+        crate::ui::settings::fill_theme_popups(&ui.cfg);
+        state_check("themes: single theme hides follow pickers again", is_hidden(ui.s_dark.get()));
+        state_check("themes: window shrinks when pickers hide", ui.s_follow.cur_h < base_h);
+        ui.cfg.settings.theme = "system".into();
+        crate::ui::settings::fill_theme_popups(&ui.cfg);
+        state_check("themes: follow system restores pickers", !is_hidden(ui.s_light.get()) && (ui.s_follow.cur_h - base_h).abs() < 0.5);
+        // Missing palette: the cached copy keeps the colours and the Theme row says why.
+        ui.cfg.settings.theme = "selftest-ocean".into();
+    }
+    let dir = std::path::PathBuf::from(std::env::var("JELLYFAST_THEMES_DIR").unwrap_or_default());
+    let _ = std::fs::remove_file(dir.join("selftest-ocean.json"));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        crate::ui::shell::reload_themes();
+        state_check("themes: cached palette still applied", srgb(crate::ui::theme::color(crate::ui::theme::Col::Text)) == expect_srgb(0xE6F7FF));
+        let note = crate::ui::shell::THEME_NOTE.lock().map(|n| n.clone()).unwrap_or_default();
+        state_check("themes: missing palette shows a note", note.contains("last saved"));
+        state_check("themes: note reaches the Theme row", to_str(msg_send![ui.s_theme_note.get(), stringValue]).contains("last saved"));
+    }
+}
+fn s_themes_shots() {
+    for id in ["catppuccin-mocha", "catppuccin-latte", "rose-pine-dawn"] {
+        unsafe {
+            let ui = UI.get_mut().unwrap();
+            ui.cfg.settings.theme = id.into();
+            crate::ui::shell::apply_theme();
+        }
+        audit(&format!("theme: {id}"));
+    }
+}
+fn s_themes_restore() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.settings.theme = "dark".into();
+        ui.cfg.settings.system_light = String::new();
+        ui.cfg.settings.system_dark = String::new();
+        crate::ui::shell::apply_theme();
+        state_check("themes: restored to Dark", active_theme_is_builtin());
+    }
+    std::env::remove_var("JELLYFAST_THEMES_DIR");
+}
+fn active_theme_is_builtin() -> bool {
+    unsafe {
+        let text = srgb(crate::ui::theme::color(crate::ui::theme::Col::Text));
+        let label: *mut Object = msg_send![class!(NSColor), labelColor];
+        text == srgb(label)
     }
 }

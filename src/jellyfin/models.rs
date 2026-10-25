@@ -93,6 +93,9 @@ pub struct ListItem {
     pub backdrop_tags: Option<Vec<String>>,
     #[serde(rename = "RunTimeTicks", default)]
     pub run_time_ticks: Option<i64>,
+    /// ISO 8601 date the item was added; orders Recently Added across libraries.
+    #[serde(rename = "DateCreated", default)]
+    pub date_created: Option<String>,
 }
 impl ListItem {
     pub fn has_image(&self) -> bool {
@@ -146,6 +149,9 @@ pub struct UserData {
     pub played: bool,
     #[serde(rename = "PlaybackPositionTicks", default)]
     pub position_ticks: i64,
+    /// ISO 8601 time of the last play; used to order Continue Watching across libraries.
+    #[serde(rename = "LastPlayedDate", default)]
+    pub last_played_date: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

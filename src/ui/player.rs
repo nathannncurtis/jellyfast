@@ -50,6 +50,89 @@ pub(crate) unsafe fn dark_appearance() -> *mut Object {
     msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameDarkAqua")]
 }
 
+/// AirPlay state of the player: while the video plays on another screen, the host shows this
+/// card instead of AVKit's black frame.
+pub struct ExtUi {
+    pub view: Ptr,
+    pub label: Ptr,
+    pub active: bool,
+}
+
+impl ExtUi {
+    pub fn new() -> ExtUi {
+        ExtUi { view: Ptr(std::ptr::null_mut()), label: Ptr(std::ptr::null_mut()), active: false }
+    }
+}
+
+/// The card's headline. `device` is the AirPlay output's name when it is known.
+pub fn external_title(device: Option<&str>) -> String {
+    match device.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => format!("Playing on {}", d),
+        None => "Playing on AirPlay".to_string(),
+    }
+}
+
+/// Whether the video view is on screen (the player host is up).
+pub(crate) unsafe fn video_on_screen() -> bool {
+    match UI.get() {
+        Some(ui) => !ui.player_host.get().is_null() && !crate::ui::shell::is_hidden(ui.player_host.get()),
+        None => false,
+    }
+}
+
+/// AVPlayer's `externalPlaybackActive` changed: show or hide the AirPlay card.
+pub(crate) unsafe fn set_external(active: bool) {
+    let Some(ui) = UI.get_mut() else { return };
+    if ui.ext.view.get().is_null() {
+        return;
+    }
+    if active {
+        let device = crate::platform::airplay::airplay_output_name();
+        set_text(ui.ext.label.get(), &external_title(device.as_deref()));
+    }
+    ui.ext.active = active;
+    set_hidden(ui.ext.view.get(), !active);
+}
+
+/// Builds the AirPlay card inside `ph`, above AVKit's view and below the bars.
+unsafe fn build_external(ph: *mut Object, b: NSRect) {
+    let ui = UI.get_mut().unwrap();
+    let v: *mut Object = msg_send![class!(NSView), alloc];
+    let v: *mut Object = autorel(msg_send![v, initWithFrame: b]);
+    set_autoresize(v, RESIZE_W | RESIZE_H);
+    let _: () = msg_send![v, setWantsLayer: YES];
+    let black: *mut Object = msg_send![class!(NSColor), blackColor];
+    let cg: *mut Object = msg_send![black, CGColor];
+    let _: () = msg_send![layer_of(v), setBackgroundColor: cg];
+    set_hidden(v, true);
+    add_sub(ph, v);
+    ui.ext.view = Ptr(v);
+
+    let cx = b.size.w / 2.;
+    let cy = b.size.h / 2.;
+    let flex = MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY;
+    let iv: *mut Object = msg_send![class!(NSImageView), alloc];
+    let iv: *mut Object = autorel(msg_send![iv, initWithFrame: rect(cx - 36., cy + 12., 72., 60.)]);
+    let img = symbol("airplayvideo", 56., Weight::Regular);
+    if !img.is_null() {
+        let _: () = msg_send![iv, setImage: img];
+    }
+    let _: () = msg_send![iv, setContentTintColor: color(C_ON_MEDIA)];
+    set_autoresize(iv, flex);
+    add_sub(v, iv);
+
+    let head = label(&external_title(None), T_TITLE, C_ON_MEDIA, ALIGN_CENTER);
+    set_frame(head, rect(cx - 260., cy - 26., 520., 26.));
+    set_autoresize(head, flex);
+    add_sub(v, head);
+    ui.ext.label = Ptr(head);
+
+    let sub = label("The video is on your TV. Pause, seek and volume still work here.", T_CALLOUT, C_ON_MEDIA2, ALIGN_CENTER);
+    set_frame(sub, rect(cx - 260., cy - 54., 520., 18.));
+    set_autoresize(sub, flex);
+    add_sub(v, sub);
+}
+
 /// Builds bar, toast, info panel and backdrop inside `ph` (the player host) around `avv`.
 pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: NSRect) {
     let ui = UI.get_mut().unwrap();
@@ -65,6 +148,8 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     // Media keys / Control Centre still work through now-playing.
     let _: () = msg_send![avv, setControlsStyle: 0isize];
     let _: () = msg_send![avv, setUpdatesNowPlayingInfoCenter: YES];
+
+    build_external(ph, b);
 
     // ---- top bar (gradient) ----
     let gcls = *GRADIENT_CLASS.get().unwrap();
@@ -174,6 +259,18 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     add_sub(bd, sp);
     ui.backdrop_spin = Ptr(sp);
     let _ = (fix_height as unsafe fn(*mut Object, f64), is_hidden as unsafe fn(*mut Object) -> bool);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_title_names_the_device_or_falls_back() {
+        assert_eq!(external_title(Some("Living Room Apple TV")), "Playing on Living Room Apple TV");
+        assert_eq!(external_title(Some("  ")), "Playing on AirPlay");
+        assert_eq!(external_title(None), "Playing on AirPlay");
+    }
 }
 
 // ---- bar visibility --------------------------------------------------------------------------

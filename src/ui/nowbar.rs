@@ -225,8 +225,7 @@ pub(crate) unsafe fn build(content_host: *mut Object, b: NSRect) {
 }
 
 unsafe fn cg_white(alpha: f64) -> *mut Object {
-    let c: *mut Object = msg_send![class!(NSColor), colorWithWhite: 1.0f64 alpha: alpha];
-    msg_send![c, CGColor]
+    crate::ui::theme::cg_a(crate::ui::theme::Col::OnMedia, alpha)
 }
 
 /// Pure layout of the bar's controls for a bar `w` wide. Returns, in order:
@@ -427,8 +426,7 @@ pub(crate) extern "C" fn restart(_t: &mut Object, _c: Sel, _s: *mut Object) {
         if ui.playing.is_none() {
             return;
         }
-        let tm = CMTimeMakeWithSeconds(0.0, 600);
-        let _: () = msg_send![ui.player.get(), seekToTime: tm];
+        crate::platform::avkit::seek_to_secs(0.0);
         update();
     }
 }
@@ -449,8 +447,7 @@ pub(crate) extern "C" fn scrub(_t: &mut Object, _c: Sel, sender: *mut Object) {
             return;
         }
         let v: f64 = msg_send![sender, doubleValue];
-        let tm = CMTimeMakeWithSeconds((v * dur).clamp(0.0, dur), 600);
-        let _: () = msg_send![ui.player.get(), seekToTime: tm];
+        crate::platform::avkit::seek_to_secs((v * dur).clamp(0.0, dur));
     }
 }
 pub(crate) extern "C" fn volume(_t: &mut Object, _c: Sel, sender: *mut Object) {

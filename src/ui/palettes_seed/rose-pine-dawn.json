@@ -1,0 +1,24 @@
+{
+  "base": "light",
+  "name": "Rose Pine Dawn",
+  "colors": {
+    "window": "#FAF4ED",
+    "panel": "#FFFAF3",
+    "surface": "#F2E9E1",
+    "surface_hover": "#DFDAD9",
+    "surface_active": "#CECACD",
+    "outline": "#DFDAD9",
+    "text": "#575279",
+    "secondary": "#666180",
+    "dim": "#6E6A86",
+    "accent": "#286983",
+    "accent_hover": "#56949F",
+    "on_accent": "#FFFAF3",
+    "danger": "#B4637A",
+    "warning": "#EA9D34",
+    "overlay": "#57527966",
+    "shadow": "#5752792E",
+    "tint": "#1F1D2E",
+    "ok": "#56949F"
+  }
+}

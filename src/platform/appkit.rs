@@ -300,6 +300,8 @@ pub struct Ui {
     pub side_stack: Ptr,
     pub search: Ptr,
     pub sort_popup: Ptr,
+    /// False while a grid the sort popup does not apply to is showing (album tracks).
+    pub sort_applies: bool,
     pub header: Ptr,
     pub header_title: Ptr,
     pub header_count: Ptr,
@@ -345,6 +347,14 @@ pub struct Ui {
     pub retry_pending: bool,
     pub s_quality: Ptr,
     pub s_theme: Ptr,
+    pub s_theme_note: Ptr,
+    pub s_light: Ptr,
+    pub s_dark: Ptr,
+    /// Ids behind each popup item (an empty id is a separator).
+    pub s_theme_ids: Vec<String>,
+    pub s_light_ids: Vec<String>,
+    pub s_dark_ids: Vec<String>,
+    pub s_follow: crate::ui::settings::FollowLayout,
     pub s_lib_pop: Ptr,
     pub s_lib_show: Ptr,
     pub s_lib_up: Ptr,
@@ -391,6 +401,10 @@ pub struct Ui {
     pub pbar: crate::ui::playerbar::PlayerBar,
     /// Skip-segment button and Up Next card (see ui::skip).
     pub skip: crate::ui::skip::SkipUi,
+    /// Play On: cast menu state and the remote-control bar.
+    pub cast: crate::ui::cast::CastUi,
+    /// AirPlay card shown over the video while it plays on another screen.
+    pub ext: crate::ui::player::ExtUi,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
 unsafe impl Send for Ui {}
@@ -474,7 +488,7 @@ pub(crate) unsafe fn register_classes() {
         );
         d.add_method(
             sel!(applicationShouldTerminateAfterLastWindowClosed:),
-            always_yes_obj as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
+            crate::ui::playerbar::terminate_after_last_window as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
         );
         d.add_method(
             sel!(applicationSupportsSecureRestorableState:),
@@ -517,12 +531,18 @@ pub(crate) unsafe fn register_classes() {
             (sel!(homeItemClicked:), home_item_clicked as Extern0),
             (sel!(homeSelected:), crate::ui::home::home_selected as Extern0),
             (sel!(browseSelected:), crate::ui::home::browse_selected as Extern0),
-            (sel!(openRequests:), crate::ui::seerr::open_requests as Extern0),
+            (sel!(requestsSelected:), crate::ui::seerr::requests_selected as Extern0),
+            (sel!(homeSegment:), crate::ui::home::segment_changed as Extern0),
+            (sel!(showHomeSection:), crate::ui::home::menu_section as Extern0),
+            (sel!(openRequests:), crate::ui::seerr::requests_selected as Extern0),
             (sel!(onboardPick:), crate::ui::onboarding::onboard_pick as Extern0),
             (sel!(onboardContinue:), crate::ui::onboarding::onboard_continue as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
             (sel!(markUnwatched:), mark_unwatched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
+            (sel!(themePicked:), crate::ui::settings::theme_picked as Extern0),
+            (sel!(openThemesFolder:), open_themes_folder as Extern0),
+            (sel!(reloadThemes:), reload_themes_action as Extern0),
             (sel!(connectClicked:), connect_clicked as Extern0),
             (sel!(toggleApiKey:), toggle_api_key as Extern0),
             (sel!(saveSettings:), save_settings as Extern0),
@@ -560,6 +580,13 @@ pub(crate) unsafe fn register_classes() {
             (sel!(jrUpNextPlay:), crate::ui::skip::up_next_play as Extern0),
             (sel!(jrUpNextCancel:), crate::ui::skip::up_next_cancel as Extern0),
             (sel!(jrToggleSeriesSkip:), crate::ui::skip::toggle_series_skip as Extern0),
+            (sel!(showCastMenu:), crate::ui::cast::show_menu as Extern0),
+            (sel!(castPick:), crate::ui::cast::pick as Extern0),
+            (sel!(castAirPlay:), crate::ui::cast::airplay_pick as Extern0),
+            (sel!(jrCastPlayPause:), crate::ui::cast::play_pause as Extern0),
+            (sel!(jrCastStop:), crate::ui::cast::stop as Extern0),
+            (sel!(jrCastClose:), crate::ui::cast::close as Extern0),
+            (sel!(jrCastScrub:), crate::ui::cast::scrub as Extern0),
         ] {
             d.add_method(s, f);
         }
@@ -747,8 +774,9 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         s.audio_lang = read_field(ui.s_audio_lang.get());
         let q: NSInteger = msg_send![ui.s_quality.get(), indexOfSelectedItem];
         s.max_bitrate_kbps = [0u64, 40_000, 20_000, 10_000, 5_000, 3_000][q.clamp(0, 5) as usize];
-        let th: NSInteger = msg_send![ui.s_theme.get(), indexOfSelectedItem];
-        s.theme = ["system", "light", "dark"][th.clamp(0, 2) as usize].to_string();
+        s.theme = popup_choice(ui.s_theme.get(), &ui.s_theme_ids, "system");
+        s.system_light = popup_choice(ui.s_light.get(), &ui.s_light_ids, &s.system_light);
+        s.system_dark = popup_choice(ui.s_dark.get(), &ui.s_dark_ids, &s.system_dark);
         let ap: NSInteger = msg_send![ui.s_autoplay.get(), state];
         s.autoplay_next = ap != 0;
         let sk: NSInteger = msg_send![ui.s_skip_default.get(), state];
@@ -834,26 +862,66 @@ pub(crate) extern "C" fn sign_out(_t: &mut Object, _c: Sel, _s: *mut Object) {
 }
 pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
-        let ui = UI.get_mut().unwrap();
-        if ui.home.active {
-            crate::ui::home::reload();
+        // Requests tab reloads its own data; library/Home/Browse keep the
+        // sort-filter behaviour (re-run an active filter, else reload the place).
+        if UI.get_mut().unwrap().seerr.active {
+            crate::ui::seerr::refresh();
             return;
         }
-        if ui.browse_active {
-            begin_load(false);
-            let _ = ui.ui_tx.send(UiCmd::LoadBrowse);
-            return;
-        }
-        if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
-            begin_load(false);
-            let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-        }
+        load_filtered_or_place();
     }
+}
+/// Reload the current place (Home, Browse or a library) and leave the filter text alone.
+pub(crate) unsafe fn reload_place() {
+    let ui = UI.get_mut().unwrap();
+    if ui.home.active {
+        crate::ui::home::reload();
+    } else if ui.browse_active {
+        begin_load(false);
+        let _ = UI.get_mut().unwrap().ui_tx.send(UiCmd::LoadBrowse);
+    } else if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+        begin_load(false);
+        let _ = UI.get_mut().unwrap().ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+    } else {
+        // Filter results from Home or Browse with nothing open behind them: show Home.
+        crate::ui::home::enter();
+    }
+}
+/// Load what the grid should show: the filter's results while its text is set, otherwise
+/// the current place. Used by the filter (debounced), the sort popup and Refresh.
+pub(crate) unsafe fn load_filtered_or_place() {
+    let ui = UI.get_mut().unwrap();
+    let q = read_field(ui.search.get());
+    if q.trim().is_empty() {
+        reload_place();
+        return;
+    }
+    let view = ui.mode_stack.last().map(|m| (m.0.as_str(), m.2.as_deref()));
+    let (parent_id, types) = crate::app::library_query::filter_scope(ui.browse_active, view);
+    begin_load(false);
+    let _ = UI.get_mut().unwrap().ui_tx.send(UiCmd::Search {
+        q,
+        parent_id,
+        types: types.map(String::from),
+    });
+}
+/// Empty the filter field and drop a debounced search that has not fired yet.
+pub(crate) unsafe fn clear_filter() {
+    let ui = UI.get_mut().unwrap();
+    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ui.ctl.get()
+        selector: sel!(jrSearchNow:) object: nil()];
+    set_text(ui.search.get(), "");
 }
 pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        if ui.home.active {
+        if ui.home.active || ui.seerr.active {
+            return;
+        }
+        // Back from filter results: clear the filter and show the place again.
+        if !read_field(ui.search.get()).trim().is_empty() {
+            clear_filter();
+            reload_place();
             return;
         }
         if ui.mode_stack.len() > 1 {
@@ -875,7 +943,9 @@ pub(crate) unsafe fn select_view(idx: usize) {
         sidebar_refresh_selection();
         ui.cfg.last_view = Some(id.clone());
         crate::config::save_config_keeping_session(&ui.cfg);
+        clear_filter();
         begin_load(true);
+        let ui = UI.get_mut().unwrap();
         let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
     }
 }
@@ -914,6 +984,7 @@ unsafe fn activate(it: ListItem) {
             let _ = ui.ui_tx.send(UiCmd::OpenDetail { item_id: it.id.clone() });
         }
         "MusicAlbum" => {
+            ui.sort_applies = false;
             let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
         }
         "LiveTvChannel" => {
@@ -944,6 +1015,27 @@ pub(crate) extern "C" fn mark_unwatched(_t: &mut Object, _c: Sel, sender: *mut O
         }
     }
 }
+/// Settings: open the themes folder in Finder. A no-op under the self-test.
+pub(crate) extern "C" fn open_themes_folder(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    if std::env::var_os("JELLYFAST_SELFTEST").is_some() {
+        return;
+    }
+    unsafe {
+        let dir = crate::ui::palettes::themes_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let u: *mut Object = msg_send![class!(NSURL), fileURLWithPath: ns(&dir.to_string_lossy())];
+        let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let _: BOOL = msg_send![ws, openURL: u];
+    }
+}
+
+/// Rescan the themes folder (Settings button or the App menu) without restarting.
+pub(crate) extern "C" fn reload_themes_action(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        crate::ui::shell::reload_themes();
+    }
+}
+
 pub(crate) extern "C" fn open_in_web(_t: &mut Object, _c: Sel, sender: *mut Object) {
     // The self-test sets fake server URLs; never open a real browser tab for them.
     if std::env::var_os("JELLYFAST_SELFTEST").is_some() {
@@ -995,10 +1087,13 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
 pub(crate) extern "C" fn sort_changed(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
-            begin_load(false);
-            let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-        }
+        let index: NSInteger = msg_send![ui.sort_popup.get(), indexOfSelectedItem];
+        let (by, _) = crate::app::library_query::sort_for_index(index.max(0) as usize);
+        ui.cfg.sort_by = Some(by.to_string());
+        crate::config::save_config_keeping_session(&ui.cfg);
+        let _ = ui.ui_tx.send(UiCmd::SetSort { sort_by: by.to_string() });
+        // Re-run whatever is on screen so the order applies, filter included.
+        load_filtered_or_place();
     }
 }
 pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Object) {
@@ -1018,16 +1113,7 @@ pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Objec
 }
 pub(crate) extern "C" fn search_now(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
-        let ui = UI.get_mut().unwrap();
-        let q = read_field(ui.search.get());
-        begin_load(false);
-        if q.trim().is_empty() {
-            if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
-                let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-            }
-        } else {
-            let _ = ui.ui_tx.send(UiCmd::Search { q });
-        }
+        load_filtered_or_place();
     }
 }
 
@@ -1180,6 +1266,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         side_stack: Ptr(nil()),
         search: Ptr(nil()),
         sort_popup: Ptr(nil()),
+        sort_applies: true,
         header: Ptr(nil()),
         header_title: Ptr(nil()),
         header_count: Ptr(nil()),
@@ -1225,6 +1312,13 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         retry_pending: false,
         s_quality: Ptr(nil()),
         s_theme: Ptr(nil()),
+        s_theme_note: Ptr(nil()),
+        s_light: Ptr(nil()),
+        s_dark: Ptr(nil()),
+        s_theme_ids: Vec::new(),
+        s_light_ids: Vec::new(),
+        s_dark_ids: Vec::new(),
+        s_follow: Default::default(),
         s_lib_pop: Ptr(nil()),
         s_lib_show: Ptr(nil()),
         s_lib_up: Ptr(nil()),
@@ -1263,6 +1357,8 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         now: crate::ui::nowbar::NowBar::new(),
         pbar: crate::ui::playerbar::PlayerBar::new(),
         skip: crate::ui::skip::SkipUi::new(),
+        cast: crate::ui::cast::CastUi::new(),
+        ext: crate::ui::player::ExtUi::new(),
         tint_cache: HashMap::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);

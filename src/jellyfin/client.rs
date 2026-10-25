@@ -2,6 +2,7 @@ use crate::*;
 
 use super::urls as u;
 use super::models::*;
+use super::sessions::{parse_sessions, play_now_path, playstate_path, sessions_path, RemoteAction, RemoteSession};
 use crate::jellyfin::urls::enc;
 
 /// `Fields` requested for the item detail page.
@@ -67,7 +68,7 @@ fn map_err(e: reqwest::Error) -> JFError {
 }
 
 /// Fields requested for every home-screen list.
-const HOME_FIELDS: &str = "PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName";
+const HOME_FIELDS: &str = "PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,DateCreated";
 
 impl JellyfinClient {
     pub fn new(
@@ -378,35 +379,51 @@ impl JellyfinClient {
 
     /// Continue Watching: in-progress movies and episodes, most recent first.
     pub async fn resume_items(&self, limit: u32) -> Result<Vec<ListItem>, JFError> {
+        self.resume_items_in(None, limit).await
+    }
+
+    /// Continue Watching limited to one library (`parent` is a view id).
+    pub async fn resume_items_in(&self, parent: Option<&str>, limit: u32) -> Result<Vec<ListItem>, JFError> {
         #[derive(Deserialize)]
         struct R {
             #[serde(rename = "Items", default)]
             items: Vec<ListItem>,
         }
         let path = format!("/Users/{}/Items/Resume", enc(&self.user_id));
-        let pairs = [
+        let mut pairs = vec![
             ("Limit", limit.to_string()),
             ("MediaTypes", "Video".to_string()),
             ("Fields", HOME_FIELDS.to_string()),
             ("ImageTypeLimit", "1".to_string()),
         ];
+        if let Some(p) = parent {
+            pairs.push(("ParentId", p.to_string()));
+        }
         let v: R = self.get_json(&path, &pairs).await?;
         Ok(v.items)
     }
 
     /// Next Up: the next unwatched episode of each series in progress.
     pub async fn next_up(&self, limit: u32) -> Result<Vec<ListItem>, JFError> {
+        self.next_up_in(None, limit).await
+    }
+
+    /// Next Up limited to one library (`parent` is a view id).
+    pub async fn next_up_in(&self, parent: Option<&str>, limit: u32) -> Result<Vec<ListItem>, JFError> {
         #[derive(Deserialize)]
         struct R {
             #[serde(rename = "Items", default)]
             items: Vec<ListItem>,
         }
-        let pairs = [
+        let mut pairs = vec![
             ("UserId", self.user_id.clone()),
             ("Limit", limit.to_string()),
             ("Fields", HOME_FIELDS.to_string()),
             ("ImageTypeLimit", "1".to_string()),
         ];
+        if let Some(p) = parent {
+            pairs.push(("ParentId", p.to_string()));
+        }
         let v: R = self.get_json("/Shows/NextUp", &pairs).await?;
         Ok(v.items)
     }
@@ -426,11 +443,19 @@ impl JellyfinClient {
 
     /// Movie recommendation groups (similar to recent plays, liked people, ...).
     pub async fn recommendations(&self, limit: u32) -> Result<Vec<RecommendationDto>, JFError> {
-        let pairs = [
+        self.recommendations_in(None, limit).await
+    }
+
+    /// Movie recommendations limited to one library (`parent` is a view id).
+    pub async fn recommendations_in(&self, parent: Option<&str>, limit: u32) -> Result<Vec<RecommendationDto>, JFError> {
+        let mut pairs = vec![
             ("UserId", self.user_id.clone()),
             ("CategoryLimit", "5".to_string()),
             ("ItemLimit", limit.to_string()),
         ];
+        if let Some(p) = parent {
+            pairs.push(("ParentId", p.to_string()));
+        }
         self.get_json("/Movies/Recommendations", &pairs).await
     }
 
@@ -575,6 +600,59 @@ impl JellyfinClient {
             .send()
             .await;
     }
+    /// This app's device id. Its own session is never offered for Play On.
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Other devices this user can control: `GET /Sessions?ControllableByUserId=`.
+    pub async fn controllable_sessions(&self) -> Result<Vec<RemoteSession>, JFError> {
+        let (path, pairs) = sessions_path(&self.user_id);
+        let r = self
+            .http
+            .get(format!("{}{}", self.base, path))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .query(&pairs)
+            .send()
+            .await
+            .map_err(map_err)?;
+        let r = check(r).await?;
+        let body = r.text().await.map_err(map_err)?;
+        parse_sessions(&body, &self.device_id).map_err(JFError::Parse)
+    }
+
+    /// Play On: start `item_id` on another session from `start_secs` (`PlayNow`).
+    /// Read-only mode sends nothing.
+    pub async fn play_on_session(&self, session_id: &str, item_id: &str, start_secs: f64) -> Result<(), JFError> {
+        if read_only() {
+            return Ok(());
+        }
+        self.post_session(&play_now_path(session_id, item_id, start_secs)).await
+    }
+
+    /// Remote playstate command (pause, unpause, stop, seek) for another session.
+    /// Read-only mode sends nothing.
+    pub async fn remote_control(&self, session_id: &str, action: RemoteAction) -> Result<(), JFError> {
+        if read_only() {
+            return Ok(());
+        }
+        self.post_session(&playstate_path(session_id, action)).await
+    }
+
+    async fn post_session(&self, path: &str) -> Result<(), JFError> {
+        let r = self
+            .http
+            .post(format!("{}{}", self.base, path))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .send()
+            .await
+            .map_err(map_err)?;
+        check(r).await?;
+        Ok(())
+    }
+
     pub async fn set_played(&self, item_id: &str, played: bool) -> Result<(), JFError> {
         if read_only() {
             return Ok(());
