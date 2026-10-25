@@ -313,6 +313,20 @@ impl SeerrClient {
         })
     }
 
+    /// Poster bytes through this server's image proxy (needs no credentials).
+    pub async fn poster(&self, path: &str) -> Result<Vec<u8>, SeerrError> {
+        let r = self.http.get(poster_url(&self.base, path)).send().await.map_err(map_err)?;
+        let code = r.status().as_u16();
+        if !(200..300).contains(&code) {
+            return Err(SeerrError::Api(code, "poster".into()));
+        }
+        let b = r.bytes().await.map_err(|e| SeerrError::Network(e.to_string()))?;
+        if b.is_empty() {
+            return Err(SeerrError::Parse("empty poster".into()));
+        }
+        Ok(b.to_vec())
+    }
+
     /// POST /api/v1/request. TV requests ask for every season (`"seasons":"all"`).
     pub async fn request(&self, media_type: &str, tmdb_id: u64) -> Result<CreatedRequest, SeerrError> {
         let body = match media_type {
@@ -401,6 +415,24 @@ mod tests {
 
     async fn client(m: &MockSeerr) -> SeerrClient {
         SeerrClient::new(&m.url(), KEY).unwrap()
+    }
+
+    #[test]
+    fn poster_url_uses_the_seerr_image_proxy() {
+        assert_eq!(poster_url("http://s:5055", "/a.jpg"), "http://s:5055/imageproxy/tmdb/t/p/w92/a.jpg");
+        assert_eq!(poster_url("http://s:5055/", "a.jpg"), "http://s:5055/imageproxy/tmdb/t/p/w92/a.jpg");
+        assert!(!poster_url("http://s", "/a.jpg").contains("image.tmdb.org"));
+    }
+
+    #[tokio::test]
+    async fn poster_fetches_bytes_without_credentials() {
+        let m = start(default_route).await;
+        let c = client(&m).await;
+        assert_eq!(c.poster("/inc.jpg").await.unwrap(), b"IMG/inc.jpg");
+        let r = m.find("GET", "/imageproxy/tmdb/t/p/w92/inc.jpg");
+        assert_eq!(r.len(), 1);
+        assert!(!r[0].headers.contains_key("x-api-key"));
+        assert!(matches!(c.poster("/missing.jpg").await, Err(SeerrError::Api(404, _))));
     }
 
     #[test]
@@ -722,7 +754,7 @@ mod tests {
                 }
                 if let Some(p) = &r.poster_path {
                     assert!(p.starts_with('/'), "{:?}", r);
-                    assert!(poster_url(p).starts_with("https://image.tmdb.org/"));
+                    assert!(poster_url(&c.base, p).contains("/imageproxy/tmdb/t/p/"));
                 }
             }
             // availability/request_status must agree with each other

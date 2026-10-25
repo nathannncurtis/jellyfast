@@ -125,6 +125,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::SeerrResults(v) => crate::ui::seerr::on_results(v),
         MainMsg::SeerrRequested { title } => crate::ui::seerr::on_requested(title),
         MainMsg::SeerrRequestList(v) => crate::ui::seerr::on_request_list(v),
+        MainMsg::SeerrPoster { path, bytes } => crate::ui::seerr::on_poster(path, &bytes),
         MainMsg::SeerrError(m) => crate::ui::seerr::on_error(m),
         MainMsg::SeerrStatus { ok, message } => unsafe {
             crate::ui::seerr::on_save_status(ok, message);
