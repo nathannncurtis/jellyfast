@@ -10,6 +10,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     let mut cfg = cfg;
     // Lazily built from settings + Keychain; invalidated when settings change.
     let mut seerr: Option<SeerrClient> = None;
+    // Base address whose probe found no https redirect; cleared with `seerr`.
+    let mut seerr_plain: Option<String> = None;
     // Live stream opened by the current channel playback; closed on the next one / stop.
     let mut live_stream: Option<String> = None;
 
@@ -316,7 +318,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     Ok(_) if latest.trim().is_empty() => {
                         let _ = main_tx.send(MainMsg::SeerrResults(Vec::new()));
                     }
-                    Ok(c) => match { let c = seerr_secure(c, &mut seerr).await; c.search(&latest, 1).await.map(|p| (c, p)) } {
+                    Ok(c) => match { let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await; c.search(&latest, 1).await.map(|p| (c, p)) } {
                         Ok((c, page)) => {
                             let paths = page.results.iter().filter_map(|r| r.poster_path.clone()).collect();
                             let _ = main_tx.send(MainMsg::SeerrResults(page.results));
@@ -332,7 +334,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match seerr_secure(c, &mut seerr).await.request(&media_type, tmdb_id).await {
+                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.request(&media_type, tmdb_id).await {
                     Ok(_) => {
                         let _ = main_tx.send(MainMsg::SeerrRequested { title });
                     }
@@ -348,7 +350,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match { let c = seerr_secure(c, &mut seerr).await; c.requests(20, 0).await.map(|v| (c, v)) } {
+                Ok(c) => match { let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await; c.requests(20, 0).await.map(|v| (c, v)) } {
                     Ok((c, v)) => {
                         let paths = v.iter().filter_map(|r| r.poster_path.clone()).collect();
                         let _ = main_tx.send(MainMsg::SeerrRequestList(v));
@@ -361,11 +363,13 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             },
             UiCmd::SaveSeerr { enabled, url, username, password, api_key } => {
                 seerr = None;
+                seerr_plain = None;
                 let msg = save_seerr(&mut cfg, enabled, &url, &username, password, api_key).await;
                 let _ = main_tx.send(msg);
             }
             UiCmd::SaveSettings { settings, reconnect } => {
                 seerr = None;
+                seerr_plain = None;
                 cfg.settings = settings;
                 crate::config::save_config(&cfg);
                 if reconnect {
@@ -506,18 +510,24 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
 
 /// An address saved as http:// (before the https upgrade existed) is switched
 /// to its https form before anything is sent; secrets stay keyed by the saved
-/// address. One probe per client: the upgraded client replaces the cached one.
-async fn seerr_secure(c: SeerrClient, cache: &mut Option<SeerrClient>) -> SeerrClient {
-    if !c.base.starts_with("http://") {
+/// address. One probe per base: the upgraded client replaces the cached one, and
+/// a server with no https redirect is remembered in `plain`, so later calls skip
+/// the probe. A failed probe is not remembered, so the next call tries again.
+async fn seerr_secure(c: SeerrClient, cache: &mut Option<SeerrClient>, plain: &mut Option<String>) -> SeerrClient {
+    if !c.base.starts_with("http://") || plain.as_deref() == Some(c.base.as_str()) {
         return c;
     }
-    match crate::seerr::client::https_upgrade(&c.base).await {
-        Some(n) => {
+    match crate::seerr::client::probe_https(&c.base).await {
+        Ok(Some(n)) => {
             let c = c.with_base(n);
             *cache = Some(c.clone());
             c
         }
-        None => c,
+        Ok(None) => {
+            *plain = Some(c.base.clone());
+            c
+        }
+        Err(_) => c,
     }
 }
 

@@ -95,27 +95,38 @@ fn check(code: u16, body: &str, what: &str) -> Result<(), SeerrError> {
     }
 }
 
-/// For a plain `http://` address that the server redirects to https on the same
-/// host, returns that https base (path kept). Sends one unauthenticated GET
-/// /api/v1/status with redirects turned off, so the password or API key is
-/// never sent in cleartext before the upgrade. `None` when there is nothing to
-/// upgrade or the probe fails; the normal flow then reports the real error.
-pub async fn https_upgrade(base: &str) -> Option<String> {
-    let host_and_path = base.trim().trim_end_matches('/').strip_prefix("http://")?;
-    let host = host_and_path.split('/').next()?;
+/// For a plain `http://` address, probes whether the server redirects to https
+/// on the same host. `Ok(Some(base))` is that https base (path kept), `Ok(None)`
+/// means no such redirect, and `Err` means the probe itself failed. Sends one
+/// unauthenticated GET /api/v1/status with redirects turned off, so the password
+/// or API key is never sent in cleartext before the upgrade.
+pub async fn probe_https(base: &str) -> Result<Option<String>, SeerrError> {
+    let Some(host_and_path) = base.trim().trim_end_matches('/').strip_prefix("http://") else {
+        return Ok(None);
+    };
+    let host = host_and_path.split('/').next().unwrap_or_default();
     let probe = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .build()
-        .ok()?;
-    let r = probe.get(format!("http://{}/api/v1/status", host_and_path)).send().await.ok()?;
+        .map_err(|e| SeerrError::Network(e.to_string()))?;
+    let r = probe.get(format!("http://{}/api/v1/status", host_and_path)).send().await.map_err(map_err)?;
     if !r.status().is_redirection() {
-        return None;
+        return Ok(None);
     }
-    let loc = r.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
-    let loc_host = loc.strip_prefix("https://")?.split('/').next()?;
-    (loc_host == host).then(|| format!("https://{}", host_and_path))
+    let Some(loc) = r.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) else {
+        return Ok(None);
+    };
+    let loc_host = loc.strip_prefix("https://").and_then(|l| l.split('/').next());
+    Ok((loc_host == Some(host)).then(|| format!("https://{}", host_and_path)))
+}
+
+/// The https form of a plain `http://` address that redirects to https on the
+/// same host (see [`probe_https`]). `None` when there is nothing to upgrade or
+/// the probe fails; the normal flow then reports the real error.
+pub async fn https_upgrade(base: &str) -> Option<String> {
+    probe_https(base).await.ok().flatten()
 }
 
 /// True when following a redirect from `cur` to `next` may carry credentials:
@@ -138,6 +149,9 @@ pub struct SeerrClient {
     http: reqwest::Client,
     pub base: String,
     auth: Auth,
+    /// Sign-in over plain http is refused unless this is set. Only unit tests
+    /// (which use a plain-http mock) leave it set; see `refuse_plain_login`.
+    allow_plain_login: bool,
 }
 
 impl SeerrClient {
@@ -152,7 +166,14 @@ impl SeerrClient {
             .user_agent("Jellyfast/0.1.0")
             .build()
             .map_err(|e| SeerrError::Network(e.to_string()))?;
-        Ok(Self { http, base, auth })
+        Ok(Self { http, base, auth, allow_plain_login: cfg!(test) })
+    }
+
+    /// Test hook: enforce the https-only sign-in rule on a mock client.
+    #[cfg(test)]
+    fn refuse_plain_login(mut self) -> Self {
+        self.allow_plain_login = false;
+        self
     }
 
     /// Same server with an https base (see [`https_upgrade`]).
@@ -226,6 +247,10 @@ impl SeerrClient {
 
     /// POST /api/v1/auth/jellyfin; returns the `Cookie` header value to replay.
     async fn login(&self, username: &str, password: &str) -> Result<String, SeerrError> {
+        // The password must never go out over plain http; callers upgrade first.
+        if self.base.starts_with("http://") && !self.allow_plain_login {
+            return Err(SeerrError::Login("the address is plain http, so the password was not sent".into()));
+        }
         let r = self
             .http
             .post(format!("{}/api/v1/auth/jellyfin", self.base))
@@ -710,6 +735,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_refuses_plain_http_before_sending_the_password() {
+        // a direct caller pointing login mode at http:// must not leak the password
+        let (m, _st) = login_mock().await;
+        let c = SeerrClient::with_login(&m.url(), "nathan", "pw").unwrap().refuse_plain_login();
+        match c.me().await.unwrap_err() {
+            SeerrError::Login(msg) => assert!(msg.contains("plain http"), "{}", msg),
+            e => panic!("{:?}", e),
+        }
+        assert!(logins(&m).is_empty());
+        // once the base is https the same client may sign in (via with_base)
+        let c = c.with_base("https://127.0.0.1:1".into());
+        assert!(matches!(c.me().await, Err(SeerrError::Network(_))));
+    }
+
+    #[tokio::test]
     async fn login_wrong_password_is_a_login_error() {
         let (m, _st) = login_mock().await;
         let c = SeerrClient::with_login(&m.url(), "nathan", "nope").unwrap();
@@ -812,6 +852,9 @@ mod tests {
         assert_eq!(https_upgrade(&plain.url()).await, None);
         assert_eq!(https_upgrade("https://127.0.0.1:1").await, None);
         assert_eq!(https_upgrade("http://127.0.0.1:1").await, None);
+        // the probe distinguishes "no redirect" (Ok(None)) from "probe failed" (Err)
+        assert_eq!(probe_https(&plain.url()).await.unwrap(), None);
+        assert!(probe_https("http://127.0.0.1:1").await.is_err());
     }
 
     #[tokio::test]
@@ -883,18 +926,19 @@ mod tests {
             panic!("set SEERR_LIVE_URL, SEERR_LIVE_USER and SEERR_LIVE_PASS_FILE");
         };
         let pass = std::fs::read_to_string(&pf).expect("password file");
-        // A plain http address that redirects to https is used in its https form,
-        // and (below) the client also survives being pointed at the http form.
+        // A plain http address that redirects to https is used in its https form.
+        // Without that redirect, sign-in over http must be refused, not sent.
         let up = https_upgrade(&url).await;
         if let Some(u) = &up {
-            println!("note: {} redirects to https; checking both forms", url);
-            let c = SeerrClient::with_login(u, &user, pass.trim_end_matches(['\r', '\n'])).unwrap();
-            c.me().await.expect("me (upgraded https base)");
+            println!("note: {} redirects to https; using the https form", url);
         } else if url.starts_with("https://") {
             assert!(https_upgrade(&url).await.is_none());
+        } else {
+            let c = SeerrClient::with_login(&url, &user, pass.trim_end_matches(['\r', '\n'])).unwrap().refuse_plain_login();
+            assert!(matches!(c.me().await, Err(SeerrError::Login(_))));
+            return;
         }
-        // `url` itself is used as given: for http input this walks the http -> https
-        // redirect with the session cookie, the case reqwest's own policy broke.
+        let url = up.unwrap_or(url);
         let c = SeerrClient::with_login(&url, &user, pass.trim_end_matches(['\r', '\n'])).unwrap();
 
         let st = c.status().await.expect("status");
