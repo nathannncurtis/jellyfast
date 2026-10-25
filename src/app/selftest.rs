@@ -32,6 +32,52 @@ type Step = (&'static str, fn(), u64);
 
 static CMD_RX: Mutex<Option<UnboundedReceiver<UiCmd>>> = Mutex::new(None);
 
+/// UiCmds sent before `start()` swapped in the interceptor (during launch).
+static EARLY_CMDS: Mutex<Vec<UiCmd>> = Mutex::new(Vec::new());
+
+/// Pre-start UiCmd sink: `main` routes the self-test drain here instead of dropping.
+pub fn early_cmd(c: UiCmd) {
+    println!("[selftest]   UiCmd (launch) -> {:?}", c);
+    EARLY_CMDS.lock().unwrap().push(c);
+}
+
+/// Commands that reach the network or sign in, i.e. anything that must wait for Connect.
+fn is_connect_or_auth(c: &UiCmd) -> bool {
+    matches!(
+        c,
+        UiCmd::Connect { .. }
+            | UiCmd::SaveSettings { server_url: Some(_), .. }
+            | UiCmd::SaveSeerr { .. }
+            | UiCmd::ProbeServer
+            | UiCmd::LoadHome
+            | UiCmd::LoadBrowse
+            | UiCmd::LoadView { .. }
+            | UiCmd::SeerrSearch { .. }
+            | UiCmd::SeerrRequest { .. }
+            | UiCmd::SeerrRequests
+    )
+}
+
+/// Fresh login screen: no connect/auth command queued, Connect enabled, no status text.
+fn state_check_fresh_login(ui: &crate::platform::appkit::Ui) {
+    let mut sent = std::mem::take(&mut *EARLY_CMDS.lock().unwrap());
+    sent.extend(take_cmds());
+    let bad: Vec<String> = sent.iter().filter(|c| is_connect_or_auth(c)).map(|c| format!("{:?}", c)).collect();
+    if !bad.is_empty() {
+        log(&format!("  sent before Connect: {:?}", bad));
+    }
+    state_check("fresh login: no connect/auth UiCmd before Connect", bad.is_empty());
+    unsafe {
+        let en: BOOL = msg_send![ui.login_btn.get(), isEnabled];
+        let title: *mut Object = msg_send![ui.login_btn.get(), title];
+        let status: *mut Object = msg_send![ui.login_err.get(), stringValue];
+        state_check(
+            "fresh login: Connect enabled, titled Connect, no connecting status",
+            en == YES && to_str(title) == "Connect" && to_str(status).is_empty(),
+        );
+    }
+}
+
 /// Take (and log) every UiCmd emitted since the last call.
 fn take_cmds() -> Vec<UiCmd> {
     let mut out = vec![];
@@ -57,6 +103,7 @@ pub fn start() {
         let (tx, rx) = unbounded_channel::<UiCmd>();
         ui.ui_tx = tx;
         *CMD_RX.lock().unwrap() = Some(rx);
+        state_check_fresh_login(ui);
         // Launch state: no library chrome, no spinner, branded window.
         let h: BOOL = msg_send![ui.content_host.get(), isHidden];
         state_check("launch: content_host hidden", h == YES);

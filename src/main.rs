@@ -195,7 +195,7 @@ fn main() {
         let mut ui_rx = ui_rx;
         rt.spawn(async move {
             while let Some(c) = ui_rx.recv().await {
-                println!("[selftest]   UiCmd -> {:?}", c);
+                app::selftest::early_cmd(c);
             }
         });
     } else {

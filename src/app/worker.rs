@@ -28,12 +28,15 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     } else if let (Some(url), Some(uid)) = (cfg.server_url.clone(), cfg.user_id.clone()) {
         if let Some(token) = crate::config::load_token(&url) {
             match crate::jellyfin::client::JellyfinClient::new(&url, token.clone(), uid.clone(), &cfg.device_id) {
-                Ok(c) => match connect_flow(&c, &cfg.username.clone().unwrap_or_else(|| uid.clone()), &main_tx).await {
-                    Ok(()) => client = Some(c),
-                    Err(e) => {
-                        let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
+                Ok(c) => {
+                    let _ = main_tx.send(MainMsg::Resuming { url: url.clone() });
+                    match connect_flow(&c, &cfg.username.clone().unwrap_or_else(|| uid.clone()), &main_tx).await {
+                        Ok(()) => client = Some(c),
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
                 }
@@ -1482,6 +1485,10 @@ mod tests {
                 .expect("timed out waiting for MainMsg")
                 .expect("main channel closed")
         }
+        /// A message already queued, without waiting.
+        fn try_next(&mut self) -> Option<MainMsg> {
+            self.rx.try_recv().ok()
+        }
         /// Next message, ignoring asynchronous Seerr thumbnail deliveries and the
         /// ServerUrl side-notification that follows a successful connect (tests
         /// that care about it read it with `next_raw`).
@@ -1775,12 +1782,39 @@ mod tests {
         };
         let mut h = H::start(cfg);
         match h.next().await {
+            MainMsg::Resuming { url } => assert_eq!(url, m.url()),
+            o => panic!("{:?}", o),
+        }
+        match h.next().await {
             MainMsg::Connected { user_name, .. } => assert_eq!(user_name, "Alice Display"),
             o => panic!("{:?}", o),
         }
         // Worker is usable right away.
         h.send(UiCmd::ProbeServer);
         assert!(matches!(h.next().await, MainMsg::ServerUp));
+    }
+
+    #[tokio::test]
+    async fn startup_without_saved_session_makes_no_server_call_and_sends_no_resume() {
+        // Fresh launch: nothing stored. No network, and no "Connecting" announcement.
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(m.reqs().is_empty(), "no server calls at launch");
+        assert!(h.try_next().is_none(), "nothing is announced before Connect");
+        // Remembered URL and user but Remember me off: still no resume, no request.
+        let cfg = Config {
+            server_url: Some(m.url()),
+            user_id: Some("u1".into()),
+            remember_me: false,
+            ..base_cfg()
+        };
+        crate::config::store_token(&m.url(), "tok123");
+        let mut h = H::start(cfg);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(m.reqs().is_empty(), "no server calls with Remember me off");
+        assert!(h.try_next().is_none(), "no resume announced with Remember me off");
     }
 
     #[tokio::test]
@@ -1795,6 +1829,7 @@ mod tests {
         }
         crate::config::store_token(&m.url(), "revoked");
         let mut h = H::start(cfg);
+        assert!(matches!(h.next().await, MainMsg::Resuming { .. }), "resume is announced before the attempt");
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("token expired"), "{e}"),
             o => panic!("{:?}", o),

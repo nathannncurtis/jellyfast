@@ -127,6 +127,10 @@ pub enum MainMsg {
         has_live_tv: bool,
     },
     ConnectError(String),
+    /// The worker is resuming a remembered session (Remember me + Keychain token)
+    /// at launch. Only then does the login card show "Connecting…"; with no saved
+    /// session nothing is sent and the card waits for the user.
+    Resuming { url: String },
     /// The resolved (scheme-complete) server base URL, sent after a connect or
     /// Settings URL change so the UI uses the same address the worker stored.
     ServerUrl(String),
