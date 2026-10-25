@@ -373,7 +373,6 @@ pub struct Ui {
     pub selected_view: Option<usize>,
     pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
-    /// Home screen rows from the latest `MainMsg::HomeLoaded`.
     /// Home screen views (scroll, rows, cards, sidebar row).
     pub home: crate::ui::home::HomeUi,
     /// Unified-layout "Browse" sidebar row, and whether Browse is the screen showing.
