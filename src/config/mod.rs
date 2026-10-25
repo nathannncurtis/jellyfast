@@ -51,6 +51,9 @@ pub struct Config {
     /// Library view ids the user hid from the sidebar.
     #[serde(default)]
     pub hidden_libraries: Vec<String>,
+    /// Last accepted JSON text per palette id, used when a palette file goes missing or invalid.
+    #[serde(default)]
+    pub palette_cache: std::collections::BTreeMap<String, String>,
 }
 
 fn default_remember_me() -> bool {
@@ -73,6 +76,7 @@ impl Default for Config {
             library_order: Vec::new(),
             hidden_libraries: Vec::new(),
             layout_mode: None,
+            palette_cache: Default::default(),
         }
     }
 }

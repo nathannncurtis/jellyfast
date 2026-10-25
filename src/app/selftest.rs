@@ -222,6 +222,10 @@ fn steps() -> Vec<Step> {
         ("home: back to a library", s_home_leave, 100),
         ("settings: open+cancel", s_settings_cancel, 600),
         ("settings: open+save", s_settings_save, 600),
+        ("themes: load palette from folder", s_themes_palette, 300),
+        ("themes: follow system pickers", s_themes_follow, 300),
+        ("themes: palette screenshots", s_themes_shots, 300),
+        ("themes: restore", s_themes_restore, 100),
         ("libraries: sidebar order + hidden, settings controls", s_library_prefs, 300),
         ("playback: start", s_play_start, 2500),
         // The start-up fade-in of the bars runs for M_FAST (0.12 s) and alphaValue reads
@@ -349,6 +353,18 @@ fn playback(resume: f64, run: f64) -> MainMsg {
         production_year: None,
     })
 }
+/// Resolved sRGB components of a colour under the current appearance (for comparisons).
+pub(crate) unsafe fn srgb(c: *mut Object) -> [i64; 4] {
+    let space: *mut Object = msg_send![class!(NSColorSpace), sRGBColorSpace];
+    let r: *mut Object = msg_send![c, colorUsingColorSpace: space];
+    if r.is_null() {
+        return [-1; 4];
+    }
+    let (mut a, mut b, mut g, mut al) = (0f64, 0f64, 0f64, 0f64);
+    let _: () = msg_send![r, getRed: &mut a green: &mut g blue: &mut b alpha: &mut al];
+    [(a * 1000.).round() as i64, (g * 1000.).round() as i64, (b * 1000.).round() as i64, (al * 1000.).round() as i64]
+}
+
 fn state_check(what: &str, ok: bool) {
     log(&format!("  check {}: {}", what, if ok { "ok" } else { "FAILED" }));
     if !ok {
@@ -2384,8 +2400,8 @@ fn s_signed_out() {
         let ui = UI.get().unwrap();
         let c: *mut Object = msg_send![ui.login_err.get(), textColor];
         let sec: *mut Object = msg_send![class!(NSColor), secondaryLabelColor];
-        let eq: BOOL = msg_send![c, isEqual: sec];
-        state_check("signed-out message is neutral (secondary colour)", eq == YES);
+        // Theme colours are dynamic objects, so compare what they resolve to.
+        state_check("signed-out message is neutral (secondary colour)", srgb(c) == srgb(sec));
         let t: *mut Object = msg_send![ui.win.get(), title];
         state_check("window title still Jellyfast after playback", to_str(t) == "Jellyfast");
     }
@@ -2886,5 +2902,111 @@ fn s_seerr_end() {
         let ui = UI.get_mut().unwrap();
         let _: () = msg_send![ui.seerr.win.get(), close];
         take_cmds();
+    }
+}
+
+// ---- themes -----------------------------------------------------------------
+fn theme_ocean_json() -> &'static str {
+    r##"{"base":"dark","name":"Selftest Ocean","colors":{"window":"#0B1620","panel":"#0F1D2A","surface":"#1A2D3D","surface_hover":"#243B4E","surface_active":"#2E4A61","outline":"#2E4A61","text":"#E6F7FF","secondary":"#A9C8D8","dim":"#8FB0C2","accent":"#4FC3F7","accent_hover":"#81D4FA","on_accent":"#0B1620","danger":"#FF6B6B","warning":"#FFD166","overlay":"#000000B3","shadow":"#00000066","tint":"#0F1D2A","ok":"#7BD88F"}}"##
+}
+/// Resolved sRGB (thousandths) of a 0xRRGGBB value, as `srgb()` reports it.
+fn expect_srgb(v: u32) -> [i64; 4] {
+    let c = |s: u32| (((v >> s) & 0xff) as f64 / 255. * 1000.).round() as i64;
+    [c(16), c(8), c(0), 1000]
+}
+fn popup_titles(p: *mut Object) -> Vec<String> {
+    unsafe {
+        let t: *mut Object = msg_send![p, itemTitles];
+        let n: usize = msg_send![t, count];
+        (0..n).map(|i| to_str(msg_send![t, objectAtIndex: i])).collect()
+    }
+}
+fn s_themes_palette() {
+    let dir = std::env::temp_dir().join(format!("jf-selftest-themes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("selftest-ocean.json"), theme_ocean_json()).unwrap();
+    std::fs::write(dir.join("broken.json"), "{ not json").unwrap();
+    std::env::set_var("JELLYFAST_THEMES_DIR", &dir);
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.settings.theme = "selftest-ocean".into();
+        crate::ui::shell::reload_themes();
+        let reg = crate::ui::palettes::registry();
+        state_check("themes: valid palette loaded", reg.iter().any(|t| t.id == "selftest-ocean"));
+        state_check("themes: invalid palette skipped", !reg.iter().any(|t| t.id == "broken"));
+        let titles = popup_titles(ui.s_theme.get());
+        state_check("themes: picker lists palette by name", titles.iter().any(|t| t == "Selftest Ocean"));
+        state_check("themes: picker starts with Follow system", titles.first().map(|t| t == "Follow system").unwrap_or(false));
+        state_check("themes: palette text colour applied", srgb(crate::ui::theme::color(crate::ui::theme::Col::Text)) == expect_srgb(0xE6F7FF));
+        state_check("themes: palette window colour applied", srgb(crate::ui::theme::color(crate::ui::theme::Col::Card)) == expect_srgb(0x0B1620));
+        state_check("themes: palette accent applied", srgb(crate::ui::theme::color(crate::ui::theme::Col::Accent)) == expect_srgb(0x4FC3F7));
+        state_check("themes: representative label follows palette", srgb(msg_send![ui.s_theme_note.get(), textColor]) == expect_srgb(0xA9C8D8));
+        state_check("themes: single theme hides follow pickers", is_hidden(ui.s_light.get()));
+    }
+    audit("theme: selftest ocean");
+}
+fn s_themes_follow() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let base_h = ui.s_follow.base_h;
+        ui.cfg.settings.theme = "system".into();
+        ui.cfg.settings.system_light = "light".into();
+        ui.cfg.settings.system_dark = "selftest-ocean".into();
+        crate::ui::settings::fill_theme_popups(&ui.cfg);
+        state_check("themes: follow system shows light picker", !is_hidden(ui.s_light.get()));
+        state_check("themes: follow system shows dark picker", !is_hidden(ui.s_dark.get()));
+        let light = popup_titles(ui.s_light.get());
+        let dark = popup_titles(ui.s_dark.get());
+        state_check("themes: light picker starts with Jellyfast Light", light.first().map(|t| t == "Jellyfast Light").unwrap_or(false));
+        state_check("themes: light picker has no dark palette", !light.iter().any(|t| t == "Selftest Ocean"));
+        state_check("themes: dark picker has the dark palette", dark.iter().any(|t| t == "Selftest Ocean"));
+        ui.cfg.settings.theme = "dark".into();
+        crate::ui::settings::fill_theme_popups(&ui.cfg);
+        state_check("themes: single theme hides follow pickers again", is_hidden(ui.s_dark.get()));
+        state_check("themes: window shrinks when pickers hide", ui.s_follow.cur_h < base_h);
+        ui.cfg.settings.theme = "system".into();
+        crate::ui::settings::fill_theme_popups(&ui.cfg);
+        state_check("themes: follow system restores pickers", !is_hidden(ui.s_light.get()) && (ui.s_follow.cur_h - base_h).abs() < 0.5);
+        // Missing palette: the cached copy keeps the colours and the Theme row says why.
+        ui.cfg.settings.theme = "selftest-ocean".into();
+    }
+    let dir = std::path::PathBuf::from(std::env::var("JELLYFAST_THEMES_DIR").unwrap_or_default());
+    let _ = std::fs::remove_file(dir.join("selftest-ocean.json"));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        crate::ui::shell::reload_themes();
+        state_check("themes: cached palette still applied", srgb(crate::ui::theme::color(crate::ui::theme::Col::Text)) == expect_srgb(0xE6F7FF));
+        let note = crate::ui::shell::THEME_NOTE.lock().map(|n| n.clone()).unwrap_or_default();
+        state_check("themes: missing palette shows a note", note.contains("last saved"));
+        state_check("themes: note reaches the Theme row", to_str(msg_send![ui.s_theme_note.get(), stringValue]).contains("last saved"));
+    }
+}
+fn s_themes_shots() {
+    for id in ["catppuccin-mocha", "catppuccin-latte", "rose-pine-dawn"] {
+        unsafe {
+            let ui = UI.get_mut().unwrap();
+            ui.cfg.settings.theme = id.into();
+            crate::ui::shell::apply_theme();
+        }
+        audit(&format!("theme: {id}"));
+    }
+}
+fn s_themes_restore() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.settings.theme = "dark".into();
+        ui.cfg.settings.system_light = String::new();
+        ui.cfg.settings.system_dark = String::new();
+        crate::ui::shell::apply_theme();
+        state_check("themes: restored to Dark", active_theme_is_builtin());
+    }
+    std::env::remove_var("JELLYFAST_THEMES_DIR");
+}
+fn active_theme_is_builtin() -> bool {
+    unsafe {
+        let text = srgb(crate::ui::theme::color(crate::ui::theme::Col::Text));
+        let label: *mut Object = msg_send![class!(NSColor), labelColor];
+        text == srgb(label)
     }
 }

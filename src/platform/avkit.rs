@@ -67,6 +67,7 @@ pub(crate) extern "C" fn tick(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
             Some(u) => u,
             None => return,
         };
+        crate::ui::shell::sync_system_appearance();
         drain_main(); // safety net in case a pump kick was missed
         if ui.playing.is_none() || ui.pitem.get().is_null() {
             return;
@@ -505,7 +506,7 @@ pub fn start_playback(ps: &PlaybackStart) {
             {
                 use crate::ui::theme::*;
                 let poster = ps.image_key.and_then(|k| ui.poster_cache.get(&k).copied()).unwrap_or(nil());
-                let tint: *mut Object = msg_send![class!(NSColor), colorWithWhite: 0.13f64 alpha: 1.0f64];
+                let tint: *mut Object = crate::ui::theme::color(crate::ui::theme::Col::PlayerBackdrop);
                 crate::ui::player::backdrop_show(tint, poster);
             }
         }

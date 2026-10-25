@@ -330,7 +330,13 @@ pub struct DetailPerson {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     #[serde(default)]
-    pub theme: String, // "system" | "light" | "dark"
+    pub theme: String, // "system" (Follow system) | "light" | "dark" | a palette id
+    /// Light-mode theme used under "Follow system": "light" (Jellyfast) or a palette id.
+    #[serde(default)]
+    pub system_light: String,
+    /// Dark-mode theme used under "Follow system": "dark" (Jellyfast) or a palette id.
+    #[serde(default)]
+    pub system_dark: String,
     #[serde(default)]
     pub max_bitrate_kbps: u64, // 0 = original
     #[serde(default = "default_sub_lang")]
