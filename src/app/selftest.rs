@@ -101,6 +101,7 @@ fn steps() -> Vec<Step> {
         ("connect error", s_connect_error, 50),
         ("connected (views + livetv)", s_connected, 100),
         ("connected again (sidebar rebuild)", s_connected, 100),
+        ("login connect syncs server url", s_login_url_sync, 50),
         ("items: movies", s_items_movies, 100),
         ("worker->UI path (WORKER_TX)", s_worker_path, 400),
         ("worker->UI path check", s_worker_check, 50),
@@ -640,6 +641,20 @@ fn s_connected() {
         state_check("login backdrop hidden once connected", { let o: BOOL = msg_send![ui.bgfx.get(), isHidden]; o == YES });
         state_check("auto-select sent LoadView", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == "v1")));
     }
+}
+fn s_login_url_sync() {
+    // The worker sends ServerUrl after a login-screen connect. The live config
+    // and the Settings field must then show the resolved host, not a stale one.
+    UI.get_mut().unwrap().cfg.server_url = Some("http://stale.example.com:8096".into());
+    handle_main(MainMsg::ServerUrl("https://media.example.com:8096".into()));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("connect updates in-memory server url", ui.cfg.server_url.as_deref() == Some("https://media.example.com:8096"));
+        let cfg = ui.cfg.clone();
+        crate::ui::settings::settings_fill(&cfg);
+        state_check("settings shows resolved bare host", read_field(ui.s_url.get()) == "media.example.com:8096");
+    }
+    take_cmds();
 }
 fn s_worker_path() {
     let tx = WORKER_TX.get().expect("worker tx");

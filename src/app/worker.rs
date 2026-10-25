@@ -366,6 +366,10 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             }
             UiCmd::SaveSettings { settings, reconnect, server_url } => {
                 seerr = None;
+                // Settings are saved before the URL resolves on purpose: a mistyped
+                // server host must not discard the other edits. If the URL fails to
+                // resolve, the old URL stays in effect, the error is reported, and
+                // no reconnect is attempted (the `continue` below).
                 cfg.settings = settings;
                 crate::config::save_config(&cfg);
                 if let Some(raw) = server_url {
@@ -651,6 +655,9 @@ pub(crate) async fn connect_cmd(
     cfg.user_id = Some(user_id.clone());
     crate::config::store_token(&normalize(url), &token);
     crate::config::save_config(cfg);
+    // The UI keeps its own copy of the config; without this, Settings shows a
+    // stale or empty Server URL until relaunch, and the next save looks changed.
+    let _ = main_tx.send(MainMsg::ServerUrl(normalize(url)));
     Ok(c)
 }
 
@@ -1077,11 +1084,13 @@ mod tests {
                 .expect("timed out waiting for MainMsg")
                 .expect("main channel closed")
         }
-        /// Next message, ignoring asynchronous Seerr thumbnail deliveries.
+        /// Next message, ignoring asynchronous Seerr thumbnail deliveries and the
+        /// ServerUrl side-notification that follows a successful connect (tests
+        /// that care about it read it with `next_raw`).
         async fn next(&mut self) -> MainMsg {
             loop {
                 match self.next_raw().await {
-                    MainMsg::SeerrPoster { .. } => continue,
+                    MainMsg::SeerrPoster { .. } | MainMsg::ServerUrl(_) => continue,
                     m => return m,
                 }
             }
@@ -1166,6 +1175,22 @@ mod tests {
         let auth = m.find("POST", "/Users/AuthenticateByName");
         assert_eq!(auth.len(), 1);
         assert!(auth[0].headers["authorization"].contains("DeviceId=\"dev-test\""));
+    }
+
+    #[tokio::test]
+    async fn connect_reports_resolved_url_to_ui() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        // Bare host (no scheme, trailing slash): the mock is plain http, so
+        // resolution must fall back to http and the UI must get the resolved base.
+        let bare = m.url().trim_start_matches("http://").to_string();
+        h.send(connect_pw(&format!("{}/", bare)));
+        assert!(matches!(h.next_raw().await, MainMsg::Connected { .. }));
+        match h.next_raw().await {
+            MainMsg::ServerUrl(u) => assert_eq!(u, m.url()),
+            o => panic!("expected ServerUrl after connect, got {:?}", o),
+        }
     }
 
     #[tokio::test]
