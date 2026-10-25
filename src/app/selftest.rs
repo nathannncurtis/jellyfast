@@ -107,7 +107,10 @@ fn steps() -> Vec<Step> {
         ("posters (png, jpeg, garbage)", s_posters, 100),
         ("audit: grid (long titles)", s_audit_grid, 200),
         ("resize window", s_resize, 200),
+        ("grid geometry + layers", s_grid_checks, 50),
         ("hover cells", s_hover, 50),
+        ("hover model layer", s_hover_model, 50),
+        ("poster states (garbage keeps placeholder)", s_poster_states, 100),
         ("sidebar click", s_sidebar_click, 50),
         ("items: series", s_items_series, 100),
         ("items: episodes", s_items_episodes, 100),
@@ -474,6 +477,10 @@ fn s_audit_login() {
     }
 }
 fn s_audit_grid() {
+    // Posters arrived: audit with artwork in place as well.
+    for i in 0..14 {
+        handle_main(MainMsg::PosterReady { key: poster_key(&format!("Movie-{}", i)), bytes: image_bytes(1, 120, 180, (i * 17) as u8) });
+    }
     let mut v = items_of("Movie", 14);
     for (i, it) in v.iter_mut().enumerate() {
         it.name = format!("{} {}", i, LONG.repeat(1).chars().take(120).collect::<String>());
@@ -563,6 +570,64 @@ fn s_resize() {
             let _: () = msg_send![ui.grid.get(), layoutSubtreeIfNeeded];
         }
     }
+}
+fn s_grid_checks() {
+    use crate::ui::library::{grid_metrics, grid_ratio};
+    use crate::ui::theme::*;
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: () = msg_send![ui.grid.get(), layoutSubtreeIfNeeded];
+        let gw = bounds_of(ui.grid.get()).size.w;
+        let m = grid_metrics(gw, grid_ratio(&ui.items));
+        let d = ui.grid_data.as_ref().unwrap();
+        state_check("cells exist", !d.cells.is_empty());
+        let f0 = frame_of(d.cells[0].container);
+        state_check("first cell x == EDGE", (f0.origin.x - EDGE).abs() < 0.01);
+        state_check(
+            "every cell has the computed tile width",
+            d.cells.iter().all(|c| (frame_of(c.container).size.w - m.tile_w).abs() < 0.01),
+        );
+        state_check(
+            "cells fit inside the grid width",
+            d.cells.iter().all(|c| { let f = frame_of(c.container); f.origin.x + f.size.w <= gw - EDGE + 0.5 }),
+        );
+        let c = &d.cells[0];
+        let r: f64 = msg_send![c.art, cornerRadius];
+        let mb: BOOL = msg_send![c.art, masksToBounds];
+        state_check("art layer radius + clipping", r == R_POSTER && mb == YES);
+        let so: f32 = msg_send![c.shadow, shadowOpacity];
+        state_check("shadow host at rest opacity 0.18", (so - 0.18).abs() < 0.001);
+        let host_clips: BOOL = msg_send![c.shadow, masksToBounds];
+        state_check("shadow host does not clip", host_clips == NO);
+    }
+}
+fn s_hover_model() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let c = &ui.grid_data.as_ref().unwrap().cells[0];
+        let _: *mut Object = msg_send![c.container, mouseEntered: nil()];
+        let so: f32 = msg_send![c.shadow, shadowOpacity];
+        state_check("hover raises shadow to 0.32", (so - 0.32).abs() < 0.001);
+        let _: *mut Object = msg_send![c.container, mouseExited: nil()];
+        let so: f32 = msg_send![c.shadow, shadowOpacity];
+        state_check("unhover restores shadow", (so - 0.18).abs() < 0.001);
+    }
+}
+fn s_poster_states() {
+    send_items("Posters", items_of("Garbage", 3), false);
+    handle_main(MainMsg::PosterReady { key: poster_key("Garbage-0"), bytes: vec![9, 9, 9, 9, 9] });
+    handle_main(MainMsg::PosterReady { key: poster_key("Garbage-1"), bytes: image_bytes(0, 100, 150, 90) });
+    unsafe {
+        let ui = UI.get().unwrap();
+        let d = ui.grid_data.as_ref().unwrap();
+        let g0: BOOL = msg_send![d.cells[0].glyph, isHidden];
+        let g1: BOOL = msg_send![d.cells[1].glyph, isHidden];
+        let g2: BOOL = msg_send![d.cells[2].glyph, isHidden];
+        state_check("garbage bytes keep the placeholder glyph", g0 == NO);
+        state_check("valid poster hides the glyph", g1 == YES);
+        state_check("untouched cell keeps its glyph", g2 == NO);
+    }
+    send_items("Movies", items_of("Movie", 12), false);
 }
 fn s_hover() {
     unsafe {

@@ -123,7 +123,7 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // Grid scroll view
     let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: rect(256., 0., pb.size.w - 256. - 12., pb.size.h - 60.)];
+    let sc: *mut Object = msg_send![sc, initWithFrame: rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h - TITLEBAR_H - HEADER_H - SP3)];
     let _: () = msg_send![sc, setHasVerticalScroller: YES];
     let _: () = msg_send![sc, setDrawsBackground: YES];
     let _: () = msg_send![sc, setBackgroundColor: color(C_CANVAS)];
@@ -134,11 +134,12 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     let grid_cls = *GRID_CLASS.get().unwrap();
     let grid: *mut Object = msg_send![grid_cls, alloc];
-    let grid: *mut Object = msg_send![grid, initWithFrame: rect(0., 0., pb.size.w - 256. - 28., 10.)];
+    let grid: *mut Object = msg_send![grid, initWithFrame: rect(0., 0., pb.size.w - SIDEBAR_W, 10.)];
     // One GridData box, owned by ui.grid_data and also referenced by the grid's ivar.
-    ui.grid_data = Some(Box::new(GridData { cells: vec![] }));
+    ui.grid_data = Some(Box::new(GridData { cells: vec![], ratio: POSTER_ASPECT }));
     let data: *mut GridData = &mut **ui.grid_data.as_mut().unwrap();
     (*grid).set_ivar::<*mut c_void>("jrData", data as *mut c_void);
+    set_autoresize(grid, RESIZE_W);
     let _: *mut Object = msg_send![sc, setDocumentView: grid];
     autorel(grid);
     ui.grid = Ptr(grid);

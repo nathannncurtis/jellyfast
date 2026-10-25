@@ -179,18 +179,29 @@ pub(crate) unsafe fn symbol_image(name: &str, point_size: CGFloat) -> *mut Objec
 // ---- Global UI state (main thread only) --------------------------------
 pub struct CellHandle {
     pub container: *mut Object,
-    pub poster: *mut Object,
+    /// Clipped artwork layer (radius, placeholder colour, poster contents).
+    pub art: *mut Object,
+    /// Unclipped shadow host that also takes the hover transform.
+    pub shadow: *mut Object,
+    pub prog_track: *mut Object,
+    pub prog_fill: *mut Object,
+    pub prog_frac: f64,
+    pub dim: *mut Object,
+    pub circle: *mut Object,
+    pub glyph: *mut Object,
+    pub play_icon: *mut Object,
+    pub badge: *mut Object,
     pub title: *mut Object,
     pub sub: *mut Object,
-    pub prog: *mut Object,
-    pub badge: *mut Object,
-    pub hover_icon: *mut Object,
+    pub btn: *mut Object,
     pub key: u64,
     pub meta: ListItem,
 }
 
 pub struct GridData {
     pub cells: Vec<CellHandle>,
+    /// Poster height / width shared by every cell in the grid.
+    pub ratio: f64,
 }
 
 pub struct PlayingNow {
@@ -396,6 +407,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(viewSelected:), view_selected as Extern0),
             (sel!(itemClicked:), item_clicked as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
+            (sel!(markUnwatched:), mark_unwatched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
             (sel!(connectClicked:), connect_clicked as Extern0),
             (sel!(toggleApiKey:), toggle_api_key as Extern0),
@@ -419,6 +431,10 @@ pub(crate) unsafe fn register_classes() {
         d.add_ivar::<*mut c_void>("jrData");
         d.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
         d.add_method(sel!(layout), grid_layout as extern "C" fn(&mut Object, Sel));
+        d.add_method(
+            sel!(viewDidChangeEffectiveAppearance),
+            grid_appearance_changed as extern "C" fn(&mut Object, Sel),
+        );
         d.add_method(
             sel!(setFrameSize:),
             grid_set_frame as extern "C" fn(&mut Object, Sel, NSSize),
@@ -685,6 +701,16 @@ pub(crate) extern "C" fn mark_watched(_t: &mut Object, _c: Sel, sender: *mut Obj
         let id = to_str(ro);
         if !id.is_empty() {
             let _ = ui.ui_tx.send(UiCmd::MarkPlayed { item_id: id, played: true });
+        }
+    }
+}
+pub(crate) extern "C" fn mark_unwatched(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let ro: *mut Object = msg_send![sender, representedObject];
+        let id = to_str(ro);
+        if !id.is_empty() {
+            let _ = ui.ui_tx.send(UiCmd::MarkPlayed { item_id: id, played: false });
         }
     }
 }

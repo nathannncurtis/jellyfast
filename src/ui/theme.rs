@@ -368,4 +368,39 @@ pub unsafe fn hairline(frame: NSRect) -> *mut Object {
     autorel(b)
 }
 
+// ---- CoreAnimation / CoreGraphics bits not covered by msg_send ------------------------------------
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CATransform3D {
+    pub m: [f64; 16],
+}
+unsafe impl objc::Encode for CATransform3D {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{CATransform3D=dddddddddddddddd}") }
+    }
+}
+#[link(name = "QuartzCore", kind = "framework")]
+extern "C" {
+    pub fn CATransform3DMakeScale(sx: f64, sy: f64, sz: f64) -> CATransform3D;
+    pub static CATransform3DIdentity: CATransform3D;
+}
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPathCreateWithRoundedRect(rect: NSRect, cw: f64, ch: f64, t: *const std::os::raw::c_void) -> *mut std::os::raw::c_void;
+    fn CGPathRelease(p: *mut std::os::raw::c_void);
+}
+/// Set a rounded-rect `shadowPath` for the layer (cheap shadows, no offscreen pass).
+pub unsafe fn set_shadow_path(layer: *mut Object, w: f64, h: f64, r: f64) {
+    let path = CGPathCreateWithRoundedRect(rect(0., 0., w, h), r, r, std::ptr::null());
+    let _: () = msg_send![layer, setShadowPath: path];
+    CGPathRelease(path);
+}
+/// CGImage backing of an NSImage (not retained; valid while the image lives).
+pub unsafe fn cg_image(img: *mut Object) -> *mut Object {
+    msg_send![img, CGImageForProposedRect: std::ptr::null_mut::<NSRect>() context: nil() hints: nil()]
+}
+pub unsafe fn black_cg() -> *mut Object {
+    cg_black(1.0)
+}
+
 pub const _UNUSED_NO: BOOL = NO;
