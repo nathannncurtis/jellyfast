@@ -83,7 +83,7 @@ pub(crate) unsafe fn build_settings_window() {
     };
 
     section(&mut place, &mut top, "Server", true);
-    let url_f = text_field("http://host:8096", false);
+    let url_f = text_field("host:8096", false);
     row(&mut place, &mut top, "Server URL", url_f, 24., CTRL_W);
     ui.s_url = Ptr(url_f);
 
@@ -114,7 +114,7 @@ pub(crate) unsafe fn build_settings_window() {
     put(&mut place, cb, CTRL_X, top + (ROW_H - 18.) / 2., CTRL_W, 18.);
     top += ROW_H + SP3;
     ui.seerr.s_on = Ptr(cb);
-    let seerr_url_f = text_field("http://host:5055", false);
+    let seerr_url_f = text_field("host:5055", false);
     row(&mut place, &mut top, "Seerr URL", seerr_url_f, 24., CTRL_W);
     ui.seerr.s_url = Ptr(seerr_url_f);
     top += SP3;
@@ -173,7 +173,7 @@ pub(crate) unsafe fn build_settings_window() {
 pub(crate) unsafe fn settings_fill(cfg: &Config) {
     let ui = UI.get_mut().unwrap();
     if let Some(u) = &cfg.server_url {
-        set_text(ui.s_url.get(), u);
+        set_text(ui.s_url.get(), &crate::jellyfin::urls::bare_url(u));
     }
     set_text(ui.s_sub_lang.get(), &cfg.settings.subtitle_lang);
     set_text(ui.s_audio_lang.get(), &cfg.settings.audio_lang);
@@ -193,7 +193,7 @@ pub(crate) unsafe fn settings_fill(cfg: &Config) {
     };
     let _: () = msg_send![ui.s_theme.get(), selectItemAtIndex: t_idx as NSInteger];
     let _: () = msg_send![ui.seerr.s_on.get(), setState: cfg.settings.seerr_enabled as NSInteger];
-    set_text(ui.seerr.s_url.get(), &cfg.settings.seerr_url);
+    set_text(ui.seerr.s_url.get(), &crate::jellyfin::urls::bare_url(&cfg.settings.seerr_url));
     // Secrets are never prefilled. A saved URL implies a stored credential
     // (saving requires one), so say it is unchanged rather than asking the
     // Keychain from the main thread.

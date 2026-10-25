@@ -57,6 +57,9 @@ pub enum UiCmd {
     SaveSettings {
         settings: Settings,
         reconnect: bool,
+        /// Raw server address typed in Settings; resolved by the worker before
+        /// reconnecting. `None` when the address is unchanged.
+        server_url: Option<String>,
     },
     SignOut,
     ProbeServer,
@@ -94,6 +97,9 @@ pub enum MainMsg {
         has_live_tv: bool,
     },
     ConnectError(String),
+    /// The resolved (scheme-complete) server base URL, sent after a connect or
+    /// Settings URL change so the UI uses the same address the worker stored.
+    ServerUrl(String),
     ItemsLoaded {
         title: String,
         items: Vec<ListItem>,

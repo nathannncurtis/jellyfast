@@ -682,15 +682,13 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         s.max_bitrate_kbps = [0u64, 40_000, 20_000, 10_000, 5_000, 3_000][q.clamp(0, 5) as usize];
         let th: NSInteger = msg_send![ui.s_theme.get(), indexOfSelectedItem];
         s.theme = ["system", "light", "dark"][th.clamp(0, 2) as usize].to_string();
-        let new_url = read_field(ui.s_url.get());
-        let url_changed = match &ui.cfg.server_url {
-            Some(u) => u != &new_url && !new_url.is_empty(),
-            None => !new_url.is_empty(),
-        };
+        // Compare display forms: the field shows a bare host, while the stored
+        // URL carries a resolved scheme. The worker resolves and stores the URL.
+        let new_url = read_field(ui.s_url.get()).trim().to_string();
+        let url_changed = !new_url.is_empty()
+            && ui.cfg.server_url.as_deref().map(crate::jellyfin::urls::bare_url)
+                != Some(crate::jellyfin::urls::bare_url(&new_url));
         ui.cfg.settings = s;
-        if url_changed {
-            ui.cfg.server_url = Some(new_url);
-        }
         crate::config::save_config(&ui.cfg);
         apply_theme();
         // SaveSettings replaces the worker's whole Settings, so it goes first;
@@ -699,6 +697,7 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         let _ = ui.ui_tx.send(UiCmd::SaveSettings {
             settings: ui.cfg.settings.clone(),
             reconnect: url_changed,
+            server_url: if url_changed { Some(new_url) } else { None },
         });
         let seerr_on: NSInteger = msg_send![ui.seerr.s_on.get(), state];
         let seerr_on = seerr_on != 0;
@@ -715,9 +714,10 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         };
         let secret_typed = !pass.is_empty() || !key.trim().is_empty();
         let cur = &ui.cfg.settings;
+        let seerr_addr_changed = crate::jellyfin::urls::bare_url(&seerr_url) != crate::jellyfin::urls::bare_url(&cur.seerr_url);
         let seerr_dirty = seerr_on != cur.seerr_enabled
-            || (seerr_on && (seerr_url != cur.seerr_url || user != cur.seerr_username))
-            || (!seerr_on && !seerr_url.is_empty() && seerr_url != cur.seerr_url)
+            || (seerr_on && (seerr_addr_changed || user != cur.seerr_username))
+            || (!seerr_on && !seerr_url.is_empty() && seerr_addr_changed)
             || secret_typed;
         if seerr_on && mode == 0 && user.is_empty() && seerr_dirty {
             // Nothing to validate against; keep the sheet open and say why.

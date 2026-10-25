@@ -112,6 +112,24 @@ impl JellyfinClient {
         Ok(info)
     }
 
+    /// Resolve a user-typed server address to a working base URL. Bare hosts
+    /// try https first and fall back to http when the connection fails; the
+    /// first candidate that answers `/System/Info/Public` wins. Only transport
+    /// failures fall through: a reachable server that is not Jellyfin, or
+    /// rejects the request, is reported as is.
+    pub async fn resolve(input: &str) -> Result<(String, ServerInfo), JFError> {
+        let candidates = u::candidate_bases(input).map_err(JFError::BadUrl)?;
+        let mut last_network = None;
+        for base in candidates {
+            match Self::public_info(&base).await {
+                Ok(info) => return Ok((base, info)),
+                Err(e @ JFError::Network(_)) => last_network = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_network.unwrap_or_else(|| JFError::BadUrl("no address to try".into())))
+    }
+
     /// Username/password sign-in → token + user id.
     pub async fn authenticate(
         base: &str,
@@ -831,6 +849,34 @@ mod tests {
             JellyfinClient::new("h:8096", "t".into(), "u".into(), DEVICE),
             Err(JFError::BadUrl(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn resolve_bare_host_falls_back_to_http_when_tls_fails() {
+        // The mock is plain http, so the https attempt fails at the TLS layer
+        // and the resolver must fall through to http.
+        let m = serve(|_| reply(200, r#"{"ProductName":"Jellyfin Server","Version":"10.9.0"}"#)).await;
+        let bare = m.base.trim_start_matches("http://").to_string();
+        let (base, info) = JellyfinClient::resolve(&bare).await.unwrap();
+        assert_eq!(base, m.base);
+        assert_eq!(info.product_name.as_deref(), Some("Jellyfin Server"));
+    }
+
+    #[tokio::test]
+    async fn resolve_explicit_scheme_does_not_fall_back() {
+        let m = serve(|_| reply(200, r#"{"ProductName":"Jellyfin Server"}"#)).await;
+        let bare = m.base.trim_start_matches("http://").to_string();
+        let err = JellyfinClient::resolve(&format!("https://{}", bare)).await.err().unwrap();
+        assert!(matches!(err, JFError::Network(_)), "{err:?}");
+        let (base, _) = JellyfinClient::resolve(&format!("http://{}/", bare)).await.unwrap();
+        assert_eq!(base, m.base);
+    }
+
+    #[tokio::test]
+    async fn resolve_reports_a_reachable_non_jellyfin_server_without_retrying() {
+        let m = serve(|_| reply(200, r#"{"hello":"world"}"#)).await;
+        let bare = m.base.trim_start_matches("http://").to_string();
+        assert!(matches!(JellyfinClient::resolve(&bare).await, Err(JFError::NotJellyfin)));
     }
 
     #[tokio::test]

@@ -251,6 +251,23 @@ impl SeerrClient {
         }
     }
 
+    /// Resolve a user-typed Seerr address to a working base URL, using the same
+    /// https-then-http rule as Jellyfin. Verified via the unauthenticated status
+    /// endpoint.
+    pub async fn resolve(input: &str) -> Result<(String, SeerrStatusInfo), SeerrError> {
+        let candidates = crate::jellyfin::urls::candidate_bases(input).map_err(SeerrError::BadUrl)?;
+        let mut last_network = None;
+        for base in candidates {
+            let client = Self::new(&base, "")?;
+            match client.status().await {
+                Ok(info) => return Ok((client.base.clone(), info)),
+                Err(e @ SeerrError::Network(_)) => last_network = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_network.unwrap_or_else(|| SeerrError::BadUrl("no address to try".into())))
+    }
+
     /// GET /api/v1/auth/me: authenticated call; verifies the API key.
     pub async fn me(&self) -> Result<SeerrUser, SeerrError> {
         let body = self.get("/api/v1/auth/me").await?;
@@ -455,6 +472,16 @@ mod tests {
     async fn bad_url_rejected() {
         assert!(matches!(SeerrClient::new("seerr.local", "k"), Err(SeerrError::BadUrl(_))));
         assert!(matches!(SeerrClient::new("", "k"), Err(SeerrError::BadUrl(_))));
+    }
+
+    #[tokio::test]
+    async fn resolve_bare_host_falls_back_to_http() {
+        let m = start(|_| Resp::json(200, serde_json::json!({"version": "2.7.2"}))).await;
+        let bare = m.url().trim_start_matches("http://").to_string();
+        let (base, info) = SeerrClient::resolve(&bare).await.unwrap();
+        assert_eq!(base, m.url());
+        assert_eq!(info.version, "2.7.2");
+        assert!(matches!(SeerrClient::resolve("").await, Err(SeerrError::BadUrl(_))));
     }
 
     #[tokio::test]

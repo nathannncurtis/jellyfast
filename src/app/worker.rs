@@ -364,10 +364,23 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 let msg = save_seerr(&mut cfg, enabled, &url, &username, password, api_key).await;
                 let _ = main_tx.send(msg);
             }
-            UiCmd::SaveSettings { settings, reconnect } => {
+            UiCmd::SaveSettings { settings, reconnect, server_url } => {
                 seerr = None;
                 cfg.settings = settings;
                 crate::config::save_config(&cfg);
+                if let Some(raw) = server_url {
+                    match crate::jellyfin::client::JellyfinClient::resolve(&raw).await {
+                        Ok((base, _)) => {
+                            cfg.server_url = Some(base.clone());
+                            crate::config::save_config(&cfg);
+                            let _ = main_tx.send(MainMsg::ServerUrl(base));
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
+                            continue;
+                        }
+                    }
+                }
                 if reconnect {
                     if let Some(url) = cfg.server_url.clone() {
                         if let Some(token) = crate::config::load_token(&url) {
@@ -517,7 +530,14 @@ async fn save_seerr(
     let trimmed = url.trim();
     if !enabled {
         if !trimmed.is_empty() {
-            let n = normalize(trimmed);
+            // Not probed while disabled: keep the address as typed (scheme-less
+            // stays scheme-less) and resolve it when Seerr is turned on.
+            let n = crate::jellyfin::urls::parse_server_input(trimmed)
+                .map(|p| match p.scheme {
+                    Some(sc) => format!("{}://{}", sc, p.rest),
+                    None => p.rest,
+                })
+                .unwrap_or_else(|_| trimmed.to_string());
             if let Some(k) = &key_in {
                 crate::config::store_seerr_key(&n, k);
             }
@@ -531,20 +551,30 @@ async fn save_seerr(
         crate::config::save_config(cfg);
         return MainMsg::SeerrStatus { ok: true, message: "Seerr is turned off.".into() };
     }
-    let n = match crate::jellyfin::urls::normalize_base_url(trimmed) {
-        Ok(n) => n,
+    // Check for a credential before any network I/O. Secrets are keyed by the
+    // resolved address; ones saved while Seerr was off are keyed by the typed one.
+    let typed = crate::jellyfin::urls::bare_url(trimmed);
+    let candidates = match crate::jellyfin::urls::candidate_bases(trimmed) {
+        Ok(c) => c,
         Err(e) => return fail(format!("Invalid Seerr URL: {}", e)),
     };
+    let keys_for = || candidates.iter().map(String::as_str).chain(std::iter::once(typed.as_str()));
+    let stored_pw = keys_for().find_map(crate::config::load_seerr_login);
+    let stored_key = keys_for().find_map(crate::config::load_seerr_key);
+    if use_login && pw_in.is_none() && stored_pw.is_none() {
+        return fail("Enter your Seerr password (the one you use to sign in with your Jellyfin account).".into());
+    }
+    if !use_login && key_in.is_none() && stored_key.is_none() {
+        return fail("Enter your Seerr API key (Seerr > Settings > General), or sign in with your Jellyfin account.".into());
+    }
+    let n = match SeerrClient::resolve(trimmed).await {
+        Ok((base, _)) => base,
+        Err(e) => return fail(e.to_string()),
+    };
     let client = if use_login {
-        let Some(pw) = pw_in.clone().or_else(|| crate::config::load_seerr_login(&n)) else {
-            return fail("Enter your Seerr password (the one you use to sign in with your Jellyfin account).".into());
-        };
-        SeerrClient::with_login(&n, &user, &pw)
+        SeerrClient::with_login(&n, &user, &pw_in.clone().or(stored_pw).unwrap_or_default())
     } else {
-        let Some(key) = key_in.clone().or_else(|| crate::config::load_seerr_key(&n)) else {
-            return fail("Enter your Seerr API key (Seerr > Settings > General), or sign in with your Jellyfin account.".into());
-        };
-        SeerrClient::new(&n, &key)
+        SeerrClient::new(&n, &key_in.clone().or(stored_key).unwrap_or_default())
     };
     let client = match client {
         Ok(c) => c,
@@ -597,7 +627,8 @@ pub(crate) async fn connect_cmd(
 ) -> Result<JellyfinClient, crate::jellyfin::client::JFError> {
     use crate::jellyfin::client::JFError;
     // Step 1: verify it's Jellyfin.
-    let info = JellyfinClient::public_info(url).await?;
+    let (url, info) = JellyfinClient::resolve(url).await?;
+    let url = url.as_str();
     tracing::info!(server_version = ?info.version, "server identified");
 
     let (token, user_id, user_name) = if let Some(pw) = password {
@@ -1523,6 +1554,7 @@ mod tests {
         h.send(UiCmd::SaveSettings {
             settings: Settings { max_bitrate_kbps: 8000, subtitle_lang: "eng".into(), ..Default::default() },
             reconnect: false,
+            server_url: None,
         });
         h.send(UiCmd::Play { item_id: "hibr".into() });
         let p = playback(h.next().await);
@@ -1624,7 +1656,7 @@ mod tests {
     async fn save_settings_with_reconnect_reannounces_connection() {
         let (_e, m, mut h) = connected().await;
         m.cfg.lock().unwrap().live = true;
-        h.send(UiCmd::SaveSettings { settings: Settings { theme: "dark".into(), ..Default::default() }, reconnect: true });
+        h.send(UiCmd::SaveSettings { settings: Settings { theme: "dark".into(), ..Default::default() }, reconnect: true, server_url: None });
         match h.next().await {
             MainMsg::Connected { user_name, has_live_tv, views, .. } => {
                 assert_eq!(user_name, "Alice Display");
@@ -1640,7 +1672,7 @@ mod tests {
     async fn save_settings_reconnect_failure_reports_error() {
         let (_e, m, mut h) = connected().await;
         crate::config::store_token(&m.url(), "revoked");
-        h.send(UiCmd::SaveSettings { settings: Settings::default(), reconnect: true });
+        h.send(UiCmd::SaveSettings { settings: Settings::default(), reconnect: true, server_url: None });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("token expired"), "{e}"),
             o => panic!("{:?}", o),

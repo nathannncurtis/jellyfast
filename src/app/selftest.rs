@@ -1041,7 +1041,8 @@ fn s_settings_cancel() {
                 }
                 state_check("cancel has Escape", esc);
             }
-            state_check("seerr fields filled", read_field(ui.seerr.s_url.get()) == "https://seerr.example");
+            state_check("seerr fields filled", read_field(ui.seerr.s_url.get()) == "seerr.example");
+            state_check("server url shows bare host", read_field(ui.s_url.get()) == "example:8096");
             set_text(ui.seerr.s_key.get(), "typed-then-cancelled");
             act(sel!(cancelSettings:), nil());
             state_check("key cleared on cancel", read_field(ui.seerr.s_key.get()).is_empty());
@@ -1059,10 +1060,21 @@ fn s_settings_save() {
         std::thread::sleep(std::time::Duration::from_millis(300));
         on_main(|| unsafe {
             log("  saving settings sheet");
+            take_cmds();
+            // The app's live config holds the resolved URL the worker stored.
+            UI.get_mut().unwrap().cfg.server_url = Some("http://example:8096".into());
             act(sel!(saveSettings:), nil());
             let ui = UI.get().unwrap();
             state_check("audio lang saved", ui.cfg.settings.audio_lang == "spa");
             state_check("theme saved", ui.cfg.settings.theme == "light");
+            state_check("unchanged server url sends no resolve", take_cmds().iter().all(|c| !matches!(c, UiCmd::SaveSettings { server_url: Some(_), .. })));
+            log("  saving a new bare server host");
+            set_text(ui.s_url.get(), "  media.example.com:8096/ ");
+            act(sel!(saveSettings:), nil());
+            state_check(
+                "bare host sent to the worker for resolution",
+                take_cmds().iter().any(|c| matches!(c, UiCmd::SaveSettings { reconnect: true, server_url: Some(u), .. } if u == "media.example.com:8096/")),
+            );
         });
     });
 }

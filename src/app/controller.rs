@@ -52,6 +52,10 @@ pub(crate) fn handle_main(msg: MainMsg) {
                 }
             }
         }
+        MainMsg::ServerUrl(url) => unsafe {
+            let ui = UI.get_mut().unwrap();
+            ui.cfg.server_url = Some(url);
+        },
         MainMsg::ConnectError(e) => unsafe {
             login_error(&e);
             show_login_or_library(false);

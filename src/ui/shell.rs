@@ -350,7 +350,7 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // Restore remembered URL/user.
     if let Some(u) = &ui.cfg.server_url {
-        set_text(url_f, u);
+        set_text(url_f, &crate::jellyfin::urls::bare_url(u));
     }
     if let Some(u) = &ui.cfg.username {
         set_text(user_f, u);
