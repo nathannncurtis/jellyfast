@@ -511,7 +511,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(homeItemClicked:), home_item_clicked as Extern0),
             (sel!(homeSelected:), crate::ui::home::home_selected as Extern0),
             (sel!(browseSelected:), crate::ui::home::browse_selected as Extern0),
-            (sel!(openRequests:), crate::ui::seerr::open_requests as Extern0),
+            (sel!(requestsSelected:), crate::ui::seerr::requests_selected as Extern0),
             (sel!(onboardPick:), crate::ui::onboarding::onboard_pick as Extern0),
             (sel!(onboardContinue:), crate::ui::onboarding::onboard_continue as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
@@ -823,6 +823,10 @@ pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
             crate::ui::home::reload();
             return;
         }
+        if ui.seerr.active {
+            crate::ui::seerr::refresh();
+            return;
+        }
         if ui.browse_active {
             begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadBrowse);
@@ -837,7 +841,7 @@ pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        if ui.home.active {
+        if ui.home.active || ui.seerr.active {
             return;
         }
         if ui.mode_stack.len() > 1 {

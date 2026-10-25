@@ -152,13 +152,14 @@ fn steps() -> Vec<Step> {
         ("server down/up while idle", s_server_idle, 50),
         ("seerr: open while disabled (inline hint)", s_seerr_disabled, 100),
         ("seerr: open while enabled", s_seerr_enabled, 100),
+        ("seerr: login restores Requests", s_seerr_login_restore, 100),
         ("seerr: results (all availabilities)", s_seerr_results, 100),
         ("seerr: type in search field", s_seerr_typing, 50),
         ("seerr: click Request", s_seerr_request, 100),
         ("seerr: requested + error", s_seerr_replies, 100),
         ("seerr: My requests tab", s_seerr_requests_tab, 100),
         ("seerr: resize window", s_seerr_resize, 150),
-        ("seerr: close and reopen", s_seerr_reopen, 100),
+        ("seerr: leave and return", s_seerr_reopen, 100),
         ("seerr: empty results", s_seerr_empty, 100),
         ("seerr: settings save (open)", s_seerr_settings_open, 700),
         ("seerr: settings status failure", s_seerr_settings_fail, 100),
@@ -1792,16 +1793,14 @@ fn s_unified_actions() {
         let fr: *mut Object = msg_send![ui.win.get(), firstResponder];
         let editing: *mut Object = msg_send![ui.search.get(), currentEditor];
         state_check("unified: Search focuses the search field", fr == ui.search.get() || !editing.is_null());
-        act(sel!(openRequests:), nil());
-        state_check("unified: Requests opens My requests", ui.seerr.requests_mode);
+        // Seerr is off in this run, so Requests shows its setup state and has no sidebar row.
+        act(sel!(requestsSelected:), nil());
+        state_check("unified: Requests tab opens", UI.get().unwrap().seerr.active);
+        state_check("unified: no Requests row while Seerr is off", UI.get().unwrap().seerr.row.get().is_null());
         let _ = take_cmds();
-        // Back to the search tab, so later Seerr steps start from their usual state.
-        let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 0isize];
-        act(sel!(seerrTab:), ui.seerr.tabs.get());
-        let _: () = msg_send![ui.seerr.win.get(), orderOut: nil()];
         act(sel!(homeSelected:), nil());
         let ui = UI.get().unwrap();
-        state_check("unified: Home is back", ui.home.active && !ui.browse_active);
+        state_check("unified: Home is back", ui.home.active && !ui.browse_active && !ui.seerr.active);
         state_check("unified: Browse row not selected", !row_selected(ui.browse_row.get()));
         let cmds = take_cmds();
         state_check("unified: LoadHome sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
@@ -2334,11 +2333,11 @@ fn seerr_hidden(v: *mut Object) -> bool {
         h == YES
     }
 }
-fn seerr_visible_win() -> bool {
+/// Requests is the visible screen in the main window (not a window or sheet of its own).
+fn seerr_on_screen() -> bool {
     unsafe {
         let ui = UI.get().unwrap();
-        let v: BOOL = msg_send![ui.seerr.win.get(), isVisible];
-        v == YES
+        ui.seerr.active && visible(ui.seerr.host.get()) && visible(ui.seerr.doc.get())
     }
 }
 fn sheet_open() -> bool {
@@ -2367,7 +2366,7 @@ unsafe fn seerr_subviews(row: *mut Object, cls: &str, pred: &dyn Fn(*mut Object)
 fn seerr_button_rows() -> usize {
     unsafe {
         let ui = UI.get().unwrap();
-        ui.seerr.rows.iter().filter(|r| seerr_subviews(**r, "NSButton", &|_| true) > 0).count()
+        ui.seerr.cards.iter().filter(|r| seerr_subviews(**r, "NSButton", &|_| true) > 0).count()
     }
 }
 /// Status pills (NSBox with corner radius 10) across all rows.
@@ -2375,7 +2374,7 @@ fn seerr_pills() -> usize {
     unsafe {
         let ui = UI.get().unwrap();
         ui.seerr
-            .rows
+            .cards
             .iter()
             .map(|r| {
                 seerr_subviews(*r, "NSBox", &|b| {
@@ -2386,10 +2385,44 @@ fn seerr_pills() -> usize {
             .sum()
     }
 }
-fn seerr_row_heights_ok() -> bool {
+/// Every card in the grid has the same height (rows line up).
+fn seerr_card_heights_ok() -> bool {
     unsafe {
         let ui = UI.get().unwrap();
-        ui.seerr.rows.iter().all(|r| (frame_of(*r).size.h - 76.).abs() < 0.01)
+        // Cards in one grid row share a height and a top edge; every card has a height.
+        ui.seerr.cards.iter().all(|c| {
+            let f = frame_of(*c);
+            f.size.h > 0. && ui.seerr.cards.iter().filter(|o| (frame_of(**o).origin.y - f.origin.y).abs() < 0.5).all(|o| (frame_of(*o).size.h - f.size.h).abs() < 0.01)
+        })
+    }
+}
+/// Each result card has a Request button exactly when it is not requested, and a pill otherwise.
+fn seerr_kinds_match() -> bool {
+    unsafe {
+        let ui = UI.get().unwrap();
+        ui.seerr.cards.len() == ui.seerr.results.len()
+            && ui.seerr.cards.iter().zip(ui.seerr.results.iter()).all(|(card, r)| {
+                let want_button = r.availability == Availability::NotRequested;
+                let has_button = seerr_subviews(*card, "NSButton", &|_| true) > 0;
+                let has_pill = seerr_subviews(*card, "NSBox", &|b| {
+                    let rad: f64 = msg_send![b, cornerRadius];
+                    (rad - 10.).abs() < 0.01
+                }) > 0;
+                has_button == want_button && has_pill == !want_button
+            })
+    }
+}
+/// Whether the Requests row exists in the sidebar and is a sidebar row.
+fn seerr_sidebar_row_ok() -> bool {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let row = ui.seerr.row.get();
+        if row.is_null() {
+            return false;
+        }
+        let cls = objc::runtime::Class::get("JRSidebarRow").unwrap();
+        let k: BOOL = msg_send![row, isKindOfClass: cls];
+        k == YES
     }
 }
 fn seerr_empty_shown() -> Option<(String, String)> {
@@ -2417,13 +2450,22 @@ fn s_seerr_disabled() {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.seerr_enabled = false;
         ui.cfg.settings.seerr_url = String::new();
-        act(sel!(openSeerr:), nil());
-        state_check("seerr window visible", seerr_visible_win());
-        state_check("hint shown when disabled", !seerr_hidden(ui.seerr.hint.get()));
+        act(sel!(requestsSelected:), nil());
+        let ui = UI.get().unwrap();
+        state_check("requests tab shown when disabled (setup state)", seerr_on_screen());
+        state_check("no sidebar Requests row when disabled", ui.seerr.row.get().is_null());
+        state_check("setup state shown when disabled", !seerr_hidden(ui.seerr.hint.get()));
         state_check("search hidden when disabled", seerr_hidden(ui.seerr.search.get()));
+        state_check("Home not selected on Requests", !ui.home.active && !visible(ui.home.scroll.get()));
+        state_check("Requests remembered as last place", ui.cfg.last_view.as_deref() == Some("requests"));
+        audit("requests setup state");
+    }
+    unsafe {
+        let ui = UI.get_mut().unwrap();
         ui.cfg.settings.seerr_enabled = true; // enabled but no URL is still unconfigured
         act(sel!(openSeerr:), nil());
-        state_check("hint shown when URL empty", !seerr_hidden(ui.seerr.hint.get()));
+        let ui = UI.get().unwrap();
+        state_check("setup state when URL empty", !seerr_hidden(ui.seerr.hint.get()));
         // Messages that arrive while unconfigured must not crash.
         handle_main(MainMsg::SeerrError("Seerr is turned off. Enable it in Settings to search and request.".into()));
         handle_main(MainMsg::SeerrResults(vec![]));
@@ -2435,28 +2477,71 @@ fn s_seerr_enabled() {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.seerr_enabled = true;
         ui.cfg.settings.seerr_url = "http://seerr.example:5055".into();
-        act(sel!(openSeerr:), nil()); // same window reused
-        check_offscreen("seerr window");
-        state_check("hint hidden when configured", seerr_hidden(ui.seerr.hint.get()));
+        act(sel!(requestsSelected:), nil()); // the sidebar entry appears and is selected
+        let ui = UI.get().unwrap();
+        state_check("sidebar Requests row shown when configured", seerr_sidebar_row_ok());
+        state_check("Requests row selected", row_selected(ui.seerr.row.get()));
+        state_check("Home row not selected", !row_selected(ui.home.row.get()));
+        state_check("requests view on screen", seerr_on_screen());
+        state_check("header reads Requests", read_field(ui.header_title.get()) == "Requests");
+        state_check("library grid hidden", !visible(ui.lib_scroll.get()));
+        state_check("sort popup hidden", !visible(ui.sort_popup.get()));
+        check_offscreen("requests tab");
+        state_check("setup state hidden when configured", seerr_hidden(ui.seerr.hint.get()));
         state_check("search visible", !seerr_hidden(ui.seerr.search.get()));
-        state_check("no rows", ui.seerr.rows.is_empty());
+        state_check("no cards yet", ui.seerr.cards.is_empty());
         state_check(
             "hint state: search prompt",
             seerr_empty_shown().map(|(_, b)| b == "Search for a movie or show to request.") == Some(true),
         );
+        state_check("remembered as last place", ui.cfg.last_view.as_deref() == Some("requests"));
+    }
+    audit("requests empty");
+}
+fn s_seerr_login_restore() {
+    unsafe {
+        take_cmds();
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.settings.seerr_enabled = true;
+        ui.cfg.settings.seerr_url = "http://seerr.example:5055".into();
+        ui.cfg.last_view = Some(crate::ui::seerr::REQUESTS_ID.into());
+    }
+    // Same libraries as the other connect steps, so later library steps see the usual set.
+    handle_main(MainMsg::Connected {
+        user_name: "tester".into(),
+        views: vec![
+            ("v1".into(), "Movies".into(), Some("movies".into())),
+            ("v2".into(), "Shows".into(), Some("tvshows".into())),
+            ("v3".into(), "Music".into(), Some("music".into())),
+            ("v4".into(), "Live TV".into(), Some("livetv".into())),
+            ("v5".into(), "Misc".into(), None),
+        ],
+        has_live_tv: true,
+    });
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("login restores Requests over Home", ui.seerr.active && seerr_on_screen());
+        state_check("login: Home inactive", !ui.home.active);
+        state_check("login: no LoadHome", !take_cmds().iter().any(|c| matches!(c, UiCmd::LoadHome)));
+        act(sel!(homeSelected:), nil());
+        state_check("back to Home from Requests", UI.get().unwrap().home.active && !seerr_on_screen());
     }
 }
 fn s_seerr_results() {
+    unsafe { act(sel!(requestsSelected:), nil()) };
+    state_check("requests on screen before results", seerr_on_screen());
     handle_main(MainMsg::SeerrResults(seerr_mixed()));
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("7 rows", ui.seerr.rows.len() == 7);
+        state_check("7 cards", ui.seerr.cards.len() == 7);
         state_check("2 request buttons (NotRequested only)", seerr_button_rows() == 2);
-        state_check("rows are 76 tall", seerr_row_heights_ok());
-        state_check("a pill per row without a Request button", seerr_pills() == 7 - seerr_button_rows());
+        state_check("requestable cards: Request button, no pill; others: pill", seerr_kinds_match());
+        state_check("cards share one height", seerr_card_heights_ok());
+        state_check("a pill per card without a Request button", seerr_pills() == 7 - seerr_button_rows());
         state_check("empty state hidden with rows", seerr_empty_shown().is_none());
         state_check("thumbnail waits for the poster", unsafe { crate::ui::seerr::thumb_has_image("/p11.jpg") } == Some(false));
     }
+    audit("requests results");
     // The worker would fetch these through the Seerr server; fake its reply (no network).
     handle_main(MainMsg::SeerrPoster { path: "/p11.jpg".into(), bytes: TEST_PNG.to_vec() });
     handle_main(MainMsg::SeerrPoster { path: "/bad.jpg".into(), bytes: vec![1, 2, 3] });
@@ -2464,7 +2549,6 @@ fn s_seerr_results() {
         state_check("thumbnail image set after poster reply", crate::ui::seerr::thumb_has_image("/p11.jpg") == Some(true));
         state_check("other thumbnail still a placeholder", crate::ui::seerr::thumb_has_image("/p22.jpg") == Some(false));
     }
-    audit("seerr results");
 }
 fn s_seerr_typing() {
     unsafe {
@@ -2552,7 +2636,7 @@ fn s_seerr_requests_tab() {
         let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 1isize];
         act(sel!(seerrTab:), ui.seerr.tabs.get());
         state_check("SeerrRequests emitted", matches!(take_cmds().as_slice(), [UiCmd::SeerrRequests]));
-        state_check("loading: no rows, no empty state", ui.seerr.rows.is_empty() && seerr_empty_shown().is_none());
+        state_check("loading: no rows, no empty state", ui.seerr.cards.is_empty() && seerr_empty_shown().is_none());
         handle_main(MainMsg::SeerrRequestList(vec![
             seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending),
             seerr_request_item(2, "Two", RequestStatus::Approved, Availability::Processing),
@@ -2561,14 +2645,14 @@ fn s_seerr_requests_tab() {
             seerr_request_item(5, "Five", RequestStatus::Completed, Availability::Available),
             seerr_request_item(6, "Six", RequestStatus::Unknown, Availability::Blocklisted),
         ]));
-        state_check("6 request rows", ui.seerr.rows.len() == 6);
+        state_check("6 request rows", ui.seerr.cards.len() == 6);
         state_check("no request buttons in My requests", seerr_button_rows() == 0);
         state_check("a pill per request row", seerr_pills() == 6);
         audit("seerr my requests");
         handle_main(MainMsg::SeerrRequestList(vec![]));
         state_check(
             "empty requests state",
-            ui.seerr.rows.is_empty()
+            ui.seerr.cards.is_empty()
                 && seerr_empty_shown() == Some(("No requests yet".into(), "You haven't requested anything yet.".into())),
         );
         handle_main(MainMsg::SeerrRequestList(vec![seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending)]));
@@ -2587,33 +2671,51 @@ fn s_seerr_requests_tab() {
         take_cmds();
         let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 0isize];
         act(sel!(seerrTab:), ui.seerr.tabs.get());
-        state_check("back on search tab", !ui.seerr.requests_mode && ui.seerr.rows.len() == 7);
+        state_check("back on search tab", !ui.seerr.requests_mode && ui.seerr.cards.len() == 7);
     }
 }
+/// The grid reflows with the window: column count follows the width, nothing overflows,
+/// and the layout audit is clean at the minimum, a mid size and a large size.
 fn s_seerr_resize() {
-    unsafe {
-        let ui = UI.get_mut().unwrap();
-        for (w, h) in [(520.0, 420.0), (900.0, 800.0), (680.0, 680.0)] {
-            let _: () = msg_send![ui.seerr.win.get(), setContentSize: size(w, h)];
-            let _: () = msg_send![ui.seerr.win.get(), displayIfNeeded];
-            let _: () = msg_send![ui.seerr.doc.get(), layoutSubtreeIfNeeded];
-            handle_main(MainMsg::SeerrResults(seerr_mixed())); // rebuild at the new width
-            audit(&format!("seerr @{}x{}", w, h));
+    for (w, h) in [(960.0, 600.0), (1700.0, 1000.0), (1280.0, 800.0)] {
+        set_content_size(w, h);
+        handle_main(MainMsg::SeerrResults(seerr_mixed())); // rebuild at the new width
+        unsafe {
+            let ui = UI.get().unwrap();
+            let doc_w = frame_of(ui.seerr.doc.get()).size.w;
+            let (cols, _) = crate::ui::seerr::card_columns(doc_w);
+            let first_y = frame_of(ui.seerr.cards[0]).origin.y;
+            let on_first_row = ui.seerr.cards.iter().filter(|c| (frame_of(**c).origin.y - first_y).abs() < 0.5).count();
+            state_check(
+                &format!("columns follow width @{}x{}", w, h),
+                on_first_row == cols.min(ui.seerr.cards.len()),
+            );
+            let fits = ui.seerr.cards.iter().all(|c| {
+                let f = frame_of(*c);
+                f.origin.x >= 0. && f.origin.x + f.size.w <= doc_w + 0.5
+            });
+            state_check(&format!("cards inside the grid width @{}x{}", w, h), fits);
         }
+        audit(&format!("requests @{}x{}", w, h));
     }
+    set_content_size(1280.0, 800.0);
 }
 fn s_seerr_reopen() {
+    unsafe { act(sel!(homeSelected:), nil()) };
     unsafe {
-        let ui = UI.get_mut().unwrap();
-        let w = ui.seerr.win.get();
-        let _: () = msg_send![w, close];
-        state_check("window closed", !seerr_visible_win());
-        // messages while the window is hidden are applied, not dropped
-        handle_main(MainMsg::SeerrRequested { title: "Fresh Show".into() });
-        act(sel!(openSeerr:), nil());
-        state_check("window reopened", seerr_visible_win());
-        state_check("same window instance", ui.seerr.win.get() == w);
-        state_check("results survive close/reopen", ui.seerr.results.len() == 7 && ui.seerr.rows.len() == 7);
+        let ui = UI.get().unwrap();
+        state_check("leaving Requests hides it", !seerr_on_screen() && !ui.seerr.active);
+        state_check("Home is the screen again", ui.home.active && visible(ui.home.scroll.get()));
+        state_check("Home remembered as last place", ui.cfg.last_view.as_deref() == Some("home"));
+    }
+    // messages while Requests is away are applied, not dropped
+    handle_main(MainMsg::SeerrRequested { title: "Fresh Show".into() });
+    unsafe { act(sel!(requestsSelected:), nil()) };
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("Requests comes back", seerr_on_screen());
+        state_check("results survive leaving", ui.seerr.results.len() == 7 && ui.seerr.cards.len() == 7);
+        state_check("Requests remembered again", ui.cfg.last_view.as_deref() == Some("requests"));
     }
 }
 fn s_seerr_empty() {
@@ -2623,12 +2725,12 @@ fn s_seerr_empty() {
         handle_main(MainMsg::SeerrResults(vec![]));
         state_check(
             "no results state",
-            ui.seerr.rows.is_empty()
+            ui.seerr.cards.is_empty()
                 && seerr_empty_shown() == Some(("No results".into(), "No matches for “zzzz”.".into())),
         );
         set_text(ui.seerr.search.get(), "");
         handle_main(MainMsg::SeerrResults(vec![]));
-        state_check("blank search state", ui.seerr.rows.is_empty() && seerr_empty_shown().map(|t| t.0) == Some("Find a title".into()));
+        state_check("blank search state", ui.seerr.cards.is_empty() && seerr_empty_shown().map(|t| t.0) == Some("Find a title".into()));
         take_cmds();
     }
 }
@@ -2714,7 +2816,7 @@ fn s_seerr_settings_ok() {
                 && ui.cfg.settings.seerr_url == "http://seerr.example:5055"
                 && ui.cfg.settings.seerr_username == "nathan",
         );
-        state_check("seerr window shows search UI", seerr_hidden(ui.seerr.hint.get()));
+        state_check("requests shows the search UI", seerr_hidden(ui.seerr.hint.get()));
         state_check("success message in seerr status line", seerr_status_text().starts_with("Connected to Seerr"));
     }
     // A stray status with nothing pending must be harmless.
@@ -2786,9 +2888,7 @@ fn s_seerr_settings_key() {
     });
 }
 fn s_seerr_end() {
-    unsafe {
-        let ui = UI.get_mut().unwrap();
-        let _: () = msg_send![ui.seerr.win.get(), close];
-        take_cmds();
-    }
+    unsafe { act(sel!(homeSelected:), nil()) };
+    take_cmds();
+    state_check("Requests left for Home", !unsafe { UI.get().unwrap().seerr.active });
 }

@@ -85,9 +85,9 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Go", "Refresh", "refresh:", "r", CMD, 0),
     s("Go", "Sign Out", "signOut:", "l", ALT, 0),
     // Requests (Seerr)
-    s("Go", "Request Something New…", "openSeerr:", "k", ALT | CMD, 0),
-    s("Go", "Seerr: Discover", "seerrShowTab:", "1", ALT | CMD, 0),
-    s("Go", "Seerr: My Requests", "seerrShowTab:", "2", ALT | CMD, 1),
+    s("Go", "Requests", "openSeerr:", "k", ALT | CMD, 0),
+    s("Go", "Requests: Search", "seerrShowTab:", "1", ALT | CMD, 0),
+    s("Go", "Requests: My Requests", "seerrShowTab:", "2", ALT | CMD, 1),
     // Help
     s("Help", "Keyboard Shortcuts", "showShortcuts:", "/", CMD, 0),
 ];
@@ -243,7 +243,7 @@ pub(crate) extern "C" fn focus_search(_t: &mut Object, _c: Sel, _s: *mut Object)
     unsafe {
         let ui = UI.get_mut().unwrap();
         let k = key_window();
-        let field = if !ui.seerr.win.get().is_null() && k == ui.seerr.win.get() {
+        let field = if ui.seerr.active {
             ui.seerr.search.get()
         } else {
             ui.search.get()
@@ -265,7 +265,6 @@ pub(crate) extern "C" fn focus_previous(_t: &mut Object, _c: Sel, _s: *mut Objec
 pub(crate) extern "C" fn seerr_show_tab(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
         let tag: NSInteger = msg_send![sender, tag];
-        crate::ui::seerr::open_window();
         crate::ui::seerr::select_mode(tag == 1);
     }
 }

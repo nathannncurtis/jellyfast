@@ -194,6 +194,7 @@ pub(crate) unsafe fn reload() {
 
 /// Show Home and remember it as the last selected place.
 pub(crate) unsafe fn enter() {
+    crate::ui::seerr::leave();
     let ui = UI.get_mut().unwrap();
     ui.home.active = true;
     ui.selected_view = None;
