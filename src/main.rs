@@ -95,17 +95,17 @@
 //! [dependencies]
 //! objc = "0.2.7"                       # Objective-C runtime bindings (tiny, stable)
 //! tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
-//! reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+//! reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 //! serde = { version = "1", features = ["derive"] }
 //! serde_json = "1"
 //! tracing = "0.1"
 //! tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-//! security-framework = "2"             # Keychain (thin binding to Security.framework)
+//! security-framework = "3.7"           # Keychain (thin binding to Security.framework)
 //!
 //! # HEAVY-DEPENDENCY JUSTIFICATION (each one, with lighter alternatives):
 //! # tokio   — mandated by the spec for async IO. Alternative: std::thread +
 //! #           ureq (blocking). Heavier but required here.
-//! # reqwest — mandated. rustls-tls avoids OpenSSL/libssl entirely. Lighter
+//! # reqwest — mandated. rustls (no native-tls) avoids OpenSSL/libssl entirely. Lighter
 //! #           alternative considered: `ureq` (~10x smaller, blocking) — would
 //! #           work fine behind tokio::spawn_blocking, kept reqwest per spec.
 //! # security-framework — the only sane Keychain path without hand-rolled
