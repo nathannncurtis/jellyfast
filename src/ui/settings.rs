@@ -3,6 +3,7 @@ use crate::*;
 use crate::jellyfin::models::*;
 use crate::app::controller::*;
 use crate::app::messages::*;
+use crate::app::libraries::{move_by, ordered_views};
 use crate::platform::appkit::*;
 use crate::platform::avkit::*;
 use crate::ui::library::*;
@@ -29,6 +30,7 @@ pub(crate) unsafe fn build_settings_window() {
     let _: () = msg_send![w, setTitle: ns("Settings")];
     let _: () = msg_send![w, setReleasedWhenClosed: NO];
     ui.settings_win = Ptr::retained(w);
+    release_obj(w); // Ptr::retained took its own +1; drop the alloc/init +1 (same as seerr.rs)
     let c: *mut Object = msg_send![w, contentView];
 
     // Two-column form laid out top-down from a running `top`; frames are applied once the
@@ -83,9 +85,15 @@ pub(crate) unsafe fn build_settings_window() {
     };
 
     section(&mut place, &mut top, "Server", true);
-    let url_f = text_field("http://host:8096", false);
+    let url_f = text_field("host:8096", false);
     row(&mut place, &mut top, "Server URL", url_f, 24., CTRL_W);
     ui.s_url = Ptr(url_f);
+
+    section(&mut place, &mut top, "Browsing", false);
+    let lay = popup(&["Separate libraries", "One big library"]);
+    row(&mut place, &mut top, "Sidebar", lay, 26., 200.);
+    help(&mut place, &mut top, "One big library shows Home, Browse, Search and Requests, with movies and shows mixed.");
+    ui.s_layout = Ptr(lay);
 
     section(&mut place, &mut top, "Playback", false);
     let q = popup(&["Original", "40 Mbps", "20 Mbps", "10 Mbps", "5 Mbps", "3 Mbps"]);
@@ -107,6 +115,41 @@ pub(crate) unsafe fn build_settings_window() {
     row(&mut place, &mut top, "Theme", th, 26., 160.);
     ui.s_theme = Ptr(th);
 
+    // Libraries: pick one, then reorder it or hide it. Filled from the server views on open.
+    section(&mut place, &mut top, "Libraries", false);
+    let lp = popup(&["No libraries yet"]);
+    let _: () = msg_send![lp, setTarget: ui.ctl.get()];
+    let _: () = msg_send![lp, setAction: sel!(libSelected:)];
+    let lib_row_top = top;
+    row(&mut place, &mut top, "Library", lp, 26., 200.);
+    ui.s_lib_pop = Ptr(lp);
+    let arrow = |name: &str, tip: &str, action: objc::runtime::Sel| -> *mut Object {
+        let b: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
+            target: ui.ctl.get() action: action];
+        let _: () = msg_send![b, setBordered: NO];
+        let img = symbol(name, 12., Weight::Semibold);
+        if !img.is_null() {
+            let _: () = msg_send![b, setImage: img];
+        }
+        let _: () = msg_send![b, setImagePosition: 1isize]; // image only
+        let _: () = msg_send![b, setContentTintColor: color(C_TEXT2)];
+        let _: () = msg_send![b, setToolTip: ns(tip)];
+        b
+    };
+    let up = arrow("chevron.up", "Move up", sel!(libMoveUp:));
+    let down = arrow("chevron.down", "Move down", sel!(libMoveDown:));
+    put(&mut place, up, CTRL_X + 200. + SP2, lib_row_top + (ROW_H - 24.) / 2., 24., 24.);
+    put(&mut place, down, CTRL_X + 200. + SP2 + 24. + SP1, lib_row_top + (ROW_H - 24.) / 2., 24., 24.);
+    ui.s_lib_up = Ptr(up);
+    ui.s_lib_down = Ptr(down);
+    let show: *mut Object = msg_send![class!(NSButton),
+        checkboxWithTitle: ns("Show in sidebar")
+        target: ui.ctl.get() action: sel!(libVisibleToggled:)];
+    put(&mut place, show, CTRL_X, top + (ROW_H - 18.) / 2., CTRL_W, 18.);
+    top += ROW_H;
+    ui.s_lib_show = Ptr(show);
+    help(&mut place, &mut top, "Pick a library, then use the arrows to move it. Hidden libraries stay on the server.");
+
     section(&mut place, &mut top, "Requests (Seerr)", false);
     let cb: *mut Object = msg_send![class!(NSButton),
         checkboxWithTitle: ns("Enable requests")
@@ -114,7 +157,7 @@ pub(crate) unsafe fn build_settings_window() {
     put(&mut place, cb, CTRL_X, top + (ROW_H - 18.) / 2., CTRL_W, 18.);
     top += ROW_H + SP3;
     ui.seerr.s_on = Ptr(cb);
-    let seerr_url_f = text_field("http://host:5055", false);
+    let seerr_url_f = text_field("host:5055", false);
     row(&mut place, &mut top, "Seerr URL", seerr_url_f, 24., CTRL_W);
     ui.seerr.s_url = Ptr(seerr_url_f);
     top += SP3;
@@ -173,7 +216,7 @@ pub(crate) unsafe fn build_settings_window() {
 pub(crate) unsafe fn settings_fill(cfg: &Config) {
     let ui = UI.get_mut().unwrap();
     if let Some(u) = &cfg.server_url {
-        set_text(ui.s_url.get(), u);
+        set_text(ui.s_url.get(), &crate::jellyfin::urls::bare_url(u));
     }
     set_text(ui.s_sub_lang.get(), &cfg.settings.subtitle_lang);
     set_text(ui.s_audio_lang.get(), &cfg.settings.audio_lang);
@@ -192,8 +235,10 @@ pub(crate) unsafe fn settings_fill(cfg: &Config) {
         _ => 0,
     };
     let _: () = msg_send![ui.s_theme.get(), selectItemAtIndex: t_idx as NSInteger];
+    let l_idx = if cfg.layout_mode == Some(crate::config::LayoutMode::Unified) { 1isize } else { 0 };
+    let _: () = msg_send![ui.s_layout.get(), selectItemAtIndex: l_idx];
     let _: () = msg_send![ui.seerr.s_on.get(), setState: cfg.settings.seerr_enabled as NSInteger];
-    set_text(ui.seerr.s_url.get(), &cfg.settings.seerr_url);
+    set_text(ui.seerr.s_url.get(), &crate::jellyfin::urls::bare_url(&cfg.settings.seerr_url));
     // Secrets are never prefilled. A saved URL implies a stored credential
     // (saving requires one), so say it is unchanged rather than asking the
     // Keychain from the main thread.
@@ -214,4 +259,107 @@ pub(crate) unsafe fn settings_fill(cfg: &Config) {
     crate::ui::seerr::apply_mode();
     set_text(ui.seerr.s_status.get(), "");
     ui.seerr.pending = None;
+    ui.lib_edit = ordered_views(&ui.all_views, &cfg.library_order);
+    ui.lib_hidden = cfg.hidden_libraries.clone();
+    ui.lib_sel = 0;
+    lib_refresh();
+}
+
+/// Repaint the Libraries controls from the Settings working copy (`ui.lib_edit`).
+pub(crate) unsafe fn lib_refresh() {
+    let ui = UI.get_mut().unwrap();
+    let pop = ui.s_lib_pop.get();
+    let _: () = msg_send![pop, removeAllItems];
+    let n = ui.lib_edit.len();
+    let enable = |v: *mut Object, on: bool| {
+        let _: () = msg_send![v, setEnabled: if on { YES } else { NO }];
+    };
+    if n == 0 {
+        let _: () = msg_send![pop, addItemWithTitle: ns("No libraries yet")];
+        enable(pop, false);
+        enable(ui.s_lib_show.get(), false);
+        enable(ui.s_lib_up.get(), false);
+        enable(ui.s_lib_down.get(), false);
+        let _: () = msg_send![ui.s_lib_show.get(), setState: 0isize];
+        return;
+    }
+    for (id, name, _) in &ui.lib_edit {
+        let title = if ui.lib_hidden.contains(id) { format!("{name} (hidden)") } else { name.clone() };
+        let _: () = msg_send![pop, addItemWithTitle: ns(&title)];
+    }
+    ui.lib_sel = ui.lib_sel.min(n - 1);
+    let _: () = msg_send![pop, selectItemAtIndex: ui.lib_sel as NSInteger];
+    let shown = !ui.lib_hidden.contains(&ui.lib_edit[ui.lib_sel].0);
+    let _: () = msg_send![ui.s_lib_show.get(), setState: shown as NSInteger];
+    enable(pop, true);
+    enable(ui.s_lib_show.get(), true);
+    enable(ui.s_lib_up.get(), ui.lib_sel > 0);
+    enable(ui.s_lib_down.get(), ui.lib_sel + 1 < n);
+}
+
+pub(crate) extern "C" fn lib_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let i: NSInteger = msg_send![ui.s_lib_pop.get(), indexOfSelectedItem];
+        ui.lib_sel = i.max(0) as usize;
+        lib_refresh();
+    }
+}
+
+/// Checkbox: show or hide the selected library. The last visible library cannot be hidden,
+/// so the box snaps back instead.
+pub(crate) extern "C" fn lib_visible_toggled(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        if ui.lib_sel >= ui.lib_edit.len() {
+            return;
+        }
+        let on: NSInteger = msg_send![ui.s_lib_show.get(), state];
+        let id = ui.lib_edit[ui.lib_sel].0.clone();
+        if on != 0 {
+            ui.lib_hidden.retain(|h| h != &id);
+        } else {
+            let others = ui.lib_edit.iter().filter(|v| v.0 != id && !ui.lib_hidden.contains(&v.0)).count();
+            if others > 0 {
+                ui.lib_hidden.push(id);
+            }
+        }
+        lib_refresh();
+    }
+}
+
+pub(crate) extern "C" fn lib_move_up(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe { lib_move(true) }
+}
+
+pub(crate) extern "C" fn lib_move_down(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe { lib_move(false) }
+}
+
+unsafe fn lib_move(up: bool) {
+    let ui = UI.get_mut().unwrap();
+    if ui.lib_sel < ui.lib_edit.len() {
+        ui.lib_sel = move_by(&mut ui.lib_edit, ui.lib_sel, up);
+    }
+    lib_refresh();
+}
+
+/// Called by Save before the config is written. Applies the Libraries working copy to
+/// `ui.cfg`, tells the worker when it changed, and rebuilds the sidebar. An empty working
+/// copy (never connected, so no libraries) leaves the saved preferences alone.
+pub(crate) unsafe fn commit_library_prefs() {
+    let ui = UI.get_mut().unwrap();
+    if ui.lib_edit.is_empty() {
+        return;
+    }
+    let order: Vec<String> = ui.lib_edit.iter().map(|v| v.0.clone()).collect();
+    let hidden = ui.lib_hidden.clone();
+    let saved: Vec<String> = ordered_views(&ui.all_views, &ui.cfg.library_order).iter().map(|v| v.0.clone()).collect();
+    if order == saved && hidden == ui.cfg.hidden_libraries {
+        return;
+    }
+    ui.cfg.library_order = order.clone();
+    ui.cfg.hidden_libraries = hidden.clone();
+    let _ = ui.ui_tx.send(UiCmd::SaveLibraries { order, hidden });
+    crate::ui::shell::apply_library_prefs();
 }

@@ -33,30 +33,52 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::Connected { user_name, views, has_live_tv } => {
             unsafe {
                 let ui = UI.get_mut().unwrap();
-                ui.views = views.clone();
-                sidebar_rebuild(user_name, &views, has_live_tv);
+                // Live TV needs a views entry so the button's tag resolves in viewSelected:.
+                let mut all = views.clone();
+                if has_live_tv && !all.iter().any(|v| v.2.as_deref() == Some("livetv")) {
+                    all.push(("livetv".into(), "Live TV".into(), Some("livetv".into())));
+                }
+                ui.all_views = all;
+                ui.user_label = user_name;
+                apply_library_prefs();
                 show_login_or_library(true);
-                // Land on the last-used library, or the first one.
-                let idx = ui
-                    .cfg
-                    .last_view
-                    .as_ref()
-                    .and_then(|id| ui.views.iter().position(|v| &v.0 == id))
-                    .unwrap_or(0);
-                if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
-                    ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
-                    ui.selected_view = Some(idx);
-                    sidebar_refresh_selection();
-                    begin_load(true);
-                    let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+                // Restore the last place: a remembered library if it still exists
+                // (separate layout only), Browse if that was the last place (unified
+                // layout), otherwise Home. Home also requests its rows.
+                let unified = ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified);
+                let last = ui.cfg.last_view.clone();
+                let lib = if unified {
+                    None
+                } else {
+                    last.as_deref().and_then(|id| ui.views.iter().position(|v| v.0 == id))
+                };
+                match lib {
+                    Some(idx) => select_view(idx),
+                    None if unified && last.as_deref() == Some(crate::ui::home::BROWSE_ID) => {
+                        crate::ui::home::enter_browse()
+                    }
+                    None => crate::ui::home::enter(),
+                }
+                // First successful login with no layout chosen yet: ask how to browse.
+                if ui.cfg.layout_mode.is_none() {
+                    crate::ui::onboarding::show();
                 }
             }
+        }
+        MainMsg::ServerUrl(url) => {
+            UI.get_mut().unwrap().cfg.server_url = Some(url);
         }
         MainMsg::ConnectError(e) => unsafe {
             login_error(&e);
             show_login_or_library(false);
         },
+        MainMsg::Resuming { url } => login_connecting(&url),
+        MainMsg::HomeLoaded(home) => unsafe {
+            crate::ui::home::set_rows(home.rows);
+        },
         MainMsg::ItemsLoaded { title, items, can_go_back } => unsafe {
+            crate::ui::detail::hide();
+            crate::ui::home::leave();
             let ui = UI.get_mut().unwrap();
             ui.items = items.clone();
             ui.cur_title = title.clone();
@@ -87,7 +109,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::PlaybackError(e) => unsafe {
             let ui = UI.get_mut().unwrap();
             set_busy(false);
-            if ui.playing.is_some() {
+            if ui.playing.is_some() || crate::ui::detail::is_open() {
                 crate::ui::player::toast(&e, Some("exclamationmark.triangle"), true);
             } else if ui.items.is_empty() {
                 grid_set_items(&[]);
@@ -95,6 +117,21 @@ pub(crate) fn handle_main(msg: MainMsg) {
             } else {
                 set_count(&clip_msg(&e, 80), true);
             }
+        },
+        MainMsg::DetailLoaded(view) => unsafe {
+            set_busy(false);
+            crate::ui::detail::show(*view);
+        },
+        MainMsg::SeasonsLoaded { series_id, seasons, selected } => {
+            crate::ui::detail::seasons_loaded(series_id, seasons, selected)
+        }
+        MainMsg::SeasonEpisodesLoaded { series_id, season_id, episodes } => {
+            crate::ui::detail::episodes_loaded(series_id, season_id, episodes)
+        }
+        MainMsg::SeasonsError { series_id, message } => crate::ui::detail::seasons_failed(series_id, message),
+        MainMsg::DetailError(e) => unsafe {
+            set_busy(false);
+            crate::ui::player::toast(&e, Some("exclamationmark.triangle"), true);
         },
         MainMsg::ServerUp => unsafe {
             retry_playback();

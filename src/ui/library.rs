@@ -5,7 +5,7 @@ use crate::platform::appkit::*;
 use crate::ui::theme::*;
 use objc::class;
 use objc::msg_send;
-use objc::runtime::{Object, Sel, NO, YES};
+use objc::runtime::{Object, Sel, BOOL, NO, YES};
 use objc::{sel, sel_impl};
 use std::os::raw::c_void;
 
@@ -90,6 +90,7 @@ unsafe fn palette_symbol(name: &str, pt: f64, colors: &[*mut Object]) -> *mut Ob
 pub fn grid_set_items(items: &[ListItem]) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        KB_FOCUS.store(-1, std::sync::atomic::Ordering::Relaxed);
         let grid = ui.grid.get();
         let scale: f64 = msg_send![ui.win.get(), backingScaleFactor];
         // Keep the same GridData box (the grid's ivar points at it); swap its cells.
@@ -107,161 +108,7 @@ pub fn grid_set_items(items: &[ListItem]) {
         tx_begin_instant();
         let mut cells = Vec::with_capacity(items.len());
         for (i, it) in items.iter().enumerate() {
-            let cell_cls = *CELL_CLASS.get().unwrap();
-            let container: *mut Object = msg_send![cell_cls, alloc];
-            let container: *mut Object = msg_send![container, initWithFrame: rect(0., 0., m.tile_w, m.cell_h)];
-            let root = layer_of(container);
-
-            // Shadow host (no masking) + clipped art layer.
-            let host = new_layer();
-            let _: () = msg_send![host, setShadowColor: black_cg()];
-            let _: () = msg_send![host, setShadowOpacity: SH_REST.opacity];
-            let _: () = msg_send![host, setShadowRadius: SH_REST.radius];
-            let _: () = msg_send![host, setShadowOffset: size(0., SH_REST.dy)];
-            add_layer(root, host);
-            let art = new_layer();
-            set_corner(art, R_POSTER);
-            let _: () = msg_send![art, setMasksToBounds: YES];
-            let _: () = msg_send![art, setContentsGravity: ns("resizeAspectFill")];
-            let _: () = msg_send![art, setContentsScale: scale];
-            let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_SEL)];
-            add_layer(host, art);
-
-            // Progress: track + fill, clipped by the art layer.
-            let frac = crate::jellyfin::urls::progress_fraction(
-                it.user_data.as_ref().map(|u| u.position_ticks).unwrap_or(0),
-                it.run_time_ticks,
-            );
-            let track = new_layer();
-            let _: () = msg_send![track, setCornerRadius: 1.5f64];
-            let _: () = msg_send![track, setBackgroundColor: cg_black(0.45)];
-            let _: () = msg_send![track, setHidden: (frac <= 0.0) as objc::runtime::BOOL];
-            add_layer(art, track);
-            let fill = new_layer();
-            let _: () = msg_send![fill, setCornerRadius: 1.5f64];
-            let _: () = msg_send![fill, setBackgroundColor: cg(C_ACCENT)];
-            add_layer(track, fill);
-
-            // Hover dim + play affordance.
-            let dim = new_layer();
-            let _: () = msg_send![dim, setBackgroundColor: cg_black(0.18)];
-            let _: () = msg_send![dim, setOpacity: 0.0f32];
-            add_layer(art, dim);
-            let circle = new_layer();
-            let _: () = msg_send![circle, setCornerRadius: 22.0f64];
-            let _: () = msg_send![circle, setBackgroundColor: cg_black(0.55)];
-            let _: () = msg_send![circle, setOpacity: 0.0f32];
-            add_layer(art, circle);
-
-            // Placeholder glyph.
-            let glyph: *mut Object = msg_send![class!(NSImageView), alloc];
-            let glyph: *mut Object = msg_send![glyph, initWithFrame: rect(0., 0., 40., 40.)];
-            let gi = symbol(placeholder_symbol(&it.item_type), 28., Weight::Regular);
-            if !gi.is_null() {
-                let _: () = msg_send![glyph, setImage: gi];
-                let _: () = msg_send![glyph, setContentTintColor: color(C_TEXT3)];
-            }
-            add_sub(container, glyph);
-            autorel(glyph);
-            // Play icon (above the circle).
-            let play: *mut Object = msg_send![class!(NSImageView), alloc];
-            let play: *mut Object = msg_send![play, initWithFrame: rect(0., 0., 24., 24.)];
-            let pi = symbol("play.fill", 18., Weight::Regular);
-            if !pi.is_null() {
-                let _: () = msg_send![play, setImage: pi];
-                let _: () = msg_send![play, setContentTintColor: color(C_ON_MEDIA)];
-            }
-            let _: () = msg_send![play, setAlphaValue: 0.0f64];
-            add_sub(container, play);
-            autorel(play);
-            // Watched badge.
-            let badge: *mut Object = msg_send![class!(NSImageView), alloc];
-            let badge: *mut Object = msg_send![badge, initWithFrame: rect(0., 0., 20., 20.)];
-            let white = color(C_ON_MEDIA);
-            let acc = color(C_ACCENT);
-            let bimg = palette_symbol("checkmark.circle.fill", 16., &[white, acc]);
-            if !bimg.is_null() {
-                let _: () = msg_send![badge, setImage: bimg];
-            }
-            set_hidden(badge, !it.user_data.as_ref().map(|u| u.played).unwrap_or(false));
-            add_sub(container, badge);
-            autorel(badge);
-
-            // Title + subtitle.
-            let title = label(&it.name, T_BODY_EM, C_TEXT, ALIGN_LEFT);
-            add_sub(container, title);
-            let sub = label(&it.sub_label(), T_CAPTION, C_TEXT2, ALIGN_LEFT);
-            add_sub(container, sub);
-
-            // Click target over the whole cell.
-            let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
-                target: ui.ctl.get() action: sel!(itemClicked:)];
-            let _: () = msg_send![btn, setBordered: NO];
-            let _: () = msg_send![btn, setTag: i as NSInteger];
-            let _: () = msg_send![btn, setToolTip: ns(&it.name)];
-            add_sub(container, btn);
-            // Context menu.
-            let menu: *mut Object = msg_send![class!(NSMenu), alloc];
-            let menu: *mut Object = msg_send![menu, initWithTitle: ns(&it.name)];
-            let id_ns = ns(&it.id);
-            let played = it.user_data.as_ref().map(|u| u.played).unwrap_or(false);
-            let m0: *mut Object = menu_item("Play", sel!(itemClicked:), "");
-            let _: () = msg_send![m0, setTarget: ui.ctl.get()];
-            let _: () = msg_send![m0, setTag: i as NSInteger];
-            let _: () = msg_send![menu, addItem: m0];
-            let (t1, s1) = if played {
-                ("Mark as Unwatched", sel!(markUnwatched:))
-            } else {
-                ("Mark as Watched", sel!(markWatched:))
-            };
-            let m1: *mut Object = menu_item(t1, s1, "");
-            let _: () = msg_send![m1, setTarget: ui.ctl.get()];
-            let _: () = msg_send![m1, setRepresentedObject: id_ns];
-            let _: () = msg_send![menu, addItem: m1];
-            let sep: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
-            let _: () = msg_send![menu, addItem: sep];
-            let m2: *mut Object = menu_item("Open in Jellyfin Web", sel!(openInWeb:), "");
-            let _: () = msg_send![m2, setTarget: ui.ctl.get()];
-            let _: () = msg_send![m2, setRepresentedObject: id_ns];
-            let _: () = msg_send![menu, addItem: m2];
-            let _: () = msg_send![btn, setMenu: menu];
-            autorel(menu);
-
-            let cd = Box::into_raw(Box::new(CellData { shadow: host, dim, circle, play_icon: play }));
-            (*container).set_ivar::<*mut c_void>("jrCell", cd as *mut c_void);
-            let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
-            let ta: *mut Object = msg_send![ta,
-                initWithRect: rect(0., 0., m.tile_w, m.poster_h)
-                options: (0x01usize | 0x80usize | 0x200usize) owner: container userInfo: nil()];
-            let _: () = msg_send![container, addTrackingArea: ta];
-            autorel(ta);
-            let _: () = msg_send![grid, addSubview: container];
-            autorel(container);
-            let key = poster_key(&it.id);
-            let mut handle = CellHandle {
-                container,
-                art,
-                shadow: host,
-                prog_track: track,
-                prog_fill: fill,
-                prog_frac: frac,
-                dim,
-                circle,
-                glyph,
-                play_icon: play,
-                badge,
-                title,
-                sub,
-                btn,
-                skel_title: nil(),
-                skel_sub: nil(),
-                key,
-                meta: it.clone(),
-            };
-            if let Some(img) = ui.poster_cache.get(&key) {
-                show_art(&mut handle, *img, false);
-            }
-            cells.push(handle);
+            cells.push(build_cell(grid, it, i as NSInteger, sel!(itemClicked:), scale, &m));
         }
         tx_end();
         gd.cells = cells;
@@ -269,6 +116,188 @@ pub fn grid_set_items(items: &[ListItem]) {
         // Re-point the ivar users at the (same) box, then lay out.
         let _: () = msg_send![grid, setNeedsLayout: YES];
     }
+}
+
+
+/// One poster cell under `grid` for `it`. Clicks send `click` with `tag`; the caller
+/// positions it with `set_frame` and `layout_cell`.
+pub(crate) unsafe fn build_cell(
+    grid: *mut Object,
+    it: &ListItem,
+    tag: NSInteger,
+    click: Sel,
+    scale: f64,
+    m: &Metrics,
+) -> CellHandle {
+    build_cell_keyed(grid, it, tag, click, scale, m, poster_key(&it.id))
+}
+
+/// Like `build_cell`, but the artwork is looked up and filled under `key`
+/// (Home's wide cards use their own key, so they never show poster art).
+pub(crate) unsafe fn build_cell_keyed(
+    grid: *mut Object,
+    it: &ListItem,
+    tag: NSInteger,
+    click: Sel,
+    scale: f64,
+    m: &Metrics,
+    key: u64,
+) -> CellHandle {
+    let ui = UI.get_mut().unwrap();
+    let cell_cls = *CELL_CLASS.get().unwrap();
+    let container: *mut Object = msg_send![cell_cls, alloc];
+    let container: *mut Object = msg_send![container, initWithFrame: rect(0., 0., m.tile_w, m.cell_h)];
+    let root = layer_of(container);
+
+    // Shadow host (no masking) + clipped art layer.
+    let host = new_layer();
+    let _: () = msg_send![host, setShadowColor: black_cg()];
+    let _: () = msg_send![host, setShadowOpacity: SH_REST.opacity];
+    let _: () = msg_send![host, setShadowRadius: SH_REST.radius];
+    let _: () = msg_send![host, setShadowOffset: size(0., SH_REST.dy)];
+    add_layer(root, host);
+    let art = new_layer();
+    set_corner(art, R_POSTER);
+    let _: () = msg_send![art, setMasksToBounds: YES];
+    let _: () = msg_send![art, setContentsGravity: ns("resizeAspectFill")];
+    let _: () = msg_send![art, setContentsScale: scale];
+    let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_SEL)];
+    add_layer(host, art);
+
+    // Progress: track + fill, clipped by the art layer.
+    let frac = crate::jellyfin::urls::progress_fraction(
+        it.user_data.as_ref().map(|u| u.position_ticks).unwrap_or(0),
+        it.run_time_ticks,
+    );
+    let track = new_layer();
+    let _: () = msg_send![track, setCornerRadius: 1.5f64];
+    let _: () = msg_send![track, setBackgroundColor: cg_black(0.45)];
+    let _: () = msg_send![track, setHidden: (frac <= 0.0) as objc::runtime::BOOL];
+    add_layer(art, track);
+    let fill = new_layer();
+    let _: () = msg_send![fill, setCornerRadius: 1.5f64];
+    let _: () = msg_send![fill, setBackgroundColor: cg(C_ACCENT)];
+    add_layer(track, fill);
+
+    // Hover dim + play affordance.
+    let dim = new_layer();
+    let _: () = msg_send![dim, setBackgroundColor: cg_black(0.18)];
+    let _: () = msg_send![dim, setOpacity: 0.0f32];
+    add_layer(art, dim);
+    let circle = new_layer();
+    let _: () = msg_send![circle, setCornerRadius: 22.0f64];
+    let _: () = msg_send![circle, setBackgroundColor: cg_black(0.55)];
+    let _: () = msg_send![circle, setOpacity: 0.0f32];
+    add_layer(art, circle);
+
+    // Placeholder glyph.
+    let glyph: *mut Object = msg_send![class!(NSImageView), alloc];
+    let glyph: *mut Object = msg_send![glyph, initWithFrame: rect(0., 0., 40., 40.)];
+    let gi = symbol(placeholder_symbol(&it.item_type), 28., Weight::Regular);
+    if !gi.is_null() {
+        let _: () = msg_send![glyph, setImage: gi];
+        let _: () = msg_send![glyph, setContentTintColor: color(C_TEXT3)];
+    }
+    add_sub(container, glyph);
+    autorel(glyph);
+    // Play icon (above the circle).
+    let play: *mut Object = msg_send![class!(NSImageView), alloc];
+    let play: *mut Object = msg_send![play, initWithFrame: rect(0., 0., 24., 24.)];
+    let pi = symbol("play.fill", 18., Weight::Regular);
+    if !pi.is_null() {
+        let _: () = msg_send![play, setImage: pi];
+        let _: () = msg_send![play, setContentTintColor: color(C_ON_MEDIA)];
+    }
+    let _: () = msg_send![play, setAlphaValue: 0.0f64];
+    add_sub(container, play);
+    autorel(play);
+    // Watched badge.
+    let badge: *mut Object = msg_send![class!(NSImageView), alloc];
+    let badge: *mut Object = msg_send![badge, initWithFrame: rect(0., 0., 20., 20.)];
+    let white = color(C_ON_MEDIA);
+    let acc = color(C_ACCENT);
+    let bimg = palette_symbol("checkmark.circle.fill", 16., &[white, acc]);
+    if !bimg.is_null() {
+        let _: () = msg_send![badge, setImage: bimg];
+    }
+    set_hidden(badge, !it.user_data.as_ref().map(|u| u.played).unwrap_or(false));
+    add_sub(container, badge);
+    autorel(badge);
+
+    // Title + subtitle.
+    let title = label(&it.name, T_BODY_EM, C_TEXT, ALIGN_LEFT);
+    add_sub(container, title);
+    let sub = label(&it.sub_label(), T_CAPTION, C_TEXT2, ALIGN_LEFT);
+    add_sub(container, sub);
+
+    // Click target over the whole cell.
+    let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
+        target: ui.ctl.get() action: click];
+    let _: () = msg_send![btn, setBordered: NO];
+    let _: () = msg_send![btn, setTag: tag];
+    let _: () = msg_send![btn, setToolTip: ns(&it.name)];
+    add_sub(container, btn);
+    // Context menu.
+    let menu: *mut Object = msg_send![class!(NSMenu), alloc];
+    let menu: *mut Object = msg_send![menu, initWithTitle: ns(&it.name)];
+    let id_ns = ns(&it.id);
+    let played = it.user_data.as_ref().map(|u| u.played).unwrap_or(false);
+    let m0: *mut Object = menu_item("Play", click, "");
+    let _: () = msg_send![m0, setTarget: ui.ctl.get()];
+    let _: () = msg_send![m0, setTag: tag];
+    let _: () = msg_send![menu, addItem: m0];
+    let (t1, s1) = if played {
+        ("Mark as Unwatched", sel!(markUnwatched:))
+    } else {
+        ("Mark as Watched", sel!(markWatched:))
+    };
+    let m1: *mut Object = menu_item(t1, s1, "");
+    let _: () = msg_send![m1, setTarget: ui.ctl.get()];
+    let _: () = msg_send![m1, setRepresentedObject: id_ns];
+    let _: () = msg_send![menu, addItem: m1];
+    let sep: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
+    let _: () = msg_send![menu, addItem: sep];
+    let m2: *mut Object = menu_item("Open in Jellyfin Web", sel!(openInWeb:), "");
+    let _: () = msg_send![m2, setTarget: ui.ctl.get()];
+    let _: () = msg_send![m2, setRepresentedObject: id_ns];
+    let _: () = msg_send![menu, addItem: m2];
+    let _: () = msg_send![btn, setMenu: menu];
+    autorel(menu);
+
+    let cd = Box::into_raw(Box::new(CellData { shadow: host, dim, circle, play_icon: play }));
+    (*container).set_ivar::<*mut c_void>("jrCell", cd as *mut c_void);
+    let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut Object = msg_send![ta,
+        initWithRect: rect(0., 0., m.tile_w, m.poster_h)
+        options: (0x01usize | 0x80usize | 0x200usize) owner: container userInfo: nil()];
+    let _: () = msg_send![container, addTrackingArea: ta];
+    autorel(ta);
+    let _: () = msg_send![grid, addSubview: container];
+    autorel(container);
+    let mut handle = CellHandle {
+        container,
+        art,
+        shadow: host,
+        prog_track: track,
+        prog_fill: fill,
+        prog_frac: frac,
+        dim,
+        circle,
+        glyph,
+        play_icon: play,
+        badge,
+        title,
+        sub,
+        btn,
+        skel_title: nil(),
+        skel_sub: nil(),
+        key,
+        meta: it.clone(),
+    };
+    if let Some(img) = ui.poster_cache.get(&key) {
+        show_art(&mut handle, *img, false);
+    }
+    handle
 }
 
 /// Skeleton cells for a first load: placeholder art plus two grey text bars.
@@ -337,7 +366,7 @@ pub fn grid_set_skeleton(n: usize) {
     }
 }
 
-unsafe fn show_art(c: &mut CellHandle, img: *mut Object, animate: bool) {
+pub(crate) unsafe fn show_art(c: &mut CellHandle, img: *mut Object, animate: bool) {
     let cg = cg_image(img);
     if cg.is_null() {
         return;
@@ -353,7 +382,7 @@ unsafe fn show_art(c: &mut CellHandle, img: *mut Object, animate: bool) {
 }
 
 /// Free the per-cell hover box and null the ivar (cell may outlive removal briefly).
-unsafe fn free_cell_data(container: *mut Object) {
+pub(crate) unsafe fn free_cell_data(container: *mut Object) {
     let cd = *(*container).get_ivar::<*mut c_void>("jrCell") as *mut CellData;
     if !cd.is_null() {
         drop(Box::from_raw(cd));
@@ -400,7 +429,7 @@ pub(crate) extern "C" fn cell_unhover(this: &mut Object, _cmd: Sel, _ev: *mut Ob
 }
 
 /// Position every layer and subview of a cell for the given metrics.
-unsafe fn layout_cell(c: &CellHandle, m: &Metrics) {
+pub(crate) unsafe fn layout_cell(c: &CellHandle, m: &Metrics) {
     let (w, h) = (m.tile_w, m.poster_h);
     // Host: bounds + position so a hover transform never fights the frame.
     let _: () = msg_send![c.shadow, setBounds: rect(0., 0., w, h)];
@@ -594,6 +623,14 @@ pub fn poster_ready(key: u64, bytes: &[u8]) {
                 }
             }
         }
+        crate::ui::detail::image_ready(key);
+        for row in ui.home.views.iter_mut() {
+            for c in row.cells.iter_mut() {
+                if c.key == key {
+                    show_art(c, img, true);
+                }
+            }
+        }
     }
 }
 
@@ -669,4 +706,54 @@ mod tests {
         assert!((grid_ratio(&[li("Episode", None)]) - 9. / 16.).abs() < 1e-9);
         assert_eq!(grid_ratio(&[]), POSTER_ASPECT);
     }
+}
+
+// ---- Keyboard focus in the poster grid (Tab / ⇧Tab move, Return opens) ----
+/// Index of the keyboard-focused grid cell, or -1. Main thread only.
+static KB_FOCUS: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(-1);
+
+pub(crate) fn kb_focus_index() -> Option<usize> {
+    let i = KB_FOCUS.load(std::sync::atomic::Ordering::Relaxed);
+    if i < 0 { None } else { Some(i as usize) }
+}
+
+/// Move the keyboard focus to the next (delta > 0) or previous cell, wrapping around.
+pub(crate) unsafe fn kb_move(delta: isize) {
+    let ui = UI.get_mut().unwrap();
+    let gd = match ui.grid_data.as_ref() {
+        Some(g) if !g.cells.is_empty() => g,
+        _ => return,
+    };
+    let n = gd.cells.len() as isize;
+    let cur = KB_FOCUS.load(std::sync::atomic::Ordering::Relaxed);
+    let next = if cur < 0 || cur >= n {
+        if delta >= 0 { 0 } else { n - 1 }
+    } else {
+        (cur + delta).rem_euclid(n)
+    };
+    let cells: Vec<*mut Object> = gd.cells.iter().map(|c| c.container).collect();
+    if cur >= 0 && cur < n {
+        let prev = cells[cur as usize];
+        hover(&mut *prev, false);
+    }
+    let c = cells[next as usize];
+    hover(&mut *c, true);
+    let b: NSRect = msg_send![c, bounds];
+    let _: BOOL = msg_send![c, scrollRectToVisible: b];
+    KB_FOCUS.store(next, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Open the keyboard-focused cell exactly as a click on it would.
+pub(crate) unsafe fn kb_open() {
+    let ui = UI.get_mut().unwrap();
+    let i = KB_FOCUS.load(std::sync::atomic::Ordering::Relaxed);
+    let btn = match ui.grid_data.as_ref() {
+        Some(g) if i >= 0 && (i as usize) < g.cells.len() => g.cells[i as usize].btn,
+        _ => return,
+    };
+    if btn.is_null() {
+        return;
+    }
+    let ctl = ui.ctl.get();
+    crate::platform::appkit::item_clicked(&mut *ctl, sel!(itemClicked:), btn);
 }

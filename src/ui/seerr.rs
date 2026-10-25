@@ -456,6 +456,12 @@ pub fn open_window() {
     }
 }
 
+/// Sidebar "Requests" (unified layout): the Seerr window on its "My requests" tab.
+pub(crate) extern "C" fn open_requests(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    open_window();
+    unsafe { select_mode(true) }
+}
+
 pub(crate) unsafe fn set_status(msg: &str, err: bool) {
     let ui = UI.get_mut().unwrap();
     if ui.seerr.status.get().is_null() {
@@ -721,7 +727,7 @@ pub(crate) extern "C" fn seerr_tab(_t: &mut Object, _c: Sel, sender: *mut Object
     }
 }
 
-unsafe fn select_mode(requests: bool) {
+pub(crate) unsafe fn select_mode(requests: bool) {
     let ui = UI.get_mut().unwrap();
     ui.seerr.requests_mode = requests;
     if !ui.seerr.tabs.get().is_null() {

@@ -2,6 +2,8 @@ use crate::*;
 use std::collections::VecDeque;
 use crate::app::messages::*;
 use crate::jellyfin::client::JellyfinClient;
+use crate::jellyfin::models::{DetailItem, Episode, Person, Season};
+use crate::jellyfin::urls::{build_art_url, build_image_url};
 use crate::config::{load_config, save_config, Config};
 use crate::seerr::client::{SeerrClient, SeerrError};
 
@@ -10,6 +12,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     let mut cfg = cfg;
     // Lazily built from settings + Keychain; invalidated when settings change.
     let mut seerr: Option<SeerrClient> = None;
+    // Base address whose probe found no https redirect; cleared with `seerr`.
+    let mut seerr_plain: Option<String> = None;
     // Live stream opened by the current channel playback; closed on the next one / stop.
     let mut live_stream: Option<String> = None;
 
@@ -17,16 +21,24 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     let poster_dir = crate::config::cache_dir().join("posters");
     let _ = std::fs::create_dir_all(&poster_dir);
 
-    // Silent auto-connect from persisted server + keychain token.
-    if let (Some(url), Some(uid)) = (cfg.server_url.clone(), cfg.user_id.clone()) {
+    // Silent auto-connect from persisted server + keychain token, only when
+    // "Remember me" was on. Otherwise nothing may persist: drop any leftover token.
+    if !cfg.remember_me {
+        if let Some(url) = cfg.server_url.clone() {
+            crate::config::delete_token(&url);
+        }
+    } else if let (Some(url), Some(uid)) = (cfg.server_url.clone(), cfg.user_id.clone()) {
         if let Some(token) = crate::config::load_token(&url) {
             match crate::jellyfin::client::JellyfinClient::new(&url, token.clone(), uid.clone(), &cfg.device_id) {
-                Ok(c) => match connect_flow(&c, &cfg.username.clone().unwrap_or_else(|| uid.clone()), &main_tx).await {
-                    Ok(()) => client = Some(c),
-                    Err(e) => {
-                        let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
+                Ok(c) => {
+                    let _ = main_tx.send(MainMsg::Resuming { url: url.clone() });
+                    match connect_flow(&c, &cfg.username.clone().unwrap_or_else(|| uid.clone()), &main_tx).await {
+                        Ok(()) => client = Some(c),
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
                 }
@@ -52,8 +64,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
         };
         match cmd {
             UiCmd::QuitSaving => { /* marker no-op (see sys note); real saves happen on terminate */ }
-            UiCmd::Connect { url, username, password, api_key } => {
-                match connect_cmd(&url, &username, password, api_key, &mut cfg, &main_tx).await {
+            UiCmd::Connect { url, username, password, api_key, remember } => {
+                match connect_cmd(&url, &username, password, api_key, remember, &mut cfg, &main_tx).await {
                     Ok(c) => client = Some(c),
                     Err(e) => {
                         let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
@@ -95,6 +107,36 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                         }
                     }
                 }
+            }
+            UiCmd::LoadBrowse => {
+                if let Some(c) = &client {
+                    // Movies and series together; no ParentId, so Jellyfin searches every library.
+                    let sort = sort_from_popup(&cfg);
+                    let q = crate::jellyfin::models::ItemQuery {
+                        types: Some("Movie,Series".into()),
+                        sort_by: sort.0,
+                        sort_order: sort.1,
+                        ..Default::default()
+                    };
+                    match c.items(&q).await {
+                        Ok(items) => {
+                            fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
+                            let _ = main_tx.send(MainMsg::ItemsLoaded {
+                                title: "Browse".into(),
+                                items,
+                                can_go_back: false,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
+                        }
+                    }
+                }
+            }
+            UiCmd::SetLayoutMode { mode } => {
+                // In-memory only: the UI wrote the config file already, and a second
+                // write from here could clobber fields the UI changed since startup.
+                cfg.layout_mode = Some(mode);
             }
             UiCmd::Search { q } => {
                 // Debounce: wait, then keep only the newest search.
@@ -173,6 +215,53 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                         }
                         Err(e) => {
                             let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
+                        }
+                    }
+                }
+            }
+            UiCmd::OpenDetail { item_id } => {
+                if let Some(c) = &client {
+                    match c.item_detail(&item_id).await {
+                        Ok(d) => {
+                            let (view, jobs) = plan_detail(c, &d);
+                            let _ = main_tx.send(MainMsg::DetailLoaded(Box::new(view)));
+                            fetch_art(jobs, &main_tx, &poster_dir, http_poster.as_ref());
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::DetailError(format!("{}", e)));
+                        }
+                    }
+                }
+            }
+            UiCmd::Seasons { series_id } => {
+                if let Some(c) = &client {
+                    match c.seasons(&series_id).await {
+                        Ok(seasons) => {
+                            // Next Up only picks the starting season; without it the first one is shown.
+                            let next = c.series_next_up(&series_id).await.ok().flatten();
+                            let selected = default_season(&seasons, next.as_ref());
+                            let seasons = seasons
+                                .into_iter()
+                                .map(|s| SeasonEntry { id: s.id, name: s.name })
+                                .collect();
+                            let _ = main_tx.send(MainMsg::SeasonsLoaded { series_id, seasons, selected });
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeasonsError { series_id, message: format!("{}", e) });
+                        }
+                    }
+                }
+            }
+            UiCmd::SeasonEpisodes { series_id, season_id } => {
+                if let Some(c) = &client {
+                    match c.season_episodes(&series_id, &season_id).await {
+                        Ok(eps) => {
+                            let (rows, jobs) = plan_episodes(c, &eps);
+                            let _ = main_tx.send(MainMsg::SeasonEpisodesLoaded { series_id, season_id, episodes: rows });
+                            fetch_art(jobs, &main_tx, &poster_dir, http_poster.as_ref());
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeasonsError { series_id, message: format!("{}", e) });
                         }
                     }
                 }
@@ -260,6 +349,10 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                     full.run_time_ticks.unwrap_or(0),
                                 ),
                                 image_key: Some(crate::ui::library::poster_key(&full.id)),
+                                series_name: if full.item_type == "Episode" { full.series_name.clone() } else { None },
+                                season_number: full.season,
+                                episode_number: full.episode,
+                                production_year: full.production_year,
                                 media_kind: if full.item_type == "Audio" {
                                     crate::app::messages::MediaKind::Audio
                                 } else {
@@ -316,8 +409,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     Ok(_) if latest.trim().is_empty() => {
                         let _ = main_tx.send(MainMsg::SeerrResults(Vec::new()));
                     }
-                    Ok(c) => match c.search(&latest, 1).await {
-                        Ok(page) => {
+                    Ok(c) => match { let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await; c.search(&latest, 1).await.map(|p| (c, p)) } {
+                        Ok((c, page)) => {
                             let paths = page.results.iter().filter_map(|r| r.poster_path.clone()).collect();
                             let _ = main_tx.send(MainMsg::SeerrResults(page.results));
                             fetch_seerr_posters(&c, &main_tx, paths, &poster_dir);
@@ -332,7 +425,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match c.request(&media_type, tmdb_id).await {
+                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.request(&media_type, tmdb_id).await {
                     Ok(_) => {
                         let _ = main_tx.send(MainMsg::SeerrRequested { title });
                     }
@@ -348,8 +441,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match c.requests(20, 0).await {
-                    Ok(v) => {
+                Ok(c) => match { let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await; c.requests(20, 0).await.map(|v| (c, v)) } {
+                    Ok((c, v)) => {
                         let paths = v.iter().filter_map(|r| r.poster_path.clone()).collect();
                         let _ = main_tx.send(MainMsg::SeerrRequestList(v));
                         fetch_seerr_posters(&c, &main_tx, paths, &poster_dir);
@@ -361,13 +454,50 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             },
             UiCmd::SaveSeerr { enabled, url, username, password, api_key } => {
                 seerr = None;
+                seerr_plain = None;
                 let msg = save_seerr(&mut cfg, enabled, &url, &username, password, api_key).await;
                 let _ = main_tx.send(msg);
             }
-            UiCmd::SaveSettings { settings, reconnect } => {
+            UiCmd::SaveLibraries { order, hidden } => {
+                cfg.library_order = order;
+                cfg.hidden_libraries = hidden;
+                crate::config::save_config(&cfg);
+            }
+            UiCmd::LoadHome => {
+                if let Some(c) = &client {
+                    // Spawned so a slow Home load never blocks later commands.
+                    let (c, tx) = (c.clone(), main_tx.clone());
+                    let (dir, http) = (poster_dir.clone(), http_poster.clone());
+                    tokio::spawn(async move {
+                        let rows = crate::app::home::load_home(&c).await;
+                        // Rows first, so Home is usable at once; artwork follows as PosterReady.
+                        let _ = tx.send(MainMsg::HomeLoaded(rows.clone()));
+                        fetch_home_art(&c, &tx, &rows.rows, &dir, http.as_ref());
+                    });
+                }
+            }
+            UiCmd::SaveSettings { settings, reconnect, server_url } => {
                 seerr = None;
+                seerr_plain = None;
+                // Settings are saved before the URL resolves on purpose: a mistyped
+                // server host must not discard the other edits. If the URL fails to
+                // resolve, the old URL stays in effect, the error is reported, and
+                // no reconnect is attempted (the `continue` below).
                 cfg.settings = settings;
                 crate::config::save_config(&cfg);
+                if let Some(raw) = server_url {
+                    match crate::jellyfin::client::JellyfinClient::resolve(&raw).await {
+                        Ok((base, _)) => {
+                            cfg.server_url = Some(base.clone());
+                            crate::config::save_config(&cfg);
+                            let _ = main_tx.send(MainMsg::ServerUrl(base));
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::ConnectError(format!("{}", e)));
+                            continue;
+                        }
+                    }
+                }
                 if reconnect {
                     if let Some(url) = cfg.server_url.clone() {
                         if let Some(token) = crate::config::load_token(&url) {
@@ -454,6 +584,10 @@ async fn play_channel(
                         run_time_secs: 0.0,
                         image_key: Some(crate::ui::library::poster_key(&channel_id)),
                         media_kind: crate::app::messages::MediaKind::Video,
+                        series_name: None,
+                        season_number: None,
+                        episode_number: None,
+                        production_year: None,
                     }));
                 }
                 None => {
@@ -481,8 +615,12 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
         return Err("Seerr URL is not set. Add it in Settings.".into());
     }
     let url = crate::jellyfin::urls::normalize_base_url(raw).map_err(|e| format!("Invalid Seerr URL: {}", e))?;
+    // The cache is only valid for the same server AND the same sign-in mode and
+    // account; SaveSeerr also clears it, so a changed password is picked up there.
+    let account = (!user.is_empty()).then_some(user.as_str());
     if let Some(c) = cache {
-        if c.base == url {
+        let upgraded = url.replacen("http://", "https://", 1);
+        if (c.base == url || c.base == upgraded) && c.account() == account {
             return Ok(c.clone());
         }
     }
@@ -498,6 +636,29 @@ fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrCl
     .map_err(|e| e.to_string())?;
     *cache = Some(c.clone());
     Ok(c)
+}
+
+/// An address saved as http:// (before the https upgrade existed) is switched
+/// to its https form before anything is sent; secrets stay keyed by the saved
+/// address. One probe per base: the upgraded client replaces the cached one, and
+/// a server with no https redirect is remembered in `plain`, so later calls skip
+/// the probe. A failed probe is not remembered, so the next call tries again.
+async fn seerr_secure(c: SeerrClient, cache: &mut Option<SeerrClient>, plain: &mut Option<String>) -> SeerrClient {
+    if !c.base.starts_with("http://") || plain.as_deref() == Some(c.base.as_str()) {
+        return c;
+    }
+    match crate::seerr::client::probe_https(&c.base).await {
+        Ok(Some(n)) => {
+            let c = c.with_base(n);
+            *cache = Some(c.clone());
+            c
+        }
+        Ok(None) => {
+            *plain = Some(c.base.clone());
+            c
+        }
+        Err(_) => c,
+    }
 }
 
 /// Handle SaveSeerr: validate before persisting anything when enabling.
@@ -517,7 +678,14 @@ async fn save_seerr(
     let trimmed = url.trim();
     if !enabled {
         if !trimmed.is_empty() {
-            let n = normalize(trimmed);
+            // Not probed while disabled: keep the address as typed (scheme-less
+            // stays scheme-less) and resolve it when Seerr is turned on.
+            let n = crate::jellyfin::urls::parse_server_input(trimmed)
+                .map(|p| match p.scheme {
+                    Some(sc) => format!("{}://{}", sc, p.rest),
+                    None => p.rest,
+                })
+                .unwrap_or_else(|_| trimmed.to_string());
             if let Some(k) = &key_in {
                 crate::config::store_seerr_key(&n, k);
             }
@@ -531,20 +699,37 @@ async fn save_seerr(
         crate::config::save_config(cfg);
         return MainMsg::SeerrStatus { ok: true, message: "Seerr is turned off.".into() };
     }
-    let n = match crate::jellyfin::urls::normalize_base_url(trimmed) {
-        Ok(n) => n,
+    // Check for a credential before any network I/O. Secrets are keyed by the
+    // resolved address; ones saved while Seerr was off are keyed by the typed one.
+    let typed = crate::jellyfin::urls::bare_url(trimmed);
+    let candidates = match crate::jellyfin::urls::candidate_bases(trimmed) {
+        Ok(c) => c,
         Err(e) => return fail(format!("Invalid Seerr URL: {}", e)),
     };
-    let client = if use_login {
-        let Some(pw) = pw_in.clone().or_else(|| crate::config::load_seerr_login(&n)) else {
-            return fail("Enter your Seerr password (the one you use to sign in with your Jellyfin account).".into());
-        };
-        SeerrClient::with_login(&n, &user, &pw)
+    let keys_for = || candidates.iter().map(String::as_str).chain(std::iter::once(typed.as_str()));
+    let stored_pw = keys_for().find_map(crate::config::load_seerr_login);
+    let stored_key = keys_for().find_map(crate::config::load_seerr_key);
+    if use_login && pw_in.is_none() && stored_pw.is_none() {
+        return fail("Enter your Seerr password (the one you use to sign in with your Jellyfin account).".into());
+    }
+    if !use_login && key_in.is_none() && stored_key.is_none() {
+        return fail("Enter your Seerr API key (Seerr > Settings > General), or sign in with your Jellyfin account.".into());
+    }
+    let resolved = match SeerrClient::resolve(trimmed).await {
+        Ok((base, _)) => base,
+        Err(e) => return fail(e.to_string()),
+    };
+    // Never send the password or API key over plain http: when the server
+    // redirects http to https, save and use the https address.
+    let n = crate::seerr::client::https_upgrade(&resolved).await.unwrap_or(resolved);
+    // The secret actually used (typed now, or saved under any form of the address)
+    // is what gets stored under the saved address on success.
+    let (client, login_pw, api_key) = if use_login {
+        let pw = pw_in.clone().or(stored_pw).unwrap_or_default();
+        (SeerrClient::with_login(&n, &user, &pw), Some(pw), None)
     } else {
-        let Some(key) = key_in.clone().or_else(|| crate::config::load_seerr_key(&n)) else {
-            return fail("Enter your Seerr API key (Seerr > Settings > General), or sign in with your Jellyfin account.".into());
-        };
-        SeerrClient::new(&n, &key)
+        let key = key_in.clone().or(stored_key).unwrap_or_default();
+        (SeerrClient::new(&n, &key), None, Some(key))
     };
     let client = match client {
         Ok(c) => c,
@@ -552,11 +737,10 @@ async fn save_seerr(
     };
     match client.verify().await {
         Ok((st, me)) => {
-            if use_login {
-                if let Some(p) = &pw_in {
-                    crate::config::store_seerr_login(&n, p);
-                }
-            } else if let Some(k) = &key_in {
+            if let Some(p) = &login_pw {
+                crate::config::store_seerr_login(&n, p);
+            }
+            if let Some(k) = &api_key {
                 crate::config::store_seerr_key(&n, k);
             }
             cfg.settings.seerr_enabled = true;
@@ -592,12 +776,14 @@ pub(crate) async fn connect_cmd(
     username: &str,
     password: Option<String>,
     api_key: Option<String>,
+    remember: bool,
     cfg: &mut Config,
     main_tx: &UnboundedSender<MainMsg>,
 ) -> Result<JellyfinClient, crate::jellyfin::client::JFError> {
     use crate::jellyfin::client::JFError;
     // Step 1: verify it's Jellyfin.
-    let info = JellyfinClient::public_info(url).await?;
+    let (url, info) = JellyfinClient::resolve(url).await?;
+    let url = url.as_str();
     tracing::info!(server_version = ?info.version, "server identified");
 
     let (token, user_id, user_name) = if let Some(pw) = password {
@@ -614,12 +800,28 @@ pub(crate) async fn connect_cmd(
 
     let c = JellyfinClient::new(url, token.clone(), user_id.clone(), &cfg.device_id)?;
     connect_flow(&c, &user_name, main_tx).await?;
-    // Persist credentials only after a fully successful connect.
-    cfg.server_url = Some(normalize(url));
-    cfg.username = Some(user_name.clone());
-    cfg.user_id = Some(user_id.clone());
-    crate::config::store_token(&normalize(url), &token);
+    // Persist only after a fully successful connect. The choice itself is saved
+    // either way, so the next launch knows whether to sign in automatically.
+    let previous = cfg.server_url.take();
+    cfg.remember_me = remember;
+    if remember {
+        cfg.server_url = Some(normalize(url));
+        cfg.username = Some(user_name.clone());
+        cfg.user_id = Some(user_id.clone());
+        crate::config::store_token(&normalize(url), &token);
+    } else {
+        // Remember me off: no token and no session identity survive this sign-in.
+        crate::config::delete_token(&normalize(url));
+        if let Some(prev) = previous {
+            crate::config::delete_token(&prev);
+        }
+        cfg.username = None;
+        cfg.user_id = None;
+    }
     crate::config::save_config(cfg);
+    // The UI keeps its own copy of the config; without this, Settings shows a
+    // stale or empty Server URL until relaunch, and the next save looks changed.
+    let _ = main_tx.send(MainMsg::ServerUrl(normalize(url)));
     Ok(c)
 }
 
@@ -659,46 +861,184 @@ pub(crate) async fn fetch_posters(
     poster_dir: &std::path::Path,
     http: Option<&reqwest::Client>,
 ) {
+    // Spawn a bounded set of concurrent poster fetches (first 200 items).
+    let jobs: Vec<(u64, String)> = items
+        .iter()
+        .take(200)
+        .filter(|it| it.has_image())
+        .map(|it| (sys_key(&it.id), build_image_url(&c.base, &it.id, &c.token, 400)))
+        .collect();
+    fetch_art(jobs, main_tx, poster_dir, http);
+}
+
+/// Download artwork jobs `(key, url)` concurrently, through the disk cache in
+/// `poster_dir`. Each image arrives as `PosterReady { key, bytes }`.
+pub(crate) fn fetch_art(
+    jobs: Vec<(u64, String)>,
+    main_tx: &UnboundedSender<MainMsg>,
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+) {
     let Some(http) = http.cloned() else {
         return;
     };
-    let client = c.clone();
-    let tx = main_tx.clone();
-    let dir = poster_dir.to_path_buf();
-    // Spawn a bounded set of concurrent poster fetches (first 200 items).
-    for it in items.iter().take(200) {
-        if !it.has_image() {
-            continue;
-        }
-        let client = client.clone();
-        let tx = tx.clone();
-        let dir = dir.clone();
-        let id = it.id.clone();
+    for (key, url) in jobs {
+        let tx = main_tx.clone();
+        let dir = poster_dir.to_path_buf();
         let http = http.clone();
         tokio::spawn(async move {
-            let key = sys_key(&id);
             let path = dir.join(format!("{:016x}.img", key));
             let bytes = match tokio::fs::read(&path).await {
                 Ok(b) => Some(b),
-                Err(_) => {
-                    let url = crate::jellyfin::urls::build_image_url(&client.base, &id, &client.token, 400);
-                    match http.get(url).send().await {
-                        Ok(r) if r.status().is_success() => match r.bytes().await {
-                            Ok(b) => {
-                                let _ = tokio::fs::write(&path, &b).await;
-                                Some(b.to_vec())
-                            }
-                            Err(_) => None,
-                        },
-                        _ => None,
-                    }
-                }
+                Err(_) => match http.get(url).send().await {
+                    Ok(r) if r.status().is_success() => match r.bytes().await {
+                        Ok(b) => {
+                            let _ = tokio::fs::write(&path, &b).await;
+                            Some(b.to_vec())
+                        }
+                        Err(_) => None,
+                    },
+                    _ => None,
+                },
             };
             if let Some(b) = bytes {
                 let _ = tx.send(MainMsg::PosterReady { key, bytes: b });
             }
         });
     }
+}
+
+/// Fetch Home artwork after `HomeLoaded` has been sent. Poster rows get Primary
+/// art; wide rows (Continue Watching, Next Up) get Thumb, else Backdrop, else
+/// Primary. Each arrives as `PosterReady` under the key its card was built with.
+pub(crate) fn fetch_home_art(
+    c: &JellyfinClient,
+    main_tx: &UnboundedSender<MainMsg>,
+    rows: &[crate::app::messages::HomeRow],
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    let mut jobs: Vec<(u64, String)> = Vec::new();
+    for row in rows {
+        let wide = row.kind.is_wide();
+        for it in &row.items {
+            if jobs.len() >= 200 {
+                break;
+            }
+            let job = if wide {
+                it.wide_art_kind()
+                    .map(|kind| (crate::ui::home::wide_key(&it.id), build_art_url(&c.base, &it.id, kind, 600, &c.token)))
+            } else {
+                it.has_image().then(|| (sys_key(&it.id), build_image_url(&c.base, &it.id, &c.token, 400)))
+            };
+            // Cards repeat across rows (an episode in Continue Watching and Next Up).
+            if let Some(job) = job.filter(|j| seen.insert(j.0)) {
+                jobs.push(job);
+            }
+        }
+    }
+    fetch_art(jobs, main_tx, poster_dir, http);
+}
+
+/// Cast and crew shown on the detail page (the first this many of `People`).
+const MAX_PEOPLE: usize = 30;
+
+/// Turn a detail response into the page's view plus the artwork to fetch
+/// as `(key, url)` jobs. Artwork is requested only where the server has it.
+pub(crate) fn plan_detail(c: &JellyfinClient, d: &DetailItem) -> (DetailView, Vec<(u64, String)>) {
+    let mut jobs = Vec::new();
+    let poster_key = d.image_tags.as_ref().and_then(|t| t.primary.as_ref()).map(|_| sys_key(&d.id));
+    if let Some(k) = poster_key {
+        jobs.push((k, build_image_url(&c.base, &d.id, &c.token, 400)));
+    }
+    let backdrop_key = d.backdrop_tags.first().map(|_| sys_key(&format!("{}#backdrop", d.id)));
+    if let Some(k) = backdrop_key {
+        jobs.push((k, build_art_url(&c.base, &d.id, "Backdrop", 1280, &c.token)));
+    }
+    let people = d
+        .people
+        .iter()
+        .take(MAX_PEOPLE)
+        .map(|p: &Person| {
+            let image_key = match p.image_tag.as_ref() {
+                Some(_) if !p.id.is_empty() => {
+                    let k = sys_key(&p.id);
+                    jobs.push((k, build_art_url(&c.base, &p.id, "Primary", 200, &c.token)));
+                    Some(k)
+                }
+                _ => None,
+            };
+            let role = p
+                .role
+                .clone()
+                .filter(|r| !r.trim().is_empty())
+                .or_else(|| p.kind.clone().filter(|k| !k.trim().is_empty()));
+            DetailPerson { name: p.name.clone(), role, image_key }
+        })
+        .collect();
+    let played = d.user_data.as_ref().map(|u| u.played).unwrap_or(false);
+    let position = d.user_data.as_ref().map(|u| u.position_ticks).unwrap_or(0);
+    let view = DetailView {
+        id: d.id.clone(),
+        name: d.name.clone(),
+        item_type: d.item_type.clone(),
+        year: d.year,
+        official_rating: d.official_rating.clone().filter(|r| !r.trim().is_empty()),
+        community_rating: d.community_rating,
+        run_time_ticks: d.run_time_ticks,
+        genres: d.genres.clone(),
+        overview: d.overview.clone().filter(|o| !o.trim().is_empty()),
+        played,
+        resume: !played && position > 0,
+        poster_key,
+        backdrop_key,
+        people,
+    };
+    (view, jobs)
+}
+
+/// Index of the season that holds `next_up` (matched by season id, then by season number),
+/// or the first season when there is no Next Up episode or no matching season.
+pub(crate) fn default_season(seasons: &[Season], next_up: Option<&Episode>) -> usize {
+    let Some(next) = next_up else { return 0 };
+    if let Some(id) = next.season_id.as_deref() {
+        if let Some(i) = seasons.iter().position(|s| s.id == id) {
+            return i;
+        }
+    }
+    if let Some(n) = next.parent_index {
+        if let Some(i) = seasons.iter().position(|s| s.index == Some(n)) {
+            return i;
+        }
+    }
+    0
+}
+
+/// Episode rows for the series page plus their thumbnail jobs `(key, url)`.
+pub(crate) fn plan_episodes(c: &JellyfinClient, eps: &[Episode]) -> (Vec<EpisodeRow>, Vec<(u64, String)>) {
+    let mut jobs = Vec::new();
+    let rows = eps
+        .iter()
+        .map(|e| {
+            let image_key = e.has_image().then(|| sys_key(&e.id));
+            if image_key.is_some() {
+                jobs.push((sys_key(&e.id), build_image_url(&c.base, &e.id, &c.token, 400)));
+            }
+            let ud = e.user_data.clone().unwrap_or_default();
+            EpisodeRow {
+                id: e.id.clone(),
+                number: e.number,
+                name: e.name.clone(),
+                overview: e.overview.clone().filter(|o| !o.trim().is_empty()),
+                run_time_ticks: e.run_time_ticks,
+                played: ud.played,
+                position_ticks: ud.position_ticks,
+                image_key,
+            }
+        })
+        .collect();
+    (rows, jobs)
 }
 
 /// Fetch thumbnails for Seerr results through the user's Seerr server (never TMDB),
@@ -780,6 +1120,10 @@ mod tests {
         images: bool,
         items_status: Option<u16>,
         not_jellyfin: bool,
+        /// Home endpoints answering 500: "views", "resume", "nextup", "latest", "recs".
+        home_fail: Vec<String>,
+        /// Delay (ms) before answering the Resume endpoint.
+        resume_delay_ms: u64,
     }
 
     struct Mock {
@@ -803,6 +1147,12 @@ mod tests {
         }
         fn stop(&self) {
             self.task.abort();
+        }
+    }
+
+    impl Req {
+        fn qp(&self, key: &str) -> Option<&str> {
+            self.query.get(key).map(String::as_str)
         }
     }
 
@@ -878,6 +1228,10 @@ mod tests {
                         .collect();
                     let req = Req { method, path: pct_decode(path), query, headers, body };
                     log.lock().unwrap().push(req.clone());
+                    let delay = cfg.lock().unwrap().resume_delay_ms;
+                    if delay > 0 && req.path.ends_with("/Items/Resume") {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
                     let resp = route(&req, &cfg.lock().unwrap());
                     let reason = if resp.status < 300 { "OK" } else { "ERR" };
                     let head = format!(
@@ -919,6 +1273,15 @@ mod tests {
         }])
     }
 
+    /// `ok()` unless the Home endpoint `key` is set to fail.
+    fn home_or(c: &MockCfg, key: &str, ok: impl FnOnce() -> Resp) -> Resp {
+        if c.home_fail.iter().any(|k| k == key) {
+            status(500)
+        } else {
+            ok()
+        }
+    }
+
     fn route(r: &Req, c: &MockCfg) -> Resp {
         let seg: Vec<&str> = r.path.trim_matches('/').split('/').collect();
         let token = r.headers.get("x-emby-token").map(String::as_str);
@@ -952,11 +1315,33 @@ mod tests {
                 }
             }
             _ if !authed => status(401),
-            ("GET", ["Users", _, "Views"]) => json(serde_json::json!({"Items": [
+            ("GET", ["Users", _, "Views"]) => home_or(c, "views", || json(serde_json::json!({"Items": [
                 {"Id": "v-mov", "Name": "Movies", "CollectionType": "movies"},
                 {"Id": "v-tv", "Name": "Shows", "CollectionType": "tvshows"},
                 {"Id": "v-mus", "Name": "Music", "CollectionType": "music"},
-            ], "TotalRecordCount": 3})),
+            ], "TotalRecordCount": 3}))),
+            ("GET", ["Users", _, "Items", "Resume"]) => home_or(c, "resume", || json(serde_json::json!({"Items": [
+                item("e1", "Pilot", "Episode", false),
+            ]}))),
+            ("GET", ["Users", _, "Items", "Latest"]) => home_or(c, "latest", || {
+                let items = match r.query.get("ParentId").map(String::as_str) {
+                    Some("v-mov") => serde_json::json!([item("m1", "Movie One", "Movie", false), item("m2", "Movie Two", "Movie", false)]),
+                    Some("v-tv") => serde_json::json!([item("sr1", "Show One", "Series", false)]),
+                    _ => serde_json::json!([]),
+                };
+                json(items)
+            }),
+            ("GET", ["Shows", "NextUp"]) if !r.query.contains_key("SeriesId") => home_or(c, "nextup", || json(serde_json::json!({"Items": [
+                item("e2", "Second", "Episode", false),
+            ]}))),
+            ("GET", ["Movies", "Recommendations"]) => home_or(c, "recs", || json(serde_json::json!([
+                {"CategoryId": "c1", "RecommendationType": "SimilarToRecentlyPlayed", "BaselineItemName": "Movie One",
+                 "Items": [item("r1", "Recommended One", "Movie", false)]},
+                {"CategoryId": "c2", "RecommendationType": "HasLikedDirector", "BaselineItemName": "Nobody",
+                 "Items": []},
+                {"CategoryId": "c3", "RecommendationType": "HasActorFromRecentlyPlayed", "BaselineItemName": "Some Actor",
+                 "Items": [item("r2", "Actor Film", "Movie", false)]},
+            ]))),
             ("POST", ["Items", id, "PlaybackInfo"]) => json(serde_json::json!({
                 "PlaySessionId": "ps1",
                 "MediaSources": [{
@@ -1006,12 +1391,76 @@ mod tests {
                     "ep1" => {
                         v["Type"] = "Episode".into();
                         v["SeriesName"] = "Show One".into();
+                        v["Name"] = "Pilot".into();
+                        v["ParentIndexNumber"] = 1.into();
+                        v["IndexNumber"] = 2.into();
                     }
                     _ => {}
                 }
+                if id.starts_with("det-") && *id != "det-bare" {
+                    v["Name"] = "Detail Movie".into();
+                    v["Overview"] = "A detailed overview.".into();
+                    v["Genres"] = serde_json::json!(["Drama", "Thriller"]);
+                    v["CommunityRating"] = serde_json::json!(7.8);
+                    v["OfficialRating"] = "PG-13".into();
+                    v["ImageTags"] = serde_json::json!({"Primary": "tag1"});
+                    v["BackdropImageTags"] = serde_json::json!(["bd1"]);
+                    v["People"] = serde_json::json!([
+                        {"Id": "p-actor", "Name": "Ada Actor", "Role": "Lead", "Type": "Actor", "PrimaryImageTag": "pt"},
+                        {"Id": "p-dir", "Name": "Dan Director", "Role": "", "Type": "Director"},
+                        {"Id": "p-noimg", "Name": "No Image", "Role": "Extra", "Type": "Actor"}
+                    ]);
+                    match *id {
+                        "det-series" => v["Type"] = "Series".into(),
+                        "det-resume" => v["UserData"] = serde_json::json!({"Played": false, "PlaybackPositionTicks": 6_000_000_000i64}),
+                        "det-played" => v["UserData"] = serde_json::json!({"Played": true, "PlaybackPositionTicks": 0}),
+                        _ => {}
+                    }
+                }
                 json(v)
             }
-            ("GET", ["Items", _, "Images", "Primary"]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
+            ("GET", ["Shows", "NextUp"]) => {
+                let items = match r.query.get("SeriesId").map(String::as_str) {
+                    Some("sr1") => vec![serde_json::json!({"Id": "nx1", "Name": "Next", "Type": "Episode", "IndexNumber": 3, "ParentIndexNumber": 2, "SeasonId": "sea-b"})],
+                    Some("sr2") => vec![serde_json::json!({"Id": "nx2", "Name": "Next", "Type": "Episode", "IndexNumber": 1, "ParentIndexNumber": 2})],
+                    Some("sr3") => return status(500),
+                    _ => vec![],
+                };
+                json(serde_json::json!({"Items": items}))
+            }
+            ("GET", ["Shows", sid, "Seasons"]) => match *sid {
+                "noseasons" => json(serde_json::json!({"Items": []})),
+                "seasons-500" => status(500),
+                _ => json(serde_json::json!({"Items": [
+                    {"Id": "sea-a", "Name": "Season 1", "IndexNumber": 1, "Type": "Season"},
+                    {"Id": "sea-b", "Name": "Season 2", "IndexNumber": 2, "Type": "Season"}
+                ]})),
+            },
+            ("GET", ["Shows", _, "Episodes"]) => {
+                let ep = |id: &str, n: u32, season: &str, played: bool, pos: i64, image: bool| {
+                    let mut v = serde_json::json!({
+                        "Id": id, "Name": format!("Episode {}", n), "Type": "Episode", "IndexNumber": n,
+                        "ParentIndexNumber": 1, "SeasonId": season, "Overview": format!("About episode {}.", n),
+                        "RunTimeTicks": 27_000_000_000i64,
+                        "UserData": {"Played": played, "PlaybackPositionTicks": pos, "PlayCount": 0}
+                    });
+                    if image {
+                        v["ImageTags"] = serde_json::json!({"Primary": "tag1"});
+                    }
+                    v
+                };
+                match r.query.get("seasonId").map(String::as_str) {
+                    Some("sea-a") => json(serde_json::json!({"Items": [ep("a1", 1, "sea-a", false, 0, false), ep("a2", 2, "sea-a", false, 0, false)]})),
+                    Some("sea-b") => json(serde_json::json!({"Items": [
+                        ep("b1", 1, "sea-b", true, 0, false),
+                        ep("b2", 2, "sea-b", false, 6_000_000_000, true),
+                        ep("b3", 3, "sea-b", false, 0, false)
+                    ]})),
+                    Some("sea-empty") => json(serde_json::json!({"Items": []})),
+                    _ => status(500),
+                }
+            }
+            ("GET", ["Items", _, "Images", _]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
             ("POST", ["Sessions", "Playing", ..]) => status(204),
             ("POST", ["Users", _, "PlayedItems", id]) | ("DELETE", ["Users", _, "PlayedItems", id]) => {
                 if *id == "boom" {
@@ -1046,11 +1495,17 @@ mod tests {
                 .expect("timed out waiting for MainMsg")
                 .expect("main channel closed")
         }
-        /// Next message, ignoring asynchronous Seerr thumbnail deliveries.
+        /// A message already queued, without waiting.
+        fn try_next(&mut self) -> Option<MainMsg> {
+            self.rx.try_recv().ok()
+        }
+        /// Next message, ignoring asynchronous Seerr thumbnail deliveries and the
+        /// ServerUrl side-notification that follows a successful connect (tests
+        /// that care about it read it with `next_raw`).
         async fn next(&mut self) -> MainMsg {
             loop {
                 match self.next_raw().await {
-                    MainMsg::SeerrPoster { .. } => continue,
+                    MainMsg::SeerrPoster { .. } | MainMsg::ServerUrl(_) => continue,
                     m => return m,
                 }
             }
@@ -1082,7 +1537,7 @@ mod tests {
     }
 
     fn connect_pw(url: &str) -> UiCmd {
-        UiCmd::Connect { url: url.into(), username: "alice".into(), password: Some("pw".into()), api_key: None }
+        UiCmd::Connect { url: url.into(), username: "alice".into(), password: Some("pw".into()), api_key: None, remember: true }
     }
 
     /// Worker connected to a fresh mock via the password path.
@@ -1138,6 +1593,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_reports_resolved_url_to_ui() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        // Bare host (no scheme, trailing slash): the mock is plain http, so
+        // resolution must fall back to http and the UI must get the resolved base.
+        let bare = m.url().trim_start_matches("http://").to_string();
+        h.send(connect_pw(&format!("{}/", bare)));
+        assert!(matches!(h.next_raw().await, MainMsg::Connected { .. }));
+        match h.next_raw().await {
+            MainMsg::ServerUrl(u) => assert_eq!(u, m.url()),
+            o => panic!("expected ServerUrl after connect, got {:?}", o),
+        }
+    }
+
+    #[tokio::test]
     async fn connect_with_live_tv_adds_section() {
         let _env = TestEnv::new();
         let m = start_mock().await;
@@ -1159,7 +1630,7 @@ mod tests {
         let _env = TestEnv::new();
         let m = start_mock().await;
         let mut h = H::start(base_cfg());
-        h.send(UiCmd::Connect { url: m.url(), username: "me".into(), password: None, api_key: Some("apikey-1".into()) });
+        h.send(UiCmd::Connect { url: m.url(), username: "me".into(), password: None, api_key: Some("apikey-1".into()), remember: true });
         match h.next().await {
             MainMsg::Connected { user_name, views, .. } => {
                 assert_eq!(user_name, "me");
@@ -1180,25 +1651,25 @@ mod tests {
         let mut h = H::start(base_cfg());
 
         // Bad URL.
-        h.send(UiCmd::Connect { url: "ftp://nope".into(), username: "a".into(), password: Some("b".into()), api_key: None });
+        h.send(UiCmd::Connect { url: "ftp://nope".into(), username: "a".into(), password: Some("b".into()), api_key: None, remember: true });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("Invalid server URL"), "{e}"),
             o => panic!("{:?}", o),
         }
         // Wrong password -> 401.
-        h.send(UiCmd::Connect { url: m.url(), username: "alice".into(), password: Some("bad".into()), api_key: None });
+        h.send(UiCmd::Connect { url: m.url(), username: "alice".into(), password: Some("bad".into()), api_key: None, remember: true });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("Sign-in failed"), "{e}"),
             o => panic!("{:?}", o),
         }
         // Bad API key.
-        h.send(UiCmd::Connect { url: m.url(), username: "a".into(), password: None, api_key: Some("wrong".into()) });
+        h.send(UiCmd::Connect { url: m.url(), username: "a".into(), password: None, api_key: Some("wrong".into()), remember: true });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("Sign-in failed"), "{e}"),
             o => panic!("{:?}", o),
         }
         // Neither password nor key.
-        h.send(UiCmd::Connect { url: m.url(), username: "a".into(), password: None, api_key: None });
+        h.send(UiCmd::Connect { url: m.url(), username: "a".into(), password: None, api_key: None, remember: true });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("password or an API key"), "{e}"),
             o => panic!("{:?}", o),
@@ -1228,6 +1699,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remember_me_on_connect_persists_token_and_session() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::Connect {
+            url: m.url(),
+            username: "alice".into(),
+            password: Some("pw".into()),
+            api_key: None,
+            remember: true,
+        });
+        assert!(matches!(h.next().await, MainMsg::Connected { .. }));
+        let c = load_config();
+        assert!(c.remember_me);
+        assert_eq!(c.server_url.as_deref(), Some(m.url().as_str()));
+        assert_eq!(c.user_id.as_deref(), Some("u1"));
+        assert_eq!(crate::config::load_token(&m.url()).as_deref(), Some("tok123"));
+    }
+
+    #[tokio::test]
+    async fn remember_me_off_connect_persists_nothing() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::Connect {
+            url: m.url(),
+            username: "alice".into(),
+            password: Some("pw".into()),
+            api_key: None,
+            remember: false,
+        });
+        assert!(matches!(h.next().await, MainMsg::Connected { .. }));
+        let c = load_config();
+        assert!(!c.remember_me, "the choice itself is saved");
+        assert!(c.server_url.is_none() && c.user_id.is_none() && c.username.is_none());
+        assert!(crate::config::load_token(&m.url()).is_none());
+        let on_disk = std::fs::read_to_string(crate::config::config_path()).unwrap();
+        assert!(!on_disk.contains("tok123") && !on_disk.contains(&m.url()));
+    }
+
+    #[tokio::test]
+    async fn remember_me_off_connect_forgets_previously_remembered_session() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        h.send(connect_pw(&m.url()));
+        assert!(matches!(h.next().await, MainMsg::Connected { .. }));
+        assert!(crate::config::load_token(&m.url()).is_some());
+        h.send(UiCmd::Connect {
+            url: m.url(),
+            username: "alice".into(),
+            password: Some("pw".into()),
+            api_key: None,
+            remember: false,
+        });
+        assert!(matches!(h.next().await, MainMsg::Connected { .. }));
+        assert!(crate::config::load_token(&m.url()).is_none());
+        assert!(load_config().server_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_with_remember_me_off_does_not_auto_connect() {
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        crate::config::store_token(&m.url(), "tok123");
+        let cfg = Config {
+            server_url: Some(m.url()),
+            user_id: Some("u1".into()),
+            username: Some("Alice Display".into()),
+            remember_me: false,
+            ..base_cfg()
+        };
+        let mut h = H::start(cfg);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(m.reqs().is_empty(), "no server calls at launch");
+        assert!(crate::config::load_token(&m.url()).is_none(), "leftover token removed");
+        h.send(UiCmd::ProbeServer);
+        assert!(matches!(h.next().await, MainMsg::ServerDown | MainMsg::ServerUp));
+    }
+
+    #[tokio::test]
     async fn startup_auto_connect_uses_stored_token_and_username() {
         let _env = TestEnv::new();
         let m = start_mock().await;
@@ -1240,12 +1792,39 @@ mod tests {
         };
         let mut h = H::start(cfg);
         match h.next().await {
+            MainMsg::Resuming { url } => assert_eq!(url, m.url()),
+            o => panic!("{:?}", o),
+        }
+        match h.next().await {
             MainMsg::Connected { user_name, .. } => assert_eq!(user_name, "Alice Display"),
             o => panic!("{:?}", o),
         }
         // Worker is usable right away.
         h.send(UiCmd::ProbeServer);
         assert!(matches!(h.next().await, MainMsg::ServerUp));
+    }
+
+    #[tokio::test]
+    async fn startup_without_saved_session_makes_no_server_call_and_sends_no_resume() {
+        // Fresh launch: nothing stored. No network, and no "Connecting" announcement.
+        let _env = TestEnv::new();
+        let m = start_mock().await;
+        let mut h = H::start(base_cfg());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(m.reqs().is_empty(), "no server calls at launch");
+        assert!(h.try_next().is_none(), "nothing is announced before Connect");
+        // Remembered URL and user but Remember me off: still no resume, no request.
+        let cfg = Config {
+            server_url: Some(m.url()),
+            user_id: Some("u1".into()),
+            remember_me: false,
+            ..base_cfg()
+        };
+        crate::config::store_token(&m.url(), "tok123");
+        let mut h = H::start(cfg);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(m.reqs().is_empty(), "no server calls with Remember me off");
+        assert!(h.try_next().is_none(), "no resume announced with Remember me off");
     }
 
     #[tokio::test]
@@ -1260,6 +1839,7 @@ mod tests {
         }
         crate::config::store_token(&m.url(), "revoked");
         let mut h = H::start(cfg);
+        assert!(matches!(h.next().await, MainMsg::Resuming { .. }), "resume is announced before the attempt");
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("token expired"), "{e}"),
             o => panic!("{:?}", o),
@@ -1299,6 +1879,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_browse_asks_for_movies_and_series_everywhere() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::LoadBrowse);
+        let (title, _names, back) = items_of(h.next().await);
+        assert_eq!(title, "Browse");
+        assert!(!back);
+        let last = m.find("GET", "/Users/u1/Items").pop().unwrap();
+        assert_eq!(last.query.get("IncludeItemTypes").map(String::as_str), Some("Movie,Series"));
+        assert_eq!(last.query.get("Recursive").map(String::as_str), Some("true"));
+        assert!(!last.query.contains_key("ParentId"), "browse must not be scoped to one library");
+    }
+
+    #[tokio::test]
+    async fn load_browse_before_connect_is_ignored() {
+        let _e = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::LoadBrowse);
+        h.send(UiCmd::ProbeServer);
+        assert!(matches!(h.next().await, MainMsg::ServerDown));
+    }
+
+    #[tokio::test]
     async fn load_view_livetv_lists_channels() {
         let (_e, m, mut h) = connected().await;
         m.cfg.lock().unwrap().live = true;
@@ -1331,6 +1933,110 @@ mod tests {
             MainMsg::PlaybackError(e) => assert!(e.contains("Network problem"), "{e}"),
             o => panic!("{:?}", o),
         }
+    }
+
+    fn home_of(m: MainMsg) -> Vec<(String, Vec<String>)> {
+        match m {
+            MainMsg::HomeLoaded(h) => h
+                .rows
+                .into_iter()
+                .map(|r| (r.title, r.items.into_iter().map(|i| i.name).collect()))
+                .collect(),
+            other => panic!("expected HomeLoaded, got {other:?}"),
+        }
+    }
+
+    fn titles(rows: &[(String, Vec<String>)]) -> Vec<&str> {
+        rows.iter().map(|r| r.0.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn load_home_builds_every_row_in_order() {
+        let (_env, m, mut h) = connected().await;
+        h.send(UiCmd::LoadHome);
+        let rows = home_of(h.next_nonposter().await);
+        assert_eq!(
+            titles(&rows),
+            [
+                "Continue Watching",
+                "Next Up",
+                "Recently Added in Movies",
+                "Recently Added in Shows",
+                "Because you watched Movie One",
+                "More with Some Actor",
+            ]
+        );
+        assert_eq!(rows[0].1, ["Pilot"]);
+        assert_eq!(rows[1].1, ["Second"]);
+        assert_eq!(rows[2].1, ["Movie One", "Movie Two"]);
+        assert_eq!(rows[3].1, ["Show One"]);
+        assert_eq!(rows[4].1, ["Recommended One"]);
+        assert_eq!(rows[5].1, ["Actor Film"]);
+
+        // Every endpoint was called with the signed-in user and token auth.
+        let resume = m.find("GET", "/Users/u1/Items/Resume");
+        assert_eq!(resume.len(), 1);
+        assert_eq!(resume[0].qp("MediaTypes"), Some("Video"));
+        assert_eq!(resume[0].qp("Limit"), Some("16"));
+        assert_eq!(resume[0].headers.get("x-emby-token").map(String::as_str), Some("tok123"));
+        let next = m.find("GET", "/Shows/NextUp");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].qp("UserId"), Some("u1"));
+        let latest = m.find("GET", "/Users/u1/Items/Latest");
+        let mut parents: Vec<&str> = latest.iter().filter_map(|r| r.qp("ParentId")).collect();
+        parents.sort();
+        assert_eq!(parents, ["v-mov", "v-tv"], "music and live TV get no Latest row");
+        let recs = m.find("GET", "/Movies/Recommendations");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].qp("UserId"), Some("u1"));
+    }
+
+    #[tokio::test]
+    async fn load_home_tolerates_partial_failures() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().home_fail = vec!["resume".into(), "latest".into()];
+        h.send(UiCmd::LoadHome);
+        let rows = home_of(h.next_nonposter().await);
+        assert_eq!(titles(&rows), ["Next Up", "Because you watched Movie One", "More with Some Actor"]);
+    }
+
+    #[tokio::test]
+    async fn load_home_without_views_keeps_the_other_rows() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().home_fail = vec!["views".into(), "nextup".into()];
+        h.send(UiCmd::LoadHome);
+        let rows = home_of(h.next_nonposter().await);
+        assert_eq!(titles(&rows), ["Continue Watching", "Because you watched Movie One", "More with Some Actor"]);
+    }
+
+    #[tokio::test]
+    async fn load_home_with_every_endpoint_failing_sends_no_rows() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().home_fail =
+            ["views", "resume", "nextup", "latest", "recs"].iter().map(|s| s.to_string()).collect();
+        h.send(UiCmd::LoadHome);
+        assert!(home_of(h.next_nonposter().await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_home_does_not_block_later_commands() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().resume_delay_ms = 1500;
+        h.send(UiCmd::LoadHome);
+        h.send(UiCmd::LoadView { view_id: "v".into(), name: "L".into(), collection_type: Some("movies".into()) });
+        // The view answer must arrive first, while Home is still pending.
+        let (title, _, _) = items_of(h.next_nonposter().await);
+        assert_eq!(title, "L");
+        let rows = home_of(h.next_nonposter().await);
+        assert!(!rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_home_before_connect_is_ignored() {
+        let _env = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::LoadHome);
+        assert!(h.drain_via_probe().await.is_empty());
     }
 
     #[tokio::test]
@@ -1523,6 +2229,7 @@ mod tests {
         h.send(UiCmd::SaveSettings {
             settings: Settings { max_bitrate_kbps: 8000, subtitle_lang: "eng".into(), ..Default::default() },
             reconnect: false,
+            server_url: None,
         });
         h.send(UiCmd::Play { item_id: "hibr".into() });
         let p = playback(h.next().await);
@@ -1546,7 +2253,16 @@ mod tests {
         assert_eq!(playback(h.next().await).resume_secs, 0.0);
         // Episodes carry the series name as subtitle.
         h.send(UiCmd::Play { item_id: "ep1".into() });
-        assert_eq!(playback(h.next().await).subtitle.as_deref(), Some("Show One"));
+        let ep = playback(h.next().await);
+        assert_eq!(ep.subtitle.as_deref(), Some("Show One"));
+        assert_eq!(ep.title, "Pilot");
+        assert_eq!(ep.series_name.as_deref(), Some("Show One"));
+        assert_eq!((ep.season_number, ep.episode_number), (Some(1), Some(2)));
+        assert_eq!(ep.header_subtitle().as_deref(), Some("Show One · S1 E2"));
+        // A movie carries no series, but its year feeds the header line.
+        h.send(UiCmd::Play { item_id: "played".into() });
+        let mv = playback(h.next().await);
+        assert_eq!((mv.series_name.is_none(), mv.season_number, mv.episode_number), (true, None, None));
     }
 
     #[tokio::test]
@@ -1593,6 +2309,207 @@ mod tests {
         assert_eq!(m.find("POST", "/LiveStreams/Close").len(), 1);
     }
 
+    // ------------------------------------------------------ item detail
+    #[tokio::test]
+    async fn open_detail_builds_view_and_fetches_art() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "det-movie".into() });
+        let v = match h.next().await {
+            MainMsg::DetailLoaded(v) => *v,
+            o => panic!("{:?}", o),
+        };
+        assert_eq!(v.name, "Detail Movie");
+        assert_eq!((v.year, v.official_rating.as_deref()), (Some(2020), Some("PG-13")));
+        assert_eq!(v.community_rating, Some(7.8));
+        assert_eq!(v.genres, vec!["Drama".to_string(), "Thriller".to_string()]);
+        assert_eq!(v.overview.as_deref(), Some("A detailed overview."));
+        assert_eq!(v.run_time_ticks, Some(72_000_000_000));
+        assert!(!v.played && !v.resume);
+        let poster = sys_key("det-movie");
+        let backdrop = sys_key("det-movie#backdrop");
+        assert_eq!((v.poster_key, v.backdrop_key), (Some(poster), Some(backdrop)));
+        assert_eq!(
+            v.people,
+            vec![
+                DetailPerson { name: "Ada Actor".into(), role: Some("Lead".into()), image_key: Some(sys_key("p-actor")) },
+                DetailPerson { name: "Dan Director".into(), role: Some("Director".into()), image_key: None },
+                DetailPerson { name: "No Image".into(), role: Some("Extra".into()), image_key: None },
+            ]
+        );
+        // Artwork arrives after the facts: poster, backdrop and the one person photo.
+        let mut got = std::collections::HashSet::new();
+        while got.len() < 3 {
+            match h.next().await {
+                MainMsg::PosterReady { key, bytes } => {
+                    assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+                    got.insert(key);
+                }
+                o => panic!("{:?}", o),
+            }
+        }
+        assert_eq!(got, [poster, backdrop, sys_key("p-actor")].into_iter().collect());
+        let detail = m.find("GET", "/Users/u1/Items/det-movie");
+        assert_eq!(detail.len(), 1);
+        let fields = detail[0].query.get("Fields").cloned().unwrap_or_default();
+        for f in ["People", "Genres", "Overview"] {
+            assert!(fields.contains(f), "{fields}");
+        }
+        assert_eq!(m.find("GET", "/Items/det-movie/Images/Backdrop").len(), 1);
+        assert_eq!(m.find("GET", "/Items/p-actor/Images/Primary").len(), 1);
+        assert!(m.find("GET", "/Items/p-noimg/Images").is_empty());
+    }
+
+    #[tokio::test]
+    async fn seasons_select_next_up_season_and_load_its_episodes() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::Seasons { series_id: "sr1".into() });
+        match h.next().await {
+            MainMsg::SeasonsLoaded { series_id, seasons, selected } => {
+                assert_eq!(series_id, "sr1");
+                let names: Vec<&str> = seasons.iter().map(|s| s.name.as_str()).collect();
+                assert_eq!(names, vec!["Season 1", "Season 2"]);
+                assert_eq!(selected, 1, "Next Up is in season 2");
+            }
+            o => panic!("{:?}", o),
+        }
+        let seasons_req = m.find("GET", "/Shows/sr1/Seasons");
+        assert_eq!(seasons_req.len(), 1);
+        assert_eq!(seasons_req[0].query.get("UserId").map(String::as_str), Some("u1"));
+        let next = m.find("GET", "/Shows/NextUp");
+        assert_eq!(next[0].query.get("SeriesId").map(String::as_str), Some("sr1"));
+
+        h.send(UiCmd::SeasonEpisodes { series_id: "sr1".into(), season_id: "sea-b".into() });
+        match h.next().await {
+            MainMsg::SeasonEpisodesLoaded { series_id, season_id, episodes } => {
+                assert_eq!((series_id.as_str(), season_id.as_str()), ("sr1", "sea-b"));
+                assert_eq!(episodes.len(), 3);
+                assert!(episodes[0].played);
+                assert_eq!((episodes[0].number, episodes[0].image_key), (Some(1), None));
+                assert_eq!(episodes[1].position_ticks, 6_000_000_000);
+                assert_eq!(episodes[1].image_key, Some(sys_key("b2")));
+                assert_eq!(episodes[1].overview.as_deref(), Some("About episode 2."));
+                assert_eq!(episodes[1].run_time_ticks, Some(27_000_000_000));
+                assert_eq!(episodes[2].image_key, None);
+            }
+            o => panic!("{:?}", o),
+        }
+        // The one episode with a still gets its thumbnail after the rows.
+        match h.next().await {
+            MainMsg::PosterReady { key, bytes } => {
+                assert_eq!(key, sys_key("b2"));
+                assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+            }
+            o => panic!("{:?}", o),
+        }
+        let eps = m.find("GET", "/Shows/sr1/Episodes");
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].query.get("seasonId").map(String::as_str), Some("sea-b"));
+        assert_eq!(eps[0].query.get("UserId").map(String::as_str), Some("u1"));
+    }
+
+    #[tokio::test]
+    async fn seasons_fall_back_and_report_failures() {
+        let (_e, _m, mut h) = connected().await;
+        // Next Up without a season id: matched by season number.
+        h.send(UiCmd::Seasons { series_id: "sr2".into() });
+        assert!(matches!(h.next().await, MainMsg::SeasonsLoaded { selected: 1, .. }));
+        // Next Up request fails: the first season is shown.
+        h.send(UiCmd::Seasons { series_id: "sr3".into() });
+        assert!(matches!(h.next().await, MainMsg::SeasonsLoaded { selected: 0, .. }));
+        // No seasons at all.
+        h.send(UiCmd::Seasons { series_id: "noseasons".into() });
+        match h.next().await {
+            MainMsg::SeasonsLoaded { seasons, selected, .. } => assert!(seasons.is_empty() && selected == 0),
+            o => panic!("{:?}", o),
+        }
+        h.send(UiCmd::Seasons { series_id: "seasons-500".into() });
+        match h.next().await {
+            MainMsg::SeasonsError { series_id, message } => {
+                assert_eq!(series_id, "seasons-500");
+                assert!(message.contains("500"), "{message}");
+            }
+            o => panic!("{:?}", o),
+        }
+        h.send(UiCmd::SeasonEpisodes { series_id: "sr1".into(), season_id: "sea-boom".into() });
+        assert!(matches!(h.next().await, MainMsg::SeasonsError { .. }));
+        h.send(UiCmd::SeasonEpisodes { series_id: "sr1".into(), season_id: "sea-empty".into() });
+        match h.next().await {
+            MainMsg::SeasonEpisodesLoaded { episodes, .. } => assert!(episodes.is_empty()),
+            o => panic!("{:?}", o),
+        }
+    }
+
+    fn season_of(id: &str, index: u32) -> Season {
+        serde_json::from_value(serde_json::json!({"Id": id, "Name": id, "IndexNumber": index})).unwrap()
+    }
+    fn episode_in(season_id: Option<&str>, parent: Option<u32>) -> Episode {
+        serde_json::from_value(serde_json::json!({"Id": "e", "Name": "e", "SeasonId": season_id, "ParentIndexNumber": parent}))
+            .unwrap()
+    }
+
+    #[test]
+    fn default_season_follows_next_up() {
+        let seasons = vec![season_of("s1", 1), season_of("s2", 2), season_of("s3", 3)];
+        assert_eq!(default_season(&seasons, None), 0, "no Next Up: first season");
+        assert_eq!(default_season(&seasons, Some(&episode_in(Some("s3"), Some(3)))), 2, "by season id");
+        assert_eq!(default_season(&seasons, Some(&episode_in(None, Some(2)))), 1, "by season number");
+        assert_eq!(default_season(&seasons, Some(&episode_in(Some("gone"), Some(9)))), 0, "unknown season");
+        assert_eq!(default_season(&[], Some(&episode_in(Some("s1"), Some(1)))), 0, "no seasons");
+    }
+
+    #[tokio::test]
+    async fn detail_resume_played_and_series_kinds() {
+        let (_e, _m, mut h) = connected().await;
+        for (id, want_resume, want_played, want_ty) in
+            [("det-resume", true, false, "Movie"), ("det-played", false, true, "Movie"), ("det-series", false, false, "Series")]
+        {
+            h.send(UiCmd::OpenDetail { item_id: id.into() });
+            match h.next_nonposter().await {
+                MainMsg::DetailLoaded(v) => {
+                    assert_eq!((v.resume, v.played, v.item_type.as_str()), (want_resume, want_played, want_ty), "{id}");
+                }
+                o => panic!("{:?}", o),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_without_artwork_requests_none() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "det-bare".into() });
+        match h.next_nonposter().await {
+            MainMsg::DetailLoaded(v) => {
+                assert_eq!((v.poster_key, v.backdrop_key), (None, None));
+                assert!(v.people.is_empty() && v.genres.is_empty() && v.overview.is_none());
+                assert!(v.official_rating.is_none() && v.community_rating.is_none());
+            }
+            o => panic!("{:?}", o),
+        }
+        let rest = h.drain_via_probe().await;
+        assert!(rest.iter().all(|m| !matches!(m, MainMsg::PosterReady { .. })), "{rest:?}");
+        assert!(m.find("GET", "/Items/det-bare/Images").is_empty());
+    }
+
+    #[tokio::test]
+    async fn detail_error_is_reported() {
+        let (_e, _m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "missing".into() });
+        match h.next().await {
+            MainMsg::DetailError(e) => assert!(e.contains("HTTP 404"), "{e}"),
+            o => panic!("{:?}", o),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_detail_before_connect_is_ignored() {
+        let _env = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::OpenDetail { item_id: "det-movie".into() });
+        h.send(UiCmd::ProbeServer);
+        let got = h.drain_via_probe().await;
+        assert!(got.is_empty(), "{got:?}");
+    }
+
     // -------------------------------------------------- progress / played
     #[tokio::test]
     async fn progress_stopped_and_mark_played_hit_server() {
@@ -1624,7 +2541,7 @@ mod tests {
     async fn save_settings_with_reconnect_reannounces_connection() {
         let (_e, m, mut h) = connected().await;
         m.cfg.lock().unwrap().live = true;
-        h.send(UiCmd::SaveSettings { settings: Settings { theme: "dark".into(), ..Default::default() }, reconnect: true });
+        h.send(UiCmd::SaveSettings { settings: Settings { theme: "dark".into(), ..Default::default() }, reconnect: true, server_url: None });
         match h.next().await {
             MainMsg::Connected { user_name, has_live_tv, views, .. } => {
                 assert_eq!(user_name, "Alice Display");
@@ -1640,7 +2557,7 @@ mod tests {
     async fn save_settings_reconnect_failure_reports_error() {
         let (_e, m, mut h) = connected().await;
         crate::config::store_token(&m.url(), "revoked");
-        h.send(UiCmd::SaveSettings { settings: Settings::default(), reconnect: true });
+        h.send(UiCmd::SaveSettings { settings: Settings::default(), reconnect: true, server_url: None });
         match h.next().await {
             MainMsg::ConnectError(e) => assert!(e.contains("token expired"), "{e}"),
             o => panic!("{:?}", o),

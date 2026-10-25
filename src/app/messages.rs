@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, LayoutMode};
 use crate::jellyfin::models::ListItem;
 use crate::seerr::models::{SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
@@ -17,6 +17,8 @@ pub enum UiCmd {
         username: String,
         password: Option<String>,
         api_key: Option<String>,
+        /// "Remember me": keep the session token in the Keychain and sign in on launch.
+        remember: bool,
     },
     LoadView {
         view_id: String,
@@ -33,6 +35,19 @@ pub enum UiCmd {
     Tracks {
         album_id: String,
         album_name: String,
+    },
+    /// Open the detail page for a movie or series.
+    OpenDetail {
+        item_id: String,
+    },
+    /// Load the seasons of a series shown on its detail page, and the one holding Next Up.
+    Seasons {
+        series_id: String,
+    },
+    /// Load the episodes of one season for the series detail page.
+    SeasonEpisodes {
+        series_id: String,
+        season_id: String,
     },
     Play {
         item_id: String,
@@ -54,12 +69,30 @@ pub enum UiCmd {
         item_id: String,
         played: bool,
     },
+    /// Unified Browse: every movie and show in one grid (`ItemsLoaded`, title "Browse").
+    LoadBrowse,
+    /// Layout chosen in onboarding or Settings. The UI already saved the config;
+    /// this only keeps the worker's copy in step.
+    SetLayoutMode {
+        mode: LayoutMode,
+    },
+    /// Fetch the Home screen rows (continue watching, next up, recently added,
+    /// recommendations). Answered with `MainMsg::HomeLoaded`.
+    LoadHome,
     SaveSettings {
         settings: Settings,
         reconnect: bool,
+        /// Raw server address typed in Settings; resolved by the worker before
+        /// reconnecting. `None` when the address is unchanged.
+        server_url: Option<String>,
     },
     SignOut,
     ProbeServer,
+    /// Sidebar library order and hidden ids, written from the Settings sheet.
+    SaveLibraries {
+        order: Vec<String>,
+        hidden: Vec<String>,
+    },
     /// Debounced like `Search`. Blank query yields empty `SeerrResults`.
     SeerrSearch {
         q: String,
@@ -94,6 +127,15 @@ pub enum MainMsg {
         has_live_tv: bool,
     },
     ConnectError(String),
+    /// The worker is resuming a remembered session (Remember me + Keychain token)
+    /// at launch. Only then does the login card show "Connecting…"; with no saved
+    /// session nothing is sent and the card waits for the user.
+    Resuming { url: String },
+    /// The resolved (scheme-complete) server base URL, sent after a connect or
+    /// Settings URL change so the UI uses the same address the worker stored.
+    ServerUrl(String),
+    /// Home screen rows, in display order. Empty rows are never included.
+    HomeLoaded(HomeRows),
     ItemsLoaded {
         title: String,
         items: Vec<ListItem>,
@@ -104,6 +146,27 @@ pub enum MainMsg {
         bytes: Vec<u8>,
     },
     PlaybackReady(PlaybackStart),
+    /// Facts for the detail page; its artwork follows as `PosterReady` keys.
+    DetailLoaded(Box<DetailView>),
+    /// The detail page could not be loaded (shown as a toast).
+    DetailError(String),
+    /// The series' seasons, and which one to show first (its Next Up season, else the first).
+    SeasonsLoaded {
+        series_id: String,
+        seasons: Vec<SeasonEntry>,
+        selected: usize,
+    },
+    /// Episodes of one season; their thumbnails follow as `PosterReady` keys.
+    SeasonEpisodesLoaded {
+        series_id: String,
+        season_id: String,
+        episodes: Vec<EpisodeRow>,
+    },
+    /// Seasons or episodes of a series page could not be loaded.
+    SeasonsError {
+        series_id: String,
+        message: String,
+    },
     PlaybackError(String),
     ServerUp,
     ServerDown,
@@ -128,6 +191,35 @@ pub enum MainMsg {
     },
 }
 
+/// What a Home row shows; the UI picks its layout and "see all" target from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeRowKind {
+    ContinueWatching,
+    NextUp,
+    /// One library's newest items; the title names the library.
+    RecentlyAdded,
+    Recommended,
+}
+
+impl HomeRowKind {
+    /// Wide (16:9) cards with a progress bar; every other row uses posters.
+    pub fn is_wide(self) -> bool {
+        matches!(self, HomeRowKind::ContinueWatching | HomeRowKind::NextUp)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HomeRow {
+    pub title: String,
+    pub kind: HomeRowKind,
+    pub items: Vec<ListItem>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HomeRows {
+    pub rows: Vec<HomeRow>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlaybackStart {
     pub url: String,
@@ -140,6 +232,41 @@ pub struct PlaybackStart {
     /// `poster_key` of the item's artwork (for the buffering backdrop), when it has some.
     pub image_key: Option<u64>,
     pub media_kind: MediaKind,
+    /// Episodes: the show's name. `None` for movies, audio and live TV.
+    pub series_name: Option<String>,
+    /// Episodes: season number (`ParentIndexNumber`).
+    pub season_number: Option<u32>,
+    /// Episodes: episode number (`IndexNumber`).
+    pub episode_number: Option<u32>,
+    /// Movies: production year (`ProductionYear`).
+    pub production_year: Option<u32>,
+}
+
+impl PlaybackStart {
+    /// The line under the title in the player's upper-left corner.
+    /// Episodes: "Series Name · S1 E2". Movies: the year. Anything else keeps `subtitle`.
+    pub fn header_subtitle(&self) -> Option<String> {
+        if let Some(series) = self.series_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(episode_line(series, self.season_number, self.episode_number));
+        }
+        if self.media_kind == MediaKind::Video {
+            if let Some(year) = self.production_year {
+                return Some(year.to_string());
+            }
+        }
+        self.subtitle.clone()
+    }
+}
+
+/// "Series Name · S1 E2"; when a season or episode number is missing, only the known parts appear.
+pub fn episode_line(series: &str, season: Option<u32>, episode: Option<u32>) -> String {
+    let code = match (season, episode) {
+        (Some(s), Some(e)) => format!("S{} E{}", s, e),
+        (Some(s), None) => format!("S{}", s),
+        (None, Some(e)) => format!("E{}", e),
+        (None, None) => String::new(),
+    };
+    if code.is_empty() { series.to_string() } else { format!("{} · {}", series, code) }
 }
 
 /// Whether playback shows the full-window video view or the now-playing bar.
@@ -147,6 +274,57 @@ pub struct PlaybackStart {
 pub enum MediaKind {
     Video,
     Audio,
+}
+
+/// Everything the detail page shows for one item. Artwork is keyed by
+/// `poster_key`-style hashes and arrives separately as `PosterReady`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailView {
+    pub id: String,
+    pub name: String,
+    pub item_type: String,
+    pub year: Option<u32>,
+    pub official_rating: Option<String>,
+    pub community_rating: Option<f64>,
+    pub run_time_ticks: Option<i64>,
+    pub genres: Vec<String>,
+    pub overview: Option<String>,
+    pub played: bool,
+    /// Has a saved position and is not finished: the button says "Resume".
+    pub resume: bool,
+    pub poster_key: Option<u64>,
+    pub backdrop_key: Option<u64>,
+    pub people: Vec<DetailPerson>,
+}
+
+/// One season in the series page's season picker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeasonEntry {
+    pub id: String,
+    pub name: String,
+}
+
+/// One episode row on the series page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodeRow {
+    pub id: String,
+    /// Episode number within its season.
+    pub number: Option<u32>,
+    pub name: String,
+    pub overview: Option<String>,
+    pub run_time_ticks: Option<i64>,
+    pub played: bool,
+    pub position_ticks: i64,
+    /// Thumbnail artwork key, when the episode has a still.
+    pub image_key: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailPerson {
+    pub name: String,
+    /// Character name, or the crew job ("Director") when there is no role.
+    pub role: Option<String>,
+    pub image_key: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -198,5 +376,46 @@ mod tests {
         let j = serde_json::to_string(&s).unwrap();
         assert!(j.contains("seerr_url") );
         assert!(!j.contains("api_key"));
+    }
+
+    fn start(series: Option<&str>, season: Option<u32>, episode: Option<u32>, year: Option<u32>, kind: MediaKind) -> PlaybackStart {
+        PlaybackStart {
+            url: String::new(),
+            item_id: "x".into(),
+            title: "Pilot".into(),
+            subtitle: Some("fallback".into()),
+            resume_secs: 0.0,
+            method: crate::transcode::decision::PlaybackMethod::DirectPlay,
+            run_time_secs: 0.0,
+            image_key: None,
+            media_kind: kind,
+            series_name: series.map(str::to_string),
+            season_number: season,
+            episode_number: episode,
+            production_year: year,
+        }
+    }
+
+    #[test]
+    fn episode_line_formats_season_and_episode() {
+        assert_eq!(episode_line("Show", Some(1), Some(2)), "Show · S1 E2");
+        assert_eq!(episode_line("Show", Some(12), Some(105)), "Show · S12 E105");
+        assert_eq!(episode_line("Show", Some(3), None), "Show · S3");
+        assert_eq!(episode_line("Show", None, Some(4)), "Show · E4");
+        assert_eq!(episode_line("Show", None, None), "Show");
+    }
+
+    #[test]
+    fn header_subtitle_for_episode_movie_and_other() {
+        let ep = start(Some("Show"), Some(1), Some(2), Some(2019), MediaKind::Video);
+        assert_eq!(ep.header_subtitle().as_deref(), Some("Show · S1 E2"));
+        let blank = start(Some("  "), Some(1), Some(2), None, MediaKind::Video);
+        assert_eq!(blank.header_subtitle().as_deref(), Some("fallback"));
+        let movie = start(None, None, None, Some(1999), MediaKind::Video);
+        assert_eq!(movie.header_subtitle().as_deref(), Some("1999"));
+        let undated = start(None, None, None, None, MediaKind::Video);
+        assert_eq!(undated.header_subtitle().as_deref(), Some("fallback"));
+        let audio = start(None, None, None, Some(2001), MediaKind::Audio);
+        assert_eq!(audio.header_subtitle().as_deref(), Some("fallback"));
     }
 }

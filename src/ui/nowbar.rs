@@ -285,7 +285,7 @@ unsafe fn apply_inset(on: bool) {
     }
     ui.now.inset_on = on;
     let d = if on { NOW_BAR_H } else { -NOW_BAR_H };
-    for v in [ui.lib_scroll.get(), ui.state_host.get()] {
+    for v in [ui.lib_scroll.get(), ui.state_host.get(), ui.home.scroll.get()] {
         let f = frame_of(v);
         let y = if on { NOW_BAR_H } else { 0. };
         set_frame(v, rect(f.origin.x, y, f.size.w, (f.size.h - d).max(0.)));
@@ -464,7 +464,7 @@ pub(crate) extern "C" fn volume(_t: &mut Object, _c: Sel, sender: *mut Object) {
         let ty: NSUInteger = if ev.is_null() { 2 } else { msg_send![ev, type] };
         if ty != 6 {
             ui.cfg.volume = v;
-            crate::config::save_config(&ui.cfg);
+            crate::config::save_config_keeping_session(&ui.cfg);
         }
     }
 }

@@ -169,6 +169,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(content_host, sc);
     autorel(sc);
     ui.lib_scroll = Ptr(sc);
+    crate::ui::home::build_scroll(content_host, grid_area);
 
     let grid_cls = *GRID_CLASS.get().unwrap();
     let grid: *mut Object = msg_send![grid_cls, alloc];
@@ -219,8 +220,14 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(state, sbtn);
     ui.state_btn = Ptr(sbtn);
 
+    // --- Item detail page (hidden until opened; replaces the grid while open) ---
+    crate::ui::detail::build(content_host, rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h - TITLEBAR_H));
+
     // --- Now-playing bar (audio), on top of the library ---
     crate::ui::nowbar::build(content_host, b);
+
+    // --- First-run onboarding card, above everything on the library side ---
+    crate::ui::onboarding::build(content_host, b);
 
     // --- Player host (AVKit) + chrome ---
     let pcls = *crate::ui::player::PLAYER_HOST_CLASS.get().unwrap();
@@ -252,7 +259,7 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // --- Login card ---
     let card_w = 380.;
-    let card_h = 416.;
+    let card_h = 416. + 18. + SP3; // + "Remember me" row
     let card = surface(
         rect(b.size.w / 2. - card_w / 2., b.size.h / 2. - card_h / 2., card_w, card_h),
         C_CARD,
@@ -322,7 +329,19 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(cv, tog);
     ui.login_toggle = Ptr(tog);
 
-    let btn_top = tog_top + 18. + SP5;
+    // "Remember me" checkbox, checked from the saved preference (default on).
+    let rem_top = tog_top + 18. + SP3;
+    let rem: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Remember me")
+        target: nil() action: nil()];
+    let _: () = msg_send![rem, setButtonType: 3usize]; // NSSwitchButton (checkbox)
+    let _: () = msg_send![rem, setControlSize: 0usize]; // regular
+    let _: () = msg_send![rem, setFont: font(T_CALLOUT)];
+    let _: () = msg_send![rem, setState: if ui.cfg.remember_me { 1isize } else { 0isize }];
+    set_frame(rem, rect(inner_x - 4., top(rem_top, 18.), 200., 18.));
+    add_sub(cv, rem);
+    ui.login_remember = Ptr(rem);
+
+    let btn_top = rem_top + 18. + SP5;
     let btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Connect")
         target: ui.ctl.get() action: sel!(connectClicked:)];
     let _: () = msg_send![btn, setBezelStyle: 1isize]; // push
@@ -350,7 +369,7 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // Restore remembered URL/user.
     if let Some(u) = &ui.cfg.server_url {
-        set_text(url_f, u);
+        set_text(url_f, &crate::jellyfin::urls::bare_url(u));
     }
     if let Some(u) = &ui.cfg.username {
         set_text(user_f, u);
@@ -405,95 +424,9 @@ pub(crate) unsafe fn apply_theme() {
     let _: () = msg_send![ui.app.get(), setAppearance: appearance];
 }
 
+/// Native menu bar, generated from `ui::shortcuts::SHORTCUTS`.
 pub(crate) unsafe fn build_menus() {
-    let ui = UI.get_mut().unwrap();
-    let main_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let main_menu: *mut Object = msg_send![main_menu, initWithTitle: ns("MainMenu")];
-    let _: () = msg_send![ui.app.get(), setMainMenu: main_menu];
-    autorel(main_menu);
-
-    // App menu
-    let app_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let app_item: *mut Object = msg_send![app_item,
-        initWithTitle: ns("Jellyfast") action: nil() keyEquivalent: ns("")];
-    let app_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let app_menu: *mut Object = msg_send![app_menu, initWithTitle: ns("Jellyfast")];
-    let _: () = msg_send![app_item, setSubmenu: app_menu];
-    let _: () = msg_send![main_menu, addItem: app_item];
-    autorel(app_item);
-    let about: *mut Object = menu_item("About Jellyfast", sel!(showAbout:), "");
-    let _: () = msg_send![about, setTarget: ui.ctl.get()];
-    let _: () = msg_send![app_menu, addItem: about];
-    let _: () = msg_send![app_menu, addItem: separator()];
-    let settings_i: *mut Object = menu_item("Settings…", sel!(showSettings:), ",");
-    let _: () = msg_send![settings_i, setTarget: ui.ctl.get()];
-    let _: () = msg_send![app_menu, addItem: settings_i];
-    let _: () = msg_send![app_menu, addItem: separator()];
-    let quit: *mut Object = menu_item("Quit Jellyfast", sel!(terminate:), "q");
-    let _: () = msg_send![app_menu, addItem: quit];
-
-    // Controls menu (playback is fully operable from the keyboard here).
-    let ctl_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let ctl_item: *mut Object = msg_send![ctl_item,
-        initWithTitle: ns("Controls") action: nil() keyEquivalent: ns("")];
-    let ctl_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let ctl_menu: *mut Object = msg_send![ctl_menu, initWithTitle: ns("Controls")];
-    let _: () = msg_send![ctl_item, setSubmenu: ctl_menu];
-    let _: () = msg_send![main_menu, addItem: ctl_item];
-    autorel(ctl_item);
-    let add = |menu: *mut Object, title: &str, action: Sel, key: &str, mask: NSUInteger, tag: NSInteger| unsafe {
-        let it: *mut Object = menu_item(title, action, key);
-        let _: () = msg_send![it, setTarget: ui.ctl.get()];
-        let _: () = msg_send![it, setKeyEquivalentModifierMask: mask];
-        let _: () = msg_send![it, setTag: tag];
-        let _: () = msg_send![menu, addItem: it];
-    };
-    const CMD: NSUInteger = 1 << 20;
-    const ALT: NSUInteger = 1 << 19;
-    const CTRL_CMD: NSUInteger = (1 << 18) | (1 << 20);
-    add(ctl_menu, "Play / Pause", sel!(playPause:), " ", 0usize, 0);
-    add(ctl_menu, "Stop", sel!(stopPlayback:), ".", CMD, 0);
-    add(ctl_menu, "Show Playback Info", sel!(togglePlaybackInfo:), "i", CMD, 0);
-    {
-        let n: NSInteger = msg_send![ctl_menu, numberOfItems];
-        let it: *mut Object = msg_send![ctl_menu, itemAtIndex: n - 1];
-        ui.info_item = Ptr(it);
-        let _: () = msg_send![it, setState: ui.cfg.settings.show_stats as isize];
-    }
-    add(ctl_menu, "Back 10s", sel!(seekBack:), "\u{F702}", CMD, 0);
-    add(ctl_menu, "Forward 10s", sel!(seekFwd:), "\u{F703}", CMD, 0);
-    add(ctl_menu, "Volume Up", sel!(volUp:), "\u{F700}", CMD, 0);
-    add(ctl_menu, "Volume Down", sel!(volDown:), "\u{F701}", CMD, 0);
-    add(ctl_menu, "Mute", sel!(mute:), "m", ALT, 0);
-    add(ctl_menu, "Next Subtitle Track", sel!(subCycle:), "s", ALT, 0);
-    add(ctl_menu, "Next Audio Track", sel!(audioCycle:), "a", ALT, 0);
-    add(ctl_menu, "Enter / Exit Full Screen", sel!(fullscreen:), "f", CTRL_CMD, 0);
-    // Speed submenu
-    let speed_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let speed_item: *mut Object = msg_send![speed_item,
-        initWithTitle: ns("Playback Speed") action: nil() keyEquivalent: ns("")];
-    let speed_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let speed_menu: *mut Object = msg_send![speed_menu, initWithTitle: ns("Playback Speed")];
-    let _: () = msg_send![speed_item, setSubmenu: speed_menu];
-    let _: () = msg_send![ctl_menu, addItem: speed_item];
-    autorel(speed_item);
-    for (label, tag) in [("0.5×", 50), ("0.75×", 75), ("1×", 100), ("1.25×", 125), ("1.5×", 150), ("2×", 200)] {
-        add(speed_menu, label, sel!(setSpeed:), "", 0usize, tag);
-    }
-
-    // Go menu
-    let go_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let go_item: *mut Object = msg_send![go_item,
-        initWithTitle: ns("Go") action: nil() keyEquivalent: ns("")];
-    let go_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let go_menu: *mut Object = msg_send![go_menu, initWithTitle: ns("Go")];
-    let _: () = msg_send![go_item, setSubmenu: go_menu];
-    let _: () = msg_send![main_menu, addItem: go_item];
-    autorel(go_item);
-    add(go_menu, "Refresh", sel!(refresh:), "r", CMD, 0);
-    add(go_menu, "Back", sel!(goBack:), "[", CMD, 0);
-    add(go_menu, "Sign Out", sel!(signOut:), "l", ALT, 0);
-    add(go_menu, "Request Something New…", sel!(openSeerr:), "k", ALT, 0);
+    crate::ui::shortcuts::build_menus_from_table();
 }
 
 pub(crate) unsafe fn separator() -> *mut Object {
@@ -617,11 +550,63 @@ pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, ta
 /// Refresh the selection pill on every library row from `ui.selected_view`.
 pub(crate) unsafe fn sidebar_refresh_selection() {
     let ui = UI.get_mut().unwrap();
+    if !ui.home.row.get().is_null() {
+        row_set_selected(ui.home.row.get(), ui.home.active);
+    }
+    if !ui.browse_row.get().is_null() {
+        row_set_selected(ui.browse_row.get(), ui.browse_active);
+    }
     for (i, (row, _)) in ui.rows.iter().enumerate() {
         row_set_selected(*row, ui.selected_view == Some(i));
     }
 }
 
+/// Recompute the sidebar from `all_views` and the saved order/visibility, then rebuild it.
+/// Keeps the selection on the same library when it is still shown.
+pub(crate) unsafe fn apply_library_prefs() {
+    let ui = UI.get_mut().unwrap();
+    // `visible_views` keeps Live TV only when it is shown, so no extra Live TV row is added.
+    ui.views = crate::app::libraries::visible_views(&ui.all_views, &ui.cfg.library_order, &ui.cfg.hidden_libraries);
+    let user = ui.user_name.clone();
+    let views = ui.views.clone();
+    sidebar_rebuild(user, &views, false);
+    let ui = UI.get_mut().unwrap();
+    ui.selected_view = ui
+        .mode_stack
+        .first()
+        .and_then(|m| ui.views.iter().position(|v| v.0 == m.0));
+    sidebar_refresh_selection();
+}
+
+/// Apply a layout choice (onboarding or Settings): save it, tell the worker, and
+/// rebuild the sidebar. A place the new layout no longer shows (a library in the
+/// unified layout, Browse in the separate one) falls back to Home.
+pub(crate) unsafe fn set_layout_mode(mode: crate::config::LayoutMode) {
+    use crate::config::LayoutMode;
+    let ui = UI.get_mut().unwrap();
+    let changed = ui.cfg.layout_mode != Some(mode);
+    ui.cfg.layout_mode = Some(mode);
+    crate::config::save_config(&ui.cfg);
+    let _ = ui.ui_tx.send(UiCmd::SetLayoutMode { mode });
+    if !changed {
+        return;
+    }
+    let user = ui.user_name.clone();
+    let views = ui.views.clone();
+    let has_live_tv = views.iter().any(|v| v.2.as_deref() == Some("livetv"));
+    sidebar_rebuild(user, &views, has_live_tv);
+    let lost_place = match mode {
+        LayoutMode::Unified => ui.selected_view.is_some(),
+        LayoutMode::Separate => ui.browse_active,
+    };
+    if lost_place {
+        crate::ui::home::enter();
+    } else {
+        sidebar_refresh_selection();
+    }
+}
+
+/// Rebuild the sidebar rows from `ui.views`. Callers set `ui.views` first.
 pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Option<String>)], has_live_tv: bool) {
     let ui = UI.get_mut().unwrap();
     let stack = ui.side_stack.get();
@@ -636,43 +621,70 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
         let _: () = msg_send![stack, removeArrangedSubview: v];
         let _: () = msg_send![v, removeFromSuperview];
     }
-    // Live TV needs a views entry so the button's tag resolves in viewSelected:.
-    if has_live_tv && !views.iter().any(|v| v.2.as_deref() == Some("livetv")) {
-        ui.views.push(("livetv".into(), "Live TV".into(), Some("livetv".into())));
-    }
     let views: Vec<(String, String, Option<String>)> = ui.views.clone();
+    let unified = ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified);
+    ui.user_name = user.clone();
 
-    // Section header
-    let hdr_box: *mut Object = msg_send![class!(NSView), alloc];
-    let hdr_box: *mut Object = autorel(msg_send![hdr_box, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, 20.)]);
-    let hdr = label("Library", T_CAPTION_EM, C_TEXT3, ALIGN_LEFT);
-    set_frame(hdr, rect(SP2, 2., SIDEBAR_W - 2. * SP3 - SP2, 16.));
-    set_autoresize(hdr, RESIZE_W);
-    add_sub(hdr_box, hdr);
-    fix_height(hdr_box, 20.);
-    let _: () = msg_send![stack, addView: hdr_box inGravity: 1isize];
-    ui.side_dyn.push(hdr_box);
+    // Home sits above the library list.
+    let home_row = sidebar_row("Home", "house", sel!(homeSelected:), -1);
+    let _: () = msg_send![stack, addView: home_row inGravity: 1isize];
+    ui.side_dyn.push(home_row);
+    ui.home.row = Ptr(home_row);
+    row_set_selected(home_row, ui.home.active);
+    ui.browse_row = Ptr(nil());
 
-    for (i, (id, name, ct)) in views.iter().enumerate() {
-        let symbol_name = match ct.as_deref() {
-            Some("movies") => "film",
-            Some("tvshows") => "tv",
-            Some("music") => "music.note",
-            Some("livetv") => "antenna.radiowaves.left.and.right",
-            Some("boxsets") => "rectangle.stack",
-            _ => "square.stack",
-        };
-        let row = sidebar_row(name, symbol_name, sel!(viewSelected:), i as NSInteger);
-        let _: () = msg_send![stack, addView: row inGravity: 1isize];
-        ui.rows.push((row, id.clone()));
-        ui.side_dyn.push(row);
-        row_set_selected(row, ui.selected_view == Some(i));
+    if unified {
+        // One big library: Browse, Search and Requests replace the library list.
+        let browse = sidebar_row("Browse", "square.grid.2x2", sel!(browseSelected:), -1);
+        let _: () = msg_send![stack, addView: browse inGravity: 1isize];
+        ui.side_dyn.push(browse);
+        ui.browse_row = Ptr(browse);
+        row_set_selected(browse, ui.browse_active);
+        for (title, symbol_name, action) in [
+            ("Search", "magnifyingglass", sel!(focusSearch:)),
+            ("Requests", "tray.full", sel!(openRequests:)),
+        ] {
+            let r = sidebar_row(title, symbol_name, action, -1);
+            let _: () = msg_send![stack, addView: r inGravity: 1isize];
+            ui.side_dyn.push(r);
+        }
+    }
+    if !unified {
+        // Library list (separate layout): a header, then one row per library.
+        // Section header
+        let hdr_box: *mut Object = msg_send![class!(NSView), alloc];
+        let hdr_box: *mut Object = autorel(msg_send![hdr_box, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, 20.)]);
+        let hdr = label("Library", T_CAPTION_EM, C_TEXT3, ALIGN_LEFT);
+        set_frame(hdr, rect(SP2, 2., SIDEBAR_W - 2. * SP3 - SP2, 16.));
+        set_autoresize(hdr, RESIZE_W);
+        add_sub(hdr_box, hdr);
+        fix_height(hdr_box, 20.);
+        let _: () = msg_send![stack, addView: hdr_box inGravity: 1isize];
+        ui.side_dyn.push(hdr_box);
+
+        for (i, (id, name, ct)) in views.iter().enumerate() {
+            let symbol_name = match ct.as_deref() {
+                Some("movies") => "film",
+                Some("tvshows") => "tv",
+                Some("music") => "music.note",
+                Some("livetv") => "antenna.radiowaves.left.and.right",
+                Some("boxsets") => "rectangle.stack",
+                _ => "square.stack",
+            };
+            let row = sidebar_row(name, symbol_name, sel!(viewSelected:), i as NSInteger);
+            let _: () = msg_send![stack, addView: row inGravity: 1isize];
+            ui.rows.push((row, id.clone()));
+            ui.side_dyn.push(row);
+            row_set_selected(row, ui.selected_view == Some(i));
+        }
     }
 
-    // Footer (bottom gravity): Request, hairline, user row.
-    let req = sidebar_row("Request…", "plus.magnifyingglass", sel!(openSeerr:), 0);
-    let _: () = msg_send![stack, addView: req inGravity: 3isize];
-    ui.side_dyn.push(req);
+    // Footer (bottom gravity): Request (separate layout only), hairline, user row.
+    if !unified {
+        let req = sidebar_row("Request…", "plus.magnifyingglass", sel!(openSeerr:), 0);
+        let _: () = msg_send![stack, addView: req inGravity: 3isize];
+        ui.side_dyn.push(req);
+    }
     let hl = hairline(rect(0., 0., SIDEBAR_W - 2. * SP3, 1.));
     fix_height(hl, 1.);
     let _: () = msg_send![stack, addView: hl inGravity: 3isize];
@@ -724,6 +736,17 @@ unsafe fn user_row(user: &str) -> *mut Object {
 }
 
 // ---- View switching ------------------------------------------------------
+/// Connecting state for the login card: only shown once a connect (typed
+/// credentials, or a resumed remembered session) is really under way.
+pub fn login_connecting(url: &str) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
+        set_text(ui.login_btn.get(), "Connecting…");
+    }
+    login_status(&format!("Connecting to {}…", host_of(url)));
+}
+
 pub fn show_login_or_library(connected: bool) {
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -954,6 +977,7 @@ pub(crate) unsafe fn show_state(symbol_name: &str, title: &str, body: &str, retr
 /// Called when a load begins. `first` = a different view (skeleton), otherwise keep
 /// what is on screen and spin in the header.
 pub(crate) unsafe fn begin_load(first: bool) {
+    crate::ui::home::leave();
     let ui = UI.get_mut().unwrap();
     hide_state();
     if first || ui.items.is_empty() {

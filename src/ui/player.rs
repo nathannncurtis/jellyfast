@@ -61,8 +61,9 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     let _: () = msg_send![ph, addTrackingArea: ta];
     autorel(ta);
 
-    // AVKit's own floating scrubber is the transport; media keys / Control Centre via now-playing.
-    let _: () = msg_send![avv, setControlsStyle: 2isize];
+    // AVKit's own controls are off: the custom transport bar (ui::playerbar) is the transport.
+    // Media keys / Control Centre still work through now-playing.
+    let _: () = msg_send![avv, setControlsStyle: 0isize];
     let _: () = msg_send![avv, setUpdatesNowPlayingInfoCenter: YES];
 
     // ---- top bar (gradient) ----
@@ -100,6 +101,9 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     set_autoresize(ts, RESIZE_W);
     add_sub(bar, ts);
     ui.top_sub = Ptr(ts);
+
+    // ---- bottom transport bar (scrubber, buttons, menus) ----
+    crate::ui::playerbar::build(ph, b);
 
     // ---- toast ----
     let chip = vev(MAT_HUD, BLEND_WITHIN);
@@ -181,6 +185,29 @@ pub(crate) unsafe fn show_bars() {
     if !ui.bar_shown {
         ui.bar_shown = true;
         fade(ui.top_bar.get(), 1.0, M_FAST);
+        fade_transport(1.0, M_FAST);
+    }
+}
+/// The bottom transport bar fades together with the top bar.
+unsafe fn fade_transport(to: f64, d: f64) {
+    let ui = UI.get().unwrap();
+    if !ui.pbar.bar.get().is_null() {
+        fade(ui.pbar.bar.get(), to, d);
+    }
+}
+/// Self-test hook: pretends the pointer last moved `secs` ago.
+pub(crate) unsafe fn set_idle_age(secs: f64) {
+    let ui = UI.get_mut().unwrap();
+    ui.last_mouse = std::time::Instant::now().checked_sub(std::time::Duration::from_secs_f64(secs));
+}
+/// Self-test hook: shows both bars at once, with no fade, and restarts the idle clock.
+pub(crate) unsafe fn show_bars_instant() {
+    let ui = UI.get_mut().unwrap();
+    ui.last_mouse = Some(std::time::Instant::now());
+    ui.bar_shown = true;
+    let _: () = msg_send![ui.top_bar.get(), setAlphaValue: 1.0f64];
+    if !ui.pbar.bar.get().is_null() {
+        let _: () = msg_send![ui.pbar.bar.get(), setAlphaValue: 1.0f64];
     }
 }
 pub(crate) unsafe fn hide_bars_if_idle() {
@@ -193,12 +220,13 @@ pub(crate) unsafe fn hide_bars_if_idle() {
         return;
     }
     if ui.bar_shown {
-        if let Some(t) = ui.last_mouse {
-            if t.elapsed().as_secs_f64() >= M_IDLE_HIDE {
-                ui.bar_shown = false;
-                fade(ui.top_bar.get(), 0.0, M_STD);
-                let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: YES];
-            }
+        // No pointer movement yet this playback counts as idle from now.
+        let t = *ui.last_mouse.get_or_insert_with(std::time::Instant::now);
+        if t.elapsed().as_secs_f64() >= M_IDLE_HIDE {
+            ui.bar_shown = false;
+            fade(ui.top_bar.get(), 0.0, M_STD);
+            fade_transport(0.0, M_STD);
+            let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: YES];
         }
     }
 }
@@ -258,7 +286,7 @@ pub(crate) extern "C" fn toggle_info(_t: &mut Object, _c: Sel, _s: *mut Object) 
     unsafe {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.show_stats = !ui.cfg.settings.show_stats;
-        crate::config::save_config(&ui.cfg);
+        crate::config::save_config_keeping_session(&ui.cfg);
         apply_info_visibility();
     }
 }

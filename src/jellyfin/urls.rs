@@ -15,6 +15,70 @@ pub fn normalize_base_url(input: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// What the user typed as a server address, split into its optional explicit
+/// scheme and the bare `host[:port][/path]` part (no trailing slash).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerInput {
+    pub scheme: Option<String>,
+    pub rest: String,
+}
+
+/// Parse a server address typed by the user. Accepts a bare host such as
+/// `media.example.com` or `192.168.1.10:8096/jellyfin/`, or a full URL with an
+/// explicit `http://` / `https://`. Query and fragment are dropped, repeated
+/// slashes and trailing slashes in the path are collapsed.
+pub fn parse_server_input(input: &str) -> Result<ServerInput, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("Server URL is empty.".into());
+    }
+    let (scheme, rest) = match s.find("://") {
+        Some(i) => {
+            let sc = s[..i].to_ascii_lowercase();
+            if sc != "http" && sc != "https" {
+                return Err("Use an http:// or https:// address, or just the host name.".into());
+            }
+            (Some(sc), &s[i + 3..])
+        }
+        None => (None, s),
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let authority = authority.trim();
+    if authority.is_empty() || authority.contains(char::is_whitespace) {
+        return Err("Enter a host name or IP address, like media.example.com or 192.168.1.10:8096.".into());
+    }
+    let mut out = authority.to_string();
+    for seg in path.split('/').filter(|p| !p.is_empty()) {
+        out.push('/');
+        out.push_str(seg);
+    }
+    Ok(ServerInput { scheme, rest: out })
+}
+
+/// Candidate base URLs to probe, in order. An explicit scheme is used alone;
+/// a bare host tries https first and falls back to http.
+pub fn candidate_bases(input: &str) -> Result<Vec<String>, String> {
+    let p = parse_server_input(input)?;
+    Ok(match p.scheme {
+        Some(sc) => vec![format!("{}://{}", sc, p.rest)],
+        None => vec![format!("https://{}", p.rest), format!("http://{}", p.rest)],
+    })
+}
+
+/// Display form of a server address: the scheme and trailing slashes removed,
+/// e.g. `https://media.example.com/` -> `media.example.com`. Falls back to the
+/// trimmed input when it does not parse.
+pub fn bare_url(input: &str) -> String {
+    match parse_server_input(input) {
+        Ok(p) => p.rest,
+        Err(_) => input.trim().trim_end_matches('/').to_string(),
+    }
+}
+
 /// RFC 3986 unreserved-char percent encoding (query values, tokens).
 pub fn enc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -101,10 +165,17 @@ pub fn build_hls_url(
 }
 
 pub fn build_image_url(base: &str, item_id: &str, token: &str, max_w: u32) -> String {
+    build_art_url(base, item_id, "Primary", max_w, token)
+}
+
+/// Artwork of any kind: `Primary` (poster or person photo), `Thumb`, `Backdrop`, ...
+/// The image index is optional on the server and defaults to the first image.
+pub fn build_art_url(base: &str, item_id: &str, kind: &str, max_w: u32, token: &str) -> String {
     format!(
-        "{}/Items/{}/Images/Primary?{}",
+        "{}/Items/{}/Images/{}?{}",
         base,
         item_id,
+        kind,
         qs(&[
             ("maxWidth", max_w.to_string()),
             ("quality", "85".into()),
@@ -165,5 +236,63 @@ pub fn fmt_runtime(ticks: Option<i64>) -> String {
             }
         }
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod server_input_tests {
+    use super::*;
+
+    #[test]
+    fn bare_hosts_parse_without_a_scheme() {
+        let p = parse_server_input("  media.example.com  ").unwrap();
+        assert_eq!(p, ServerInput { scheme: None, rest: "media.example.com".into() });
+        assert_eq!(parse_server_input("192.168.1.10:8096").unwrap().rest, "192.168.1.10:8096");
+    }
+
+    #[test]
+    fn explicit_scheme_is_kept_and_lowercased() {
+        let p = parse_server_input("HTTP://jf.local:8096").unwrap();
+        assert_eq!(p.scheme.as_deref(), Some("http"));
+        assert_eq!(p.rest, "jf.local:8096");
+        assert!(parse_server_input("ftp://x.io").is_err());
+    }
+
+    #[test]
+    fn paths_slashes_query_and_fragment_are_normalised() {
+        assert_eq!(parse_server_input("x.io/jf//").unwrap().rest, "x.io/jf");
+        assert_eq!(parse_server_input("x.io//a///b/").unwrap().rest, "x.io/a/b");
+        assert_eq!(parse_server_input("https://x.io/web/?a=1#frag").unwrap().rest, "x.io/web");
+        assert_eq!(parse_server_input("x.io/").unwrap().rest, "x.io");
+    }
+
+    #[test]
+    fn empty_or_unusable_input_is_rejected() {
+        assert!(parse_server_input("   ").is_err());
+        assert!(parse_server_input("https://").is_err());
+        assert!(parse_server_input("/only/a/path").is_err());
+        assert!(parse_server_input("bad host:8096").is_err());
+    }
+
+    #[test]
+    fn bare_host_tries_https_then_http() {
+        assert_eq!(
+            candidate_bases("media.example.com:8096/").unwrap(),
+            vec!["https://media.example.com:8096", "http://media.example.com:8096"]
+        );
+    }
+
+    #[test]
+    fn explicit_scheme_has_a_single_candidate() {
+        assert_eq!(candidate_bases("http://h:8096/").unwrap(), vec!["http://h:8096"]);
+        assert_eq!(candidate_bases("https://h").unwrap(), vec!["https://h"]);
+    }
+
+    #[test]
+    fn bare_url_strips_scheme_and_trailing_slash_for_display() {
+        assert_eq!(bare_url("https://media.example.com/"), "media.example.com");
+        assert_eq!(bare_url("http://h:5055/api"), "h:5055/api");
+        assert_eq!(bare_url("h:8096"), "h:8096");
+        assert_eq!(bare_url(""), "");
     }
 }

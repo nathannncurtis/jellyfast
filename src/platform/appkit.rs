@@ -335,6 +335,7 @@ pub struct Ui {
     pub login_err: Ptr,
     pub login_spin: Ptr,
     pub login_toggle: Ptr,
+    pub login_remember: Ptr,
     pub settings_win: Ptr,
     pub s_url: Ptr,
     pub s_sub_lang: Ptr,
@@ -342,10 +343,22 @@ pub struct Ui {
     pub retry_pending: bool,
     pub s_quality: Ptr,
     pub s_theme: Ptr,
+    pub s_lib_pop: Ptr,
+    pub s_lib_show: Ptr,
+    pub s_lib_up: Ptr,
+    pub s_lib_down: Ptr,
+    /// Settings: sidebar layout popup (separate libraries / one big library).
+    pub s_layout: Ptr,
     pub seerr: crate::ui::seerr::SeerrUi,
+    pub detail: crate::ui::detail::DetailUi,
     // Rust-side state
     pub rows: Vec<(*mut Object, String)>, // sidebar row buttons + view ids
-    pub views: Vec<(String, String, Option<String>)>,
+    pub views: Vec<(String, String, Option<String>)>, // sidebar: visible, ordered
+    pub all_views: Vec<(String, String, Option<String>)>, // every library from the server (+ Live TV)
+    pub user_label: String,
+    pub lib_edit: Vec<(String, String, Option<String>)>, // Settings working copy, full order
+    pub lib_hidden: Vec<String>,                          // Settings working copy
+    pub lib_sel: usize,
     pub items: Vec<ListItem>,
     pub poster_cache: HashMap<u64, *mut Object>, // +1 owned NSImage
     pub grid_data: Option<Box<GridData>>,
@@ -360,7 +373,17 @@ pub struct Ui {
     pub selected_view: Option<usize>,
     pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
+    /// Home screen views (scroll, rows, cards, sidebar row).
+    pub home: crate::ui::home::HomeUi,
+    /// Unified-layout "Browse" sidebar row, and whether Browse is the screen showing.
+    pub browse_row: Ptr,
+    pub browse_active: bool,
+    /// First-run onboarding card (see ui/onboarding.rs).
+    pub onboard: crate::ui::onboarding::OnboardUi,
+    /// Account name for the sidebar footer, from the last `Connected`.
+    pub user_name: String,
     pub now: crate::ui::nowbar::NowBar,
+    pub pbar: crate::ui::playerbar::PlayerBar,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
 unsafe impl Send for Ui {}
@@ -484,6 +507,12 @@ pub(crate) unsafe fn register_classes() {
             (sel!(goBack:), go_back as Extern0),
             (sel!(viewSelected:), view_selected as Extern0),
             (sel!(itemClicked:), item_clicked as Extern0),
+            (sel!(homeItemClicked:), home_item_clicked as Extern0),
+            (sel!(homeSelected:), crate::ui::home::home_selected as Extern0),
+            (sel!(browseSelected:), crate::ui::home::browse_selected as Extern0),
+            (sel!(openRequests:), crate::ui::seerr::open_requests as Extern0),
+            (sel!(onboardPick:), crate::ui::onboarding::onboard_pick as Extern0),
+            (sel!(onboardContinue:), crate::ui::onboarding::onboard_continue as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
             (sel!(markUnwatched:), mark_unwatched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
@@ -491,6 +520,10 @@ pub(crate) unsafe fn register_classes() {
             (sel!(toggleApiKey:), toggle_api_key as Extern0),
             (sel!(saveSettings:), save_settings as Extern0),
             (sel!(cancelSettings:), cancel_settings as Extern0),
+            (sel!(libSelected:), crate::ui::settings::lib_selected as Extern0),
+            (sel!(libVisibleToggled:), crate::ui::settings::lib_visible_toggled as Extern0),
+            (sel!(libMoveUp:), crate::ui::settings::lib_move_up as Extern0),
+            (sel!(libMoveDown:), crate::ui::settings::lib_move_down as Extern0),
             (sel!(sortChanged:), sort_changed as Extern0),
             (sel!(controlTextDidChange:), text_changed as Extern0),
             (sel!(jrTick:), tick as Extern0),
@@ -503,17 +536,34 @@ pub(crate) unsafe fn register_classes() {
             (sel!(jrNowSkip:), crate::ui::nowbar::skip as Extern0),
             (sel!(jrNowScrub:), crate::ui::nowbar::scrub as Extern0),
             (sel!(jrNowVolume:), crate::ui::nowbar::volume as Extern0),
+            (sel!(focusSearch:), crate::ui::shortcuts::focus_search as Extern0),
+            (sel!(openSelected:), crate::ui::shortcuts::open_selected as Extern0),
+            (sel!(focusNext:), crate::ui::shortcuts::focus_next as Extern0),
+            (sel!(focusPrevious:), crate::ui::shortcuts::focus_previous as Extern0),
+            (sel!(seerrShowTab:), crate::ui::shortcuts::seerr_show_tab as Extern0),
+            (sel!(showShortcuts:), crate::ui::shortcuts::show_shortcuts as Extern0),
+            (sel!(showSubtitleMenu:), crate::ui::playerbar::show_sub_menu as Extern0),
+            (sel!(showAudioMenu:), crate::ui::playerbar::show_audio_menu as Extern0),
+            (sel!(showSpeedMenu:), crate::ui::playerbar::show_speed_menu as Extern0),
+            (sel!(pickTrack:), crate::ui::playerbar::pick_track as Extern0),
+            (sel!(togglePiP:), crate::ui::playerbar::toggle_pip as Extern0),
         ] {
             d.add_method(s, f);
         }
         d.add_method(sel!(observeValueForKeyPath:ofObject:change:context:), kvo as KvoFn);
+        d.add_method(
+            sel!(validateMenuItem:),
+            crate::ui::shortcuts::validate_menu_item as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
+        );
         d.register();
     }
     crate::ui::seerr::register_seerr_classes();
     register_window_class();
     register_sidebar_row();
     register_header_class();
+    crate::ui::detail::register_detail_classes();
     crate::ui::player::register_player_classes();
+    crate::ui::playerbar::register_playerbar_classes();
     crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
     {
@@ -607,6 +657,10 @@ pub(crate) unsafe fn update_chip() {
 pub(crate) extern "C" fn fullscreen(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if offscreen_mode() {
+            ui.pbar.full_presses += 1;
+            return;
+        }
         let _: () = msg_send![ui.win.get(), toggleFullScreen: nil()];
     }
 }
@@ -682,16 +736,23 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         s.max_bitrate_kbps = [0u64, 40_000, 20_000, 10_000, 5_000, 3_000][q.clamp(0, 5) as usize];
         let th: NSInteger = msg_send![ui.s_theme.get(), indexOfSelectedItem];
         s.theme = ["system", "light", "dark"][th.clamp(0, 2) as usize].to_string();
-        let new_url = read_field(ui.s_url.get());
-        let url_changed = match &ui.cfg.server_url {
-            Some(u) => u != &new_url && !new_url.is_empty(),
-            None => !new_url.is_empty(),
-        };
+        // Compare display forms: the field shows a bare host, while the stored
+        // URL carries a resolved scheme. The worker resolves and stores the URL.
+        let new_url = read_field(ui.s_url.get()).trim().to_string();
+        let url_changed = !new_url.is_empty()
+            && ui.cfg.server_url.as_deref().map(crate::jellyfin::urls::bare_url)
+                != Some(crate::jellyfin::urls::bare_url(&new_url));
         ui.cfg.settings = s;
-        if url_changed {
-            ui.cfg.server_url = Some(new_url);
+        crate::ui::settings::commit_library_prefs();
+        // The worker resolves and stores the URL (see server_url below); the
+        // keeping-session save never overwrites the worker-owned session fields.
+        crate::config::save_config_keeping_session(&ui.cfg);
+        // Compare with the effective layout, so saving other settings never answers onboarding.
+        let lay: NSInteger = msg_send![ui.s_layout.get(), indexOfSelectedItem];
+        let layout = if lay == 1 { crate::config::LayoutMode::Unified } else { crate::config::LayoutMode::Separate };
+        if layout != ui.cfg.layout_mode.unwrap_or_default() {
+            crate::ui::shell::set_layout_mode(layout);
         }
-        crate::config::save_config(&ui.cfg);
         apply_theme();
         // SaveSettings replaces the worker's whole Settings, so it goes first;
         // ui.cfg.settings carries the last *confirmed* Seerr values. SaveSeerr
@@ -699,6 +760,7 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         let _ = ui.ui_tx.send(UiCmd::SaveSettings {
             settings: ui.cfg.settings.clone(),
             reconnect: url_changed,
+            server_url: if url_changed { Some(new_url) } else { None },
         });
         let seerr_on: NSInteger = msg_send![ui.seerr.s_on.get(), state];
         let seerr_on = seerr_on != 0;
@@ -715,9 +777,10 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         };
         let secret_typed = !pass.is_empty() || !key.trim().is_empty();
         let cur = &ui.cfg.settings;
+        let seerr_addr_changed = crate::jellyfin::urls::bare_url(&seerr_url) != crate::jellyfin::urls::bare_url(&cur.seerr_url);
         let seerr_dirty = seerr_on != cur.seerr_enabled
-            || (seerr_on && (seerr_url != cur.seerr_url || user != cur.seerr_username))
-            || (!seerr_on && !seerr_url.is_empty() && seerr_url != cur.seerr_url)
+            || (seerr_on && (seerr_addr_changed || user != cur.seerr_username))
+            || (!seerr_on && !seerr_url.is_empty() && seerr_addr_changed)
             || secret_typed;
         if seerr_on && mode == 0 && user.is_empty() && seerr_dirty {
             // Nothing to validate against; keep the sheet open and say why.
@@ -755,6 +818,15 @@ pub(crate) extern "C" fn sign_out(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if ui.home.active {
+            crate::ui::home::reload();
+            return;
+        }
+        if ui.browse_active {
+            begin_load(false);
+            let _ = ui.ui_tx.send(UiCmd::LoadBrowse);
+            return;
+        }
         if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
             begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
@@ -764,6 +836,9 @@ pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if ui.home.active {
+            return;
+        }
         if ui.mode_stack.len() > 1 {
             ui.mode_stack.pop();
             if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
@@ -773,43 +848,62 @@ pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
         }
     }
 }
+/// Open library `idx` (an index into `ui.views`) and remember it as the last place.
+pub(crate) unsafe fn select_view(idx: usize) {
+    let ui = UI.get_mut().unwrap();
+    if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
+        ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
+        ui.selected_view = Some(idx);
+        ui.browse_active = false;
+        sidebar_refresh_selection();
+        ui.cfg.last_view = Some(id.clone());
+        crate::config::save_config_keeping_session(&ui.cfg);
+        begin_load(true);
+        let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+    }
+}
 pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    crate::ui::detail::hide();
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
-        if let Some((id, name, ct)) = ui.views.get(tag as usize).cloned() {
-            ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
-            ui.selected_view = Some(tag as usize);
-            sidebar_refresh_selection();
-            ui.cfg.last_view = Some(id.clone());
-            crate::config::save_config(&ui.cfg);
-            begin_load(true);
-            let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-        }
+        select_view(tag as usize);
     }
 }
 pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
-        let it = match ui.items.get(tag as usize) {
-            Some(i) => i.clone(),
-            None => return,
-        };
-        set_busy(true);
-        match it.item_type.as_str() {
-            "Series" => {
-                let _ = ui.ui_tx.send(UiCmd::Episodes { series_id: it.id.clone(), series_name: it.name.clone() });
-            }
-            "MusicAlbum" => {
-                let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
-            }
-            "LiveTvChannel" => {
-                let _ = ui.ui_tx.send(UiCmd::PlayChannel { channel_id: it.id.clone(), name: it.name.clone() });
-            }
-            _ => {
-                let _ = ui.ui_tx.send(UiCmd::Play { item_id: it.id.clone() });
-            }
+        if let Some(it) = ui.items.get(tag as usize).cloned() {
+            activate(it);
+        }
+    }
+}
+pub(crate) extern "C" fn home_item_clicked(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let tag: NSInteger = msg_send![sender, tag];
+        if let Some(it) = ui.home.flat.get(tag as usize).cloned() {
+            activate(it);
+        }
+    }
+}
+/// Open a movie or series page, or play, list tracks or tune a channel.
+unsafe fn activate(it: ListItem) {
+    let ui = UI.get_mut().unwrap();
+    set_busy(true);
+    match it.item_type.as_str() {
+        "Movie" | "Series" => {
+            let _ = ui.ui_tx.send(UiCmd::OpenDetail { item_id: it.id.clone() });
+        }
+        "MusicAlbum" => {
+            let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
+        }
+        "LiveTvChannel" => {
+            let _ = ui.ui_tx.send(UiCmd::PlayChannel { channel_id: it.id.clone(), name: it.name.clone() });
+        }
+        _ => {
+            let _ = ui.ui_tx.send(UiCmd::Play { item_id: it.id.clone() });
         }
     }
 }
@@ -834,6 +928,10 @@ pub(crate) extern "C" fn mark_unwatched(_t: &mut Object, _c: Sel, sender: *mut O
     }
 }
 pub(crate) extern "C" fn open_in_web(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    // The self-test sets fake server URLs; never open a real browser tab for them.
+    if std::env::var_os("JELLYFAST_SELFTEST").is_some() {
+        return;
+    }
     unsafe {
         let ui = UI.get_mut().unwrap();
         let ro: *mut Object = msg_send![sender, representedObject];
@@ -866,14 +964,14 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
             login_error("Enter your username and password, or use an API key.");
             return;
         }
-        let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
-        set_text(ui.login_btn.get(), "Connecting…");
-        login_status(&format!("Connecting to {}…", host_of(&url)));
+        login_connecting(&url);
+        let remember_state: isize = msg_send![ui.login_remember.get(), state];
         let _ = ui.ui_tx.send(UiCmd::Connect {
             url,
             username: user,
             password: if pass.is_empty() { None } else { Some(pass) },
             api_key: if key.is_empty() { None } else { Some(key) },
+            remember: remember_state == 1, // NSControlStateValueOn
         });
     }
 }
@@ -920,14 +1018,8 @@ pub(crate) extern "C" fn search_now(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn app_did_finish_launch(_t: &mut Object, _c: Sel, _n: *mut Object) {
     unsafe {
         build_window_and_ui();
-        let ui = UI.get_mut().unwrap();
-        // If a server + token are stored, the worker is already auto-connecting;
-        // reflect that state in the login card.
-        if let Some(u) = ui.cfg.server_url.clone() {
-            login_status(&format!("Connecting to {}…", host_of(&u)));
-            let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
-            set_text(ui.login_btn.get(), "Connecting…");
-        }
+        // No connecting state here: a saved server URL alone is not a session. The
+        // worker reports `MainMsg::Resuming` if it really resumes one.
         crate::app::controller::drain_main(); // anything queued before launch
         if crate::app::selftest::enabled() {
             crate::app::selftest::start();
@@ -957,7 +1049,7 @@ pub(crate) extern "C" fn app_should_terminate(
                 ticks: crate::jellyfin::urls::ticks_from_secs(pn.last_secs),
             });
         }
-        crate::config::save_config(&ui.cfg);
+        crate::config::save_config_keeping_session(&ui.cfg);
         1 // NSTerminateNow (0 would cancel the quit)
     }
 }
@@ -1108,6 +1200,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         login_err: Ptr(nil()),
         login_spin: Ptr(nil()),
         login_toggle: Ptr(nil()),
+        login_remember: Ptr(nil()),
         settings_win: Ptr(nil()),
         s_url: Ptr(nil()),
         s_sub_lang: Ptr(nil()),
@@ -1115,9 +1208,20 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         retry_pending: false,
         s_quality: Ptr(nil()),
         s_theme: Ptr(nil()),
+        s_lib_pop: Ptr(nil()),
+        s_lib_show: Ptr(nil()),
+        s_lib_up: Ptr(nil()),
+        s_lib_down: Ptr(nil()),
+        s_layout: Ptr(nil()),
         seerr: crate::ui::seerr::SeerrUi::new(),
+        detail: crate::ui::detail::DetailUi::new(),
         rows: vec![],
         views: vec![],
+        all_views: vec![],
+        user_label: String::new(),
+        lib_edit: vec![],
+        lib_hidden: vec![],
+        lib_sel: 0,
         items: vec![],
         poster_cache: HashMap::new(),
         grid_data: None,
@@ -1132,7 +1236,13 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         selected_view: None,
         side_dyn: vec![],
         cur_title: String::new(),
+        home: crate::ui::home::HomeUi::new(),
+        browse_row: Ptr(nil()),
+        browse_active: false,
+        onboard: crate::ui::onboarding::OnboardUi::new(),
+        user_name: String::new(),
         now: crate::ui::nowbar::NowBar::new(),
+        pbar: crate::ui::playerbar::PlayerBar::new(),
         tint_cache: HashMap::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
@@ -1204,6 +1314,20 @@ unsafe impl objc::Encode for NSEdgeInsets {
 unsafe impl objc::Encode for CMTime {
     fn encode() -> objc::Encoding {
         unsafe { objc::Encoding::from_str("{?=qiIq}") }
+    }
+}
+/// CMTimeRange: start then duration, each a CMTime (returned by NSValue's CMTimeRangeValue).
+/// Note: this 48-byte struct comes back through plain msg_send, which is correct on arm64. An x86_64 build
+/// would need objc_msgSend_stret for the large-struct return.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CMTimeRange {
+    pub start: CMTime,
+    pub duration: CMTime,
+}
+unsafe impl objc::Encode for CMTimeRange {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{?={?=qiIq}{?=qiIq}}") }
     }
 }
 
