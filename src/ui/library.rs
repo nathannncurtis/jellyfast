@@ -253,6 +253,8 @@ pub fn grid_set_items(items: &[ListItem]) {
                 title,
                 sub,
                 btn,
+                skel_title: nil(),
+                skel_sub: nil(),
                 key,
                 meta: it.clone(),
             };
@@ -265,6 +267,72 @@ pub fn grid_set_items(items: &[ListItem]) {
         gd.cells = cells;
         ui.grid_data = Some(gd);
         // Re-point the ivar users at the (same) box, then lay out.
+        let _: () = msg_send![grid, setNeedsLayout: YES];
+    }
+}
+
+/// Skeleton cells for a first load: placeholder art plus two grey text bars.
+pub fn grid_set_skeleton(n: usize) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let grid = ui.grid.get();
+        let mut gd = ui.grid_data.take().unwrap_or_else(|| Box::new(GridData { cells: vec![], ratio: POSTER_ASPECT }));
+        for c in &gd.cells {
+            free_cell_data(c.container);
+            let _: () = msg_send![c.container, removeFromSuperview];
+        }
+        gd.cells.clear();
+        gd.ratio = POSTER_ASPECT;
+        let scale: f64 = msg_send![ui.win.get(), backingScaleFactor];
+        let m = grid_metrics(bounds_of(grid).size.w.max(200.), gd.ratio);
+        tx_begin_instant();
+        let dummy: ListItem = serde_json::from_value(serde_json::json!({"Id": "", "Name": ""})).unwrap();
+        for _ in 0..n {
+            let cell_cls = *CELL_CLASS.get().unwrap();
+            let container: *mut Object = msg_send![cell_cls, alloc];
+            let container: *mut Object = msg_send![container, initWithFrame: rect(0., 0., m.tile_w, m.cell_h)];
+            let root = layer_of(container);
+            let host = new_layer();
+            add_layer(root, host);
+            let art = new_layer();
+            set_corner(art, R_POSTER);
+            let _: () = msg_send![art, setMasksToBounds: YES];
+            let _: () = msg_send![art, setContentsScale: scale];
+            let _: () = msg_send![art, setBackgroundColor: cg(C_FILL_HOVER)];
+            add_layer(host, art);
+            let t = new_layer();
+            set_corner(t, 3.);
+            let _: () = msg_send![t, setBackgroundColor: cg(C_FILL_HOVER)];
+            add_layer(root, t);
+            let s2 = new_layer();
+            set_corner(s2, 3.);
+            let _: () = msg_send![s2, setBackgroundColor: cg(C_FILL_HOVER)];
+            add_layer(root, s2);
+            let _: () = msg_send![grid, addSubview: container];
+            autorel(container);
+            gd.cells.push(CellHandle {
+                container,
+                art,
+                shadow: host,
+                prog_track: nil(),
+                prog_fill: nil(),
+                prog_frac: 0.0,
+                dim: nil(),
+                circle: nil(),
+                glyph: nil(),
+                play_icon: nil(),
+                badge: nil(),
+                title: nil(),
+                sub: nil(),
+                btn: nil(),
+                skel_title: t,
+                skel_sub: s2,
+                key: 0,
+                meta: dummy.clone(),
+            });
+        }
+        tx_end();
+        ui.grid_data = Some(gd);
         let _: () = msg_send![grid, setNeedsLayout: YES];
     }
 }
@@ -339,17 +407,23 @@ unsafe fn layout_cell(c: &CellHandle, m: &Metrics) {
     let _: () = msg_send![c.shadow, setPosition: NSPoint { x: w / 2., y: h / 2. }];
     set_shadow_path(c.shadow, w, h, R_POSTER);
     let _: () = msg_send![c.art, setFrame: rect(0., 0., w, h)];
-    let _: () = msg_send![c.dim, setFrame: rect(0., 0., w, h)];
-    let _: () = msg_send![c.circle, setFrame: rect(w / 2. - 22., h / 2. - 22., 44., 44.)];
     let tw = w - 2. * SP2;
-    let _: () = msg_send![c.prog_track, setFrame: rect(SP2, h - SP2 - 3., tw, 3.)];
-    let _: () = msg_send![c.prog_fill, setFrame: rect(0., 0., tw * c.prog_frac, 3.)];
-    set_frame(c.glyph, rect(w / 2. - 20., h / 2. - 20., 40., 40.));
-    set_frame(c.play_icon, rect(w / 2. - 12., h / 2. - 12., 24., 24.));
-    set_frame(c.badge, rect(w - SP2 - 20., SP2, 20., 20.));
-    set_frame(c.title, rect(0., h + SP2, w, 17.));
-    set_frame(c.sub, rect(0., h + SP2 + 18., w, 14.));
-    set_frame(c.btn, rect(0., 0., w, m.cell_h));
+    if !c.dim.is_null() {
+        let _: () = msg_send![c.dim, setFrame: rect(0., 0., w, h)];
+        let _: () = msg_send![c.circle, setFrame: rect(w / 2. - 22., h / 2. - 22., 44., 44.)];
+        let _: () = msg_send![c.prog_track, setFrame: rect(SP2, h - SP2 - 3., tw, 3.)];
+        let _: () = msg_send![c.prog_fill, setFrame: rect(0., 0., tw * c.prog_frac, 3.)];
+        set_frame(c.glyph, rect(w / 2. - 20., h / 2. - 20., 40., 40.));
+        set_frame(c.play_icon, rect(w / 2. - 12., h / 2. - 12., 24., 24.));
+        set_frame(c.badge, rect(w - SP2 - 20., SP2, 20., 20.));
+        set_frame(c.title, rect(0., h + SP2, w, 17.));
+        set_frame(c.sub, rect(0., h + SP2 + 18., w, 14.));
+        set_frame(c.btn, rect(0., 0., w, m.cell_h));
+    }
+    if !c.skel_title.is_null() {
+        let _: () = msg_send![c.skel_title, setFrame: rect(0., h + SP2 + 3., (w * 0.6).floor(), 10.)];
+        let _: () = msg_send![c.skel_sub, setFrame: rect(0., h + SP2 + 22., (w * 0.4).floor(), 8.)];
+    }
 }
 
 pub(crate) extern "C" fn grid_layout(this: &mut Object, _cmd: Sel) {
@@ -397,7 +471,13 @@ pub(crate) extern "C" fn grid_appearance_changed(this: &mut Object, _cmd: Sel) {
         tx_begin_instant();
         for c in &(*data).cells {
             let _: () = msg_send![c.art, setBackgroundColor: cg(C_FILL_HOVER)];
-            let _: () = msg_send![c.prog_fill, setBackgroundColor: cg(C_ACCENT)];
+            if !c.prog_fill.is_null() {
+                let _: () = msg_send![c.prog_fill, setBackgroundColor: cg(C_ACCENT)];
+            }
+            if !c.skel_title.is_null() {
+                let _: () = msg_send![c.skel_title, setBackgroundColor: cg(C_FILL_HOVER)];
+                let _: () = msg_send![c.skel_sub, setBackgroundColor: cg(C_FILL_HOVER)];
+            }
         }
         tx_end();
     }

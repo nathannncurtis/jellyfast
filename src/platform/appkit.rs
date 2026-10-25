@@ -194,6 +194,9 @@ pub struct CellHandle {
     pub title: *mut Object,
     pub sub: *mut Object,
     pub btn: *mut Object,
+    /// Skeleton text bars (null for real cells).
+    pub skel_title: *mut Object,
+    pub skel_sub: *mut Object,
     pub key: u64,
     pub meta: ListItem,
 }
@@ -240,7 +243,14 @@ pub struct Ui {
     pub side_stack: Ptr,
     pub search: Ptr,
     pub sort_popup: Ptr,
+    pub header: Ptr,
     pub header_title: Ptr,
+    pub header_count: Ptr,
+    pub lib_back: Ptr,
+    pub state_host: Ptr,
+    pub state_icon: Ptr,
+    pub state_body: Ptr,
+    pub state_btn: Ptr,
     pub lib_scroll: Ptr,
     pub spinner: Ptr,
     pub status_label: Ptr,
@@ -416,6 +426,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(sortChanged:), sort_changed as Extern0),
             (sel!(controlTextDidChange:), text_changed as Extern0),
             (sel!(jrTick:), tick as Extern0),
+            (sel!(jrSearchNow:), search_now as Extern0),
             (sel!(jrRetry:), retry_now as Extern0),
         ] {
             d.add_method(s, f);
@@ -425,6 +436,7 @@ pub(crate) unsafe fn register_classes() {
     }
     crate::ui::seerr::register_seerr_classes();
     register_sidebar_row();
+    register_header_class();
     // Poster grid container
     {
         let mut d = ClassDecl::new("JRGridView", class!(NSView)).unwrap();
@@ -638,6 +650,7 @@ pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+            begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
         }
     }
@@ -648,6 +661,7 @@ pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
         if ui.mode_stack.len() > 1 {
             ui.mode_stack.pop();
             if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+                begin_load(false);
                 let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
             }
         }
@@ -663,8 +677,7 @@ pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Ob
             sidebar_refresh_selection();
             ui.cfg.last_view = Some(id.clone());
             crate::config::save_config(&ui.cfg);
-            set_busy(true);
-            set_hidden(ui.status_label.get(), true);
+            begin_load(true);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
         }
     }
@@ -762,6 +775,7 @@ pub(crate) extern "C" fn sort_changed(_t: &mut Object, _c: Sel, _s: *mut Object)
     unsafe {
         let ui = UI.get_mut().unwrap();
         if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+            begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
         }
     }
@@ -773,14 +787,25 @@ pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Objec
         if obj == ui.seerr.search.get() && !obj.is_null() {
             crate::ui::seerr::search_changed();
         } else if obj == ui.search.get() {
-            let q = read_field(ui.search.get());
-            if q.trim().is_empty() {
-                if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
-                    let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-                }
-            } else {
-                let _ = ui.ui_tx.send(UiCmd::Search { q });
+            // Debounce: keep the grid as is and search 200 ms after the last keystroke.
+            let ctl = ui.ctl.get();
+            let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl
+                selector: sel!(jrSearchNow:) object: nil()];
+            let _: () = msg_send![ctl, performSelector: sel!(jrSearchNow:) withObject: nil() afterDelay: 0.2f64];
+        }
+    }
+}
+pub(crate) extern "C" fn search_now(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let q = read_field(ui.search.get());
+        begin_load(false);
+        if q.trim().is_empty() {
+            if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+                let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
             }
+        } else {
+            let _ = ui.ui_tx.send(UiCmd::Search { q });
         }
     }
 }
@@ -940,7 +965,14 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         side_stack: Ptr(nil()),
         search: Ptr(nil()),
         sort_popup: Ptr(nil()),
+        header: Ptr(nil()),
         header_title: Ptr(nil()),
+        header_count: Ptr(nil()),
+        lib_back: Ptr(nil()),
+        state_host: Ptr(nil()),
+        state_icon: Ptr(nil()),
+        state_body: Ptr(nil()),
+        state_btn: Ptr(nil()),
         lib_scroll: Ptr(nil()),
         spinner: Ptr(nil()),
         status_label: Ptr(nil()),

@@ -47,7 +47,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
                     ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
                     ui.selected_view = Some(idx);
                     sidebar_refresh_selection();
-                    set_busy(true);
+                    begin_load(true);
                     let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
                 }
             }
@@ -61,13 +61,22 @@ pub(crate) fn handle_main(msg: MainMsg) {
             ui.items = items.clone();
             ui.cur_title = title.clone();
             set_text(ui.header_title.get(), &title);
-            let _: BOOL = msg_send![ui.back_btn.get(), setHidden: (!can_go_back) as BOOL];
+            set_hidden(ui.lib_back.get(), !can_go_back);
             set_busy(false);
-            set_hidden(ui.status_label.get(), !items.is_empty());
+            set_count(&count_label(&items), false);
             if items.is_empty() {
-                set_text(ui.status_label.get(), "Nothing here.");
+                let q = read_field(ui.search.get());
+                let body = if q.trim().is_empty() {
+                    "This library is empty.".to_string()
+                } else {
+                    format!("No results for “{}”", q.trim())
+                };
+                show_state("tray", "No items yet", &body, false);
+            } else {
+                hide_state();
             }
             grid_set_items(&items);
+            header_layout();
         },
         MainMsg::PosterReady { key, bytes } => unsafe {
             poster_ready(key, &bytes);
@@ -76,8 +85,16 @@ pub(crate) fn handle_main(msg: MainMsg) {
             start_playback(&ps);
         },
         MainMsg::PlaybackError(e) => unsafe {
-            set_chip(&format!("⚠︎ {}", e), true);
+            let ui = UI.get_mut().unwrap();
             set_busy(false);
+            if ui.playing.is_some() {
+                set_chip(&format!("⚠︎ {}", e), true);
+            } else if ui.items.is_empty() {
+                grid_set_items(&[]);
+                show_state("exclamationmark.triangle", "Couldn't load this library", &e, true);
+            } else {
+                set_count(&clip_msg(&e, 80), true);
+            }
         },
         MainMsg::ServerUp => unsafe {
             retry_playback();

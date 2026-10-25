@@ -116,6 +116,11 @@ fn steps() -> Vec<Step> {
         ("items: episodes", s_items_episodes, 100),
         ("items: audio", s_items_audio, 100),
         ("items: empty", s_items_empty, 50),
+        ("header layout", s_header, 100),
+        ("states: skeleton, error, empty search", s_states, 150),
+        ("search debounce: type", s_debounce_type, 100),
+        ("search debounce: not yet", s_debounce_early, 250),
+        ("search debounce: fired once", s_debounce_done, 50),
         ("items: many (grid scroll)", s_items_many, 100),
         ("resize window (many)", s_resize, 200),
         ("item clicks", s_item_clicks, 50),
@@ -672,9 +677,10 @@ fn s_sidebar_click() {
             sf.origin.y + sf.size.h <= sb.size.h - crate::ui::theme::TITLEBAR_H + 0.5,
         );
         state_check("one row selected after auto-select", selected_rows() == 1);
-        for b in rows {
-            act(sel!(viewSelected:), b);
+        for (i, _) in rows.iter().enumerate() {
+            act(sel!(viewSelected:), tagged_button(i as isize));
             state_check("exactly one row selected after click", selected_rows() == 1);
+            state_check("clicked row is the selected one", UI.get().unwrap().selected_view == Some(i));
         }
         let n_before: usize = { let a: *mut Object = msg_send![ui.side_stack.get(), arrangedSubviews]; msg_send![a, count] };
         handle_main(MainMsg::Connected {
@@ -720,6 +726,114 @@ fn s_items_empty() {
         let al: isize = msg_send![ui.status_label.get(), alignment];
         state_check("status label centred (arm64-safe ALIGN_CENTER)", al as usize == crate::ui::theme::ALIGN_CENTER);
     }
+}
+fn header_title_x() -> f64 {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: () = msg_send![ui.header.get(), layoutSubtreeIfNeeded];
+        crate::ui::shell::header_layout();
+        let hf = frame_of(ui.header.get());
+        hf.origin.x + frame_of(ui.header_title.get()).origin.x
+    }
+}
+fn s_header() {
+    use crate::ui::theme::*;
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        send_items("Albums", items_of("MusicAlbum", 5), false);
+        state_check("title x == SIDEBAR_W + EDGE without back", (header_title_x() - (SIDEBAR_W + EDGE)).abs() < 0.01);
+        send_items("Episodes", items_of("Episode", 1), true);
+        state_check("title shifts +36 with back", (header_title_x() - (SIDEBAR_W + EDGE + 36.)).abs() < 0.01);
+        let bh: BOOL = msg_send![ui.lib_back.get(), isHidden];
+        state_check("library back visible when can_go_back", bh == NO);
+        state_check("count label singular", read_field(ui.header_count.get()) == "1 episode");
+        send_items("Albums", items_of("MusicAlbum", 5), false);
+        state_check("count label plural", read_field(ui.header_count.get()) == "5 albums");
+        // title never runs into the count or the sort popup, even when very long
+        send_items(LONG, items_of("Movie", 3), false);
+        let tf = frame_of(ui.header_title.get());
+        let cf = frame_of(ui.header_count.get());
+        let pf = frame_of(ui.sort_popup.get());
+        state_check("title ends before count", tf.origin.x + tf.size.w <= cf.origin.x + 0.5);
+        state_check("count ends before sort popup", cf.origin.x + cf.size.w <= pf.origin.x);
+        send_items("Movies", items_of("Movie", 12), false);
+    }
+}
+fn s_states() {
+    use crate::ui::theme::*;
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        // first load: skeleton cells, no items clickable
+        act(sel!(viewSelected:), tagged_button(1));
+        state_check("skeleton cells shown on first load", ui.grid_data.as_ref().unwrap().cells.len() == 12 && ui.items.is_empty());
+        let sh: BOOL = msg_send![ui.spinner.get(), isHidden];
+        state_check("no header spinner during skeleton", sh == YES);
+        take_cmds();
+        // error with nothing on screen
+        handle_main(MainMsg::PlaybackError("HTTP 500 from the server, which is a rather long message that goes on and on and on".into()));
+        let hh: BOOL = msg_send![ui.state_host.get(), isHidden];
+        state_check("error state shown", hh == NO);
+        let bb: BOOL = msg_send![ui.state_btn.get(), isHidden];
+        state_check("Try Again visible on error", bb == NO);
+        // empty search state, centred on the grid area
+        set_text(ui.search.get(), "zzz");
+        send_items("Results", vec![], false);
+        let _: () = msg_send![ui.win.get(), layoutIfNeeded];
+        let hb: BOOL = msg_send![ui.state_btn.get(), isHidden];
+        state_check("no Try Again on empty", hb == YES);
+        state_check("empty search body", read_field(ui.state_body.get()).contains("No results for"));
+        let sf = frame_of(ui.status_label.get());
+        let win_r: NSRect = msg_send![ui.status_label.get(), convertRect: bounds_of(ui.status_label.get()) toView: nil()];
+        let content: *mut Object = msg_send![ui.win.get(), contentView];
+        let cw = bounds_of(content).size.w;
+        let expect = SIDEBAR_W + (cw - SIDEBAR_W) / 2.;
+        let _ = sf;
+        state_check("empty state centred on grid area", (win_r.origin.x + win_r.size.w / 2. - expect).abs() <= 1.0);
+        audit_both("empty-state");
+        set_text(ui.search.get(), "");
+        // refresh with items present keeps them and spins in the header
+        send_items("Movies", items_of("Movie", 12), false);
+        act(sel!(refresh:), nil());
+        state_check("refresh keeps items", ui.grid_data.as_ref().unwrap().cells.len() == 12);
+        let sh: BOOL = msg_send![ui.spinner.get(), isHidden];
+        state_check("header spinner while refreshing", sh == NO);
+        send_items("Movies", items_of("Movie", 12), false);
+        let sh: BOOL = msg_send![ui.spinner.get(), isHidden];
+        state_check("spinner stops on arrival", sh == YES);
+    }
+}
+static SEARCH_BASE: Mutex<usize> = Mutex::new(0);
+fn search_cmds(cmds: &[UiCmd]) -> usize {
+    cmds.iter().filter(|c| matches!(c, UiCmd::Search { .. })).count()
+}
+fn s_debounce_type() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        take_cmds();
+        for (i, q) in ["a", "ab", "abc"].iter().enumerate() {
+            set_text(ui.search.get(), q);
+            let note: *mut Object = msg_send![class!(NSNotification), notificationWithName: ns("NSControlTextDidChangeNotification") object: ui.search.get()];
+            act(sel!(controlTextDidChange:), note);
+            *SEARCH_BASE.lock().unwrap() = i;
+        }
+    }
+}
+fn s_debounce_early() {
+    // ~150 ms after the last keystroke: nothing sent yet
+    state_check("no Search within 150 ms", search_cmds(&take_cmds()) == 0);
+}
+fn s_debounce_done() {
+    let cmds = take_cmds();
+    state_check("exactly one Search after the debounce", search_cmds(&cmds) == 1);
+    state_check(
+        "debounced Search carries the last text",
+        cmds.iter().any(|c| matches!(c, UiCmd::Search { q } if q == "abc")),
+    );
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        set_text(ui.search.get(), "");
+    }
+    take_cmds();
 }
 fn s_items_many() {
     send_items("Many", items_of("Movie", 300), false);

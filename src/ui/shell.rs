@@ -98,32 +98,70 @@ pub(crate) unsafe fn build_window_and_ui() {
     autorel(sf);
     ui.search = Ptr(sf);
 
-    // Header row (title + sort)
-    let ht = make_label("Library", 20.0, true, false);
-    set_frame(ht, rect(264., b.size.h - 52., 500., 26.));
-    set_autoresize(ht, MARGIN_MINY);
-    add_sub(content_host, ht);
+    // Header band: back, title, count, spinner, sort (laid out by `header_layout`).
+    let pb = bounds_of(content_host);
+    let hcls = *HEADER_CLASS.get().unwrap();
+    let header: *mut Object = msg_send![hcls, alloc];
+    let header: *mut Object = msg_send![header, initWithFrame:
+        rect(SIDEBAR_W, pb.size.h - TITLEBAR_H - HEADER_H, pb.size.w - SIDEBAR_W, HEADER_H)];
+    set_autoresize(header, RESIZE_W | MARGIN_MINY);
+    add_sub(content_host, header);
+    autorel(header);
+    ui.header = Ptr(header);
+
+    let back: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("")
+        target: ui.ctl.get() action: sel!(goBack:)];
+    let _: () = msg_send![back, setBordered: NO];
+    let bi = symbol("chevron.left", 15., Weight::Medium);
+    if !bi.is_null() {
+        let _: () = msg_send![back, setImage: bi];
+    }
+    let _: () = msg_send![back, setImagePosition: 1isize]; // image only
+    let _: () = msg_send![back, setContentTintColor: color(C_TEXT2)];
+    let _: () = msg_send![back, setToolTip: ns("Back")];
+    set_hidden(back, true);
+    add_sub(header, back);
+    ui.lib_back = Ptr(back);
+
+    let ht = label("", T_DISPLAY, C_TEXT, ALIGN_LEFT);
+    add_sub(header, ht);
     ui.header_title = Ptr(ht);
+    let hc = label("", T_CALLOUT, C_TEXT2, ALIGN_LEFT);
+    add_sub(header, hc);
+    ui.header_count = Ptr(hc);
+
+    // Small spinner: shown only while a view with items already on screen reloads.
+    let sp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
+    let sp: *mut Object = msg_send![sp, initWithFrame: rect(0., 0., 16., 16.)];
+    let _: () = msg_send![sp, setIndeterminate: YES];
+    let _: () = msg_send![sp, setStyle: 1isize]; // spinning
+    let _: () = msg_send![sp, setControlSize: 1usize];
+    let _: () = msg_send![sp, setUsesThreadedAnimation: YES];
+    set_hidden(sp, true);
+    add_sub(header, sp);
+    autorel(sp);
+    ui.spinner = Ptr(sp);
 
     let pop: *mut Object = msg_send![class!(NSPopUpButton), alloc];
-    let pop: *mut Object = msg_send![pop, initWithFrame: rect(0., 0., 150., 26.) pullsDown: NO];
+    let pop: *mut Object = msg_send![pop, initWithFrame: rect(0., 0., 120., 24.) pullsDown: NO];
     let arr: *mut Object = msg_send![class!(NSMutableArray), array];
-    for t in ["Name (A–Z)", "Newest first", "Highest rated", "Recently played"] {
+    for t in ["Name", "Date Added", "Rating", "Last Played"] {
         let _: () = msg_send![arr, addObject: ns(t)];
     }
     let _: () = msg_send![pop, addItemsWithTitles: arr];
     let _: () = msg_send![pop, setTarget: ui.ctl.get()];
     let _: () = msg_send![pop, setAction: sel!(sortChanged:)];
-    let pb = bounds_of(content_host);
-    set_frame(pop, rect(pb.size.w - 170., pb.size.h - 54., 150., 26.));
-    set_autoresize(pop, MARGIN_MINX | MARGIN_MINY);
-    add_sub(content_host, pop);
+    let _: () = msg_send![pop, setControlSize: 1usize];
+    let _: () = msg_send![pop, setBordered: NO];
+    let _: () = msg_send![pop, setFont: font(T_CALLOUT)];
+    add_sub(header, pop);
     autorel(pop);
     ui.sort_popup = Ptr(pop);
 
     // Grid scroll view
+    let grid_area = rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h - TITLEBAR_H - HEADER_H - SP3);
     let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h - TITLEBAR_H - HEADER_H - SP3)];
+    let sc: *mut Object = msg_send![sc, initWithFrame: grid_area];
     let _: () = msg_send![sc, setHasVerticalScroller: YES];
     let _: () = msg_send![sc, setDrawsBackground: YES];
     let _: () = msg_send![sc, setBackgroundColor: color(C_CANVAS)];
@@ -144,24 +182,42 @@ pub(crate) unsafe fn build_window_and_ui() {
     autorel(grid);
     ui.grid = Ptr(grid);
 
-    // Spinner + status label
-    let sp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
-    let sp: *mut Object = msg_send![sp, initWithFrame: rect(pb.size.w / 2. - 12., pb.size.h / 2., 24., 24.)];
-    let _: () = msg_send![sp, setIndeterminate: YES];
-    let _: () = msg_send![sp, setStyle: 1i64]; // spinning
-    let _: () = msg_send![sp, setUsesThreadedAnimation: YES];
-    set_autoresize(sp, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
-    add_sub(content_host, sp);
-    autorel(sp);
-    ui.spinner = Ptr(sp);
-    set_hidden(sp, true);
-
-    let st = make_label("", 13.0, false, true);
-    set_frame(st, rect(260., pb.size.h / 2. - 30., pb.size.w - 280., 20.));
-    set_autoresize(st, RESIZE_W | MARGIN_MINY | MARGIN_MAXY);
-    let _: () = msg_send![st, setTextColor: color_named("secondary")];
-    add_sub(content_host, st);
+    // Empty / error state, centred on the grid area (not the window).
+    let host: *mut Object = msg_send![class!(NSView), alloc];
+    let host: *mut Object = msg_send![host, initWithFrame: grid_area];
+    set_autoresize(host, RESIZE_W | RESIZE_H);
+    set_hidden(host, true);
+    add_sub(content_host, host);
+    autorel(host);
+    ui.state_host = Ptr(host);
+    let (sw, sh) = (360., 164.);
+    let state: *mut Object = msg_send![class!(NSView), alloc];
+    let state: *mut Object = msg_send![state, initWithFrame:
+        rect((grid_area.size.w - sw) / 2., (grid_area.size.h - sh) / 2., sw, sh)];
+    set_autoresize(state, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
+    add_sub(host, state);
+    autorel(state);
+    let si: *mut Object = msg_send![class!(NSImageView), alloc];
+    let si: *mut Object = msg_send![si, initWithFrame: rect((sw - 40.) / 2., sh - 40., 40., 40.)];
+    let _: () = msg_send![si, setContentTintColor: color(C_TEXT3)];
+    add_sub(state, si);
+    autorel(si);
+    ui.state_icon = Ptr(si);
+    let st = label("", T_TITLE, C_TEXT, ALIGN_CENTER);
+    set_frame(st, rect(0., sh - 40. - SP3 - 26., sw, 26.));
+    add_sub(state, st);
     ui.status_label = Ptr(st);
+    let sbody = wrapping_label("", T_CALLOUT, C_TEXT2, ALIGN_CENTER);
+    set_frame(sbody, rect(0., sh - 40. - SP3 - 26. - SP1 - 34., sw, 34.));
+    add_sub(state, sbody);
+    ui.state_body = Ptr(sbody);
+    let sbtn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Try Again")
+        target: ui.ctl.get() action: sel!(refresh:)];
+    let _: () = msg_send![sbtn, setBezelStyle: 1isize];
+    set_frame(sbtn, rect((sw - 110.) / 2., 0., 110., 28.));
+    set_hidden(sbtn, true);
+    add_sub(state, sbtn);
+    ui.state_btn = Ptr(sbtn);
 
     // --- Player host (AVKit) + top bar + chip ---
     let ph: *mut Object = msg_send![class!(NSView), alloc];
@@ -801,4 +857,135 @@ mod tests {
 unsafe fn color_a_black_fn(a: f64) -> *mut Object {
     let b: *mut Object = msg_send![class!(NSColor), blackColor];
     msg_send![b, colorWithAlphaComponent: a]
+}
+
+// ---- Header band ----------------------------------------------------------------------
+pub(crate) static HEADER_CLASS: OnceLock<&'static Class> = OnceLock::new();
+pub(crate) unsafe fn register_header_class() {
+    let mut d = ClassDecl::new("JRHeaderView", class!(NSView)).unwrap();
+    d.add_method(sel!(layout), header_layout_cb as extern "C" fn(&mut Object, Sel));
+    d.add_method(
+        sel!(resizeSubviewsWithOldSize:),
+        header_resize_cb as extern "C" fn(&mut Object, Sel, NSSize),
+    );
+    HEADER_CLASS.set(d.register()).ok();
+}
+extern "C" fn header_layout_cb(this: &mut Object, _c: Sel) {
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSView)), layout];
+        header_layout();
+    }
+}
+extern "C" fn header_resize_cb(this: &mut Object, _c: Sel, old: NSSize) {
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSView)), resizeSubviewsWithOldSize: old];
+        header_layout();
+    }
+}
+unsafe fn text_w(v: *mut Object) -> f64 {
+    let cell: *mut Object = msg_send![v, cell];
+    let s: NSSize = msg_send![cell, cellSize];
+    s.w.ceil()
+}
+
+/// Back chevron, title (truncating), count, spinner and sort popup on one baseline row.
+pub(crate) unsafe fn header_layout() {
+    let ui = match UI.get_mut() {
+        Some(u) => u,
+        None => return,
+    };
+    let hdr = ui.header.get();
+    if hdr.is_null() {
+        return;
+    }
+    let w = bounds_of(hdr).size.w;
+    let back_vis = !is_hidden(ui.lib_back.get());
+    set_frame(ui.lib_back.get(), rect(EDGE, (HEADER_H - 28.) / 2., 28., 28.));
+    let x0 = EDGE + if back_vis { 36. } else { 0. };
+    // Sort popup, right-aligned.
+    let _: () = msg_send![ui.sort_popup.get(), sizeToFit];
+    let pf = frame_of(ui.sort_popup.get());
+    let pw = pf.size.w.max(96.);
+    let px = w - EDGE - pw;
+    set_frame(ui.sort_popup.get(), rect(px, (HEADER_H - pf.size.h) / 2., pw, pf.size.h));
+    let limit = px - SP3;
+    let spin_vis = !is_hidden(ui.spinner.get());
+    let spin_w = if spin_vis { 16. + SP2 } else { 0. };
+    let cnt_txt = read_field(ui.header_count.get());
+    let cw = if cnt_txt.is_empty() { 0. } else { text_w(ui.header_count.get()) };
+    let natural = text_w(ui.header_title.get());
+    let reserve = if cw > 0. { cw.min(160.) + SP2 } else { 0. } + spin_w;
+    let tw = natural.min((limit - x0 - reserve).max(60.));
+    set_frame(ui.header_title.get(), rect(x0, (HEADER_H - 32.) / 2., tw, 32.));
+    let cx = x0 + tw + SP2;
+    let cw = cw.min((limit - cx - spin_w).max(0.));
+    set_frame(ui.header_count.get(), rect(cx, (HEADER_H - 32.) / 2. + 3., cw, 16.));
+    set_frame(ui.spinner.get(), rect(cx + cw + if cw > 0. { SP2 } else { 0. }, (HEADER_H - 16.) / 2. + 1., 16., 16.));
+}
+
+/// "128 movies", "1 item"; the noun comes from the (single) item type.
+pub fn count_label(items: &[ListItem]) -> String {
+    let n = items.len();
+    if n == 0 {
+        return String::new();
+    }
+    let ty = items[0].item_type.as_str();
+    let same = items.iter().all(|i| i.item_type == ty);
+    let (one, many) = if same {
+        match ty {
+            "Movie" => ("movie", "movies"),
+            "Series" => ("show", "shows"),
+            "Episode" => ("episode", "episodes"),
+            "MusicAlbum" => ("album", "albums"),
+            "Audio" => ("track", "tracks"),
+            "LiveTvChannel" => ("channel", "channels"),
+            _ => ("item", "items"),
+        }
+    } else {
+        ("item", "items")
+    };
+    format!("{} {}", n, if n == 1 { one } else { many })
+}
+
+pub(crate) unsafe fn set_count(text: &str, err: bool) {
+    let ui = UI.get_mut().unwrap();
+    set_text(ui.header_count.get(), text);
+    set_label_color(ui.header_count.get(), if err { C_DANGER } else { C_TEXT2 });
+    header_layout();
+}
+
+// ---- Empty / error / loading states ------------------------------------------------
+pub(crate) unsafe fn hide_state() {
+    let ui = UI.get_mut().unwrap();
+    set_hidden(ui.state_host.get(), true);
+    set_hidden(ui.status_label.get(), true);
+}
+/// Centred message in the grid area. `retry` adds the Try Again button.
+pub(crate) unsafe fn show_state(symbol_name: &str, title: &str, body: &str, retry: bool) {
+    let ui = UI.get_mut().unwrap();
+    let img = symbol(symbol_name, 40., Weight::Regular);
+    if !img.is_null() {
+        let _: () = msg_send![ui.state_icon.get(), setImage: img];
+    }
+    set_text(ui.status_label.get(), title);
+    set_text(ui.state_body.get(), &clip_msg(body, 90));
+    set_hidden(ui.state_btn.get(), !retry);
+    set_hidden(ui.state_host.get(), false);
+    set_hidden(ui.status_label.get(), false);
+}
+
+/// Called when a load begins. `first` = a different view (skeleton), otherwise keep
+/// what is on screen and spin in the header.
+pub(crate) unsafe fn begin_load(first: bool) {
+    let ui = UI.get_mut().unwrap();
+    hide_state();
+    if first || ui.items.is_empty() {
+        ui.items.clear();
+        set_count("", false);
+        set_hidden(ui.spinner.get(), true);
+        let _: () = msg_send![ui.spinner.get(), stopAnimation: nil()];
+        grid_set_skeleton(12);
+    } else {
+        set_busy(true);
+    }
 }
