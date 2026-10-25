@@ -56,6 +56,7 @@ pub(crate) extern "C" fn kvo(
                 update_chip();
             }
             "presentationSize" => update_chip(),
+            "pictureInPicturePossible" | "pictureInPictureActive" => crate::ui::playerbar::refresh_pip_button(),
             _ => {}
         }
     }
@@ -242,6 +243,8 @@ pub fn stop_playback_ui() {
         if ui.playing.is_none() {
             return; // nothing observed / nothing to tear down
         }
+        // Picture in Picture ends with the item; the controller itself stays with the player layer.
+        crate::ui::playerbar::pip_stop();
         if !ui.pitem.get().is_null() {
             for kp in ["status", "presentationSize"] {
                 let _: () = msg_send![ui.pitem.get(),
@@ -481,7 +484,8 @@ pub fn start_playback(ps: &PlaybackStart) {
             // Audio: same AVPlayer, no video view. The library stays up with the bar below it.
             let content: *mut Object = msg_send![ui.win.get(), contentView];
             if !is_hidden(ui.player_host.get()) {
-                // Coming from video: swap the player view out.
+                // Coming from video: swap the player view out, and any Picture in Picture window with it.
+                crate::ui::playerbar::pip_stop();
                 crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
                 set_hidden(ui.player_host.get(), true);
                 set_hidden(ui.content_host.get(), false);

@@ -2234,6 +2234,28 @@ fn s_player_bar_buttons() {
         // PiP and full screen are fired too (off-screen they only count the press).
         act(sel!(togglePiP:), pip.get());
         state_check("pip button fires its action", UI.get().unwrap().pbar.pip_presses == 1);
+        // The button follows the controller for this video: enabled exactly when AVKit can start PiP.
+        // Nothing is started here, so no window appears; off-screen the press above only counted.
+        pb::refresh_pip_button();
+        let pc = UI.get().unwrap().pbar.pip_ctl.get();
+        state_check("pip controller exists for the video layer", !pc.is_null());
+        if !pc.is_null() {
+            let possible: BOOL = msg_send![pc, isPictureInPicturePossible];
+            let en: BOOL = msg_send![pip.get(), isEnabled];
+            state_check(
+                &format!("pip button enabled matches isPictureInPicturePossible (possible: {})", possible == YES),
+                (possible == YES) == (en == YES),
+            );
+            let active: BOOL = msg_send![pc, isPictureInPictureActive];
+            state_check("pip is not showing in self-test", active == NO);
+        }
+        let hid: BOOL = msg_send![pip.get(), isHidden];
+        state_check("pip button shown on this Mac", hid == NO);
+        let btn_on: BOOL = msg_send![pip.get(), isEnabled];
+        state_check("pip menu item follows the button", crate::ui::shortcuts::item_enabled("togglePiP:", 0, crate::ui::shortcuts::ALT | crate::ui::shortcuts::CMD) == (btn_on == YES));
+        state_check("pip shortcut is ⌥⌘P in the table", crate::ui::shortcuts::SHORTCUTS.iter().any(|e| {
+            e.action == "togglePiP:" && e.key == "p" && e.mods == crate::ui::shortcuts::ALT | crate::ui::shortcuts::CMD
+        }));
         act(sel!(fullscreen:), full.get());
         state_check("full screen button fires its action", UI.get().unwrap().pbar.full_presses == 1);
         // Play/pause: one press flips the rate, the next flips it back.
