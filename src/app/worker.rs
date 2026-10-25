@@ -2,6 +2,8 @@ use crate::*;
 use std::collections::VecDeque;
 use crate::app::messages::*;
 use crate::jellyfin::client::JellyfinClient;
+use crate::jellyfin::models::{DetailItem, Episode, Person, Season};
+use crate::jellyfin::urls::{build_art_url, build_image_url};
 use crate::config::{load_config, save_config, Config};
 use crate::seerr::client::{SeerrClient, SeerrError};
 
@@ -178,6 +180,53 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                         }
                         Err(e) => {
                             let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
+                        }
+                    }
+                }
+            }
+            UiCmd::OpenDetail { item_id } => {
+                if let Some(c) = &client {
+                    match c.item_detail(&item_id).await {
+                        Ok(d) => {
+                            let (view, jobs) = plan_detail(c, &d);
+                            let _ = main_tx.send(MainMsg::DetailLoaded(Box::new(view)));
+                            fetch_art(jobs, &main_tx, &poster_dir, http_poster.as_ref());
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::DetailError(format!("{}", e)));
+                        }
+                    }
+                }
+            }
+            UiCmd::Seasons { series_id } => {
+                if let Some(c) = &client {
+                    match c.seasons(&series_id).await {
+                        Ok(seasons) => {
+                            // Next Up only picks the starting season; without it the first one is shown.
+                            let next = c.next_up(&series_id).await.ok().flatten();
+                            let selected = default_season(&seasons, next.as_ref());
+                            let seasons = seasons
+                                .into_iter()
+                                .map(|s| SeasonEntry { id: s.id, name: s.name })
+                                .collect();
+                            let _ = main_tx.send(MainMsg::SeasonsLoaded { series_id, seasons, selected });
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeasonsError { series_id, message: format!("{}", e) });
+                        }
+                    }
+                }
+            }
+            UiCmd::SeasonEpisodes { series_id, season_id } => {
+                if let Some(c) = &client {
+                    match c.season_episodes(&series_id, &season_id).await {
+                        Ok(eps) => {
+                            let (rows, jobs) = plan_episodes(c, &eps);
+                            let _ = main_tx.send(MainMsg::SeasonEpisodesLoaded { series_id, season_id, episodes: rows });
+                            fetch_art(jobs, &main_tx, &poster_dir, http_poster.as_ref());
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeasonsError { series_id, message: format!("{}", e) });
                         }
                     }
                 }
@@ -721,46 +770,151 @@ pub(crate) async fn fetch_posters(
     poster_dir: &std::path::Path,
     http: Option<&reqwest::Client>,
 ) {
+    // Spawn a bounded set of concurrent poster fetches (first 200 items).
+    let jobs: Vec<(u64, String)> = items
+        .iter()
+        .take(200)
+        .filter(|it| it.has_image())
+        .map(|it| (sys_key(&it.id), build_image_url(&c.base, &it.id, &c.token, 400)))
+        .collect();
+    fetch_art(jobs, main_tx, poster_dir, http);
+}
+
+/// Download artwork jobs `(key, url)` concurrently, through the disk cache in
+/// `poster_dir`. Each image arrives as `PosterReady { key, bytes }`.
+pub(crate) fn fetch_art(
+    jobs: Vec<(u64, String)>,
+    main_tx: &UnboundedSender<MainMsg>,
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+) {
     let Some(http) = http.cloned() else {
         return;
     };
-    let client = c.clone();
-    let tx = main_tx.clone();
-    let dir = poster_dir.to_path_buf();
-    // Spawn a bounded set of concurrent poster fetches (first 200 items).
-    for it in items.iter().take(200) {
-        if !it.has_image() {
-            continue;
-        }
-        let client = client.clone();
-        let tx = tx.clone();
-        let dir = dir.clone();
-        let id = it.id.clone();
+    for (key, url) in jobs {
+        let tx = main_tx.clone();
+        let dir = poster_dir.to_path_buf();
         let http = http.clone();
         tokio::spawn(async move {
-            let key = sys_key(&id);
             let path = dir.join(format!("{:016x}.img", key));
             let bytes = match tokio::fs::read(&path).await {
                 Ok(b) => Some(b),
-                Err(_) => {
-                    let url = crate::jellyfin::urls::build_image_url(&client.base, &id, &client.token, 400);
-                    match http.get(url).send().await {
-                        Ok(r) if r.status().is_success() => match r.bytes().await {
-                            Ok(b) => {
-                                let _ = tokio::fs::write(&path, &b).await;
-                                Some(b.to_vec())
-                            }
-                            Err(_) => None,
-                        },
-                        _ => None,
-                    }
-                }
+                Err(_) => match http.get(url).send().await {
+                    Ok(r) if r.status().is_success() => match r.bytes().await {
+                        Ok(b) => {
+                            let _ = tokio::fs::write(&path, &b).await;
+                            Some(b.to_vec())
+                        }
+                        Err(_) => None,
+                    },
+                    _ => None,
+                },
             };
             if let Some(b) = bytes {
                 let _ = tx.send(MainMsg::PosterReady { key, bytes: b });
             }
         });
     }
+}
+
+/// Cast and crew shown on the detail page (the first this many of `People`).
+const MAX_PEOPLE: usize = 30;
+
+/// Turn a detail response into the page's view plus the artwork to fetch
+/// as `(key, url)` jobs. Artwork is requested only where the server has it.
+pub(crate) fn plan_detail(c: &JellyfinClient, d: &DetailItem) -> (DetailView, Vec<(u64, String)>) {
+    let mut jobs = Vec::new();
+    let poster_key = d.image_tags.as_ref().and_then(|t| t.primary.as_ref()).map(|_| sys_key(&d.id));
+    if let Some(k) = poster_key {
+        jobs.push((k, build_image_url(&c.base, &d.id, &c.token, 400)));
+    }
+    let backdrop_key = d.backdrop_tags.first().map(|_| sys_key(&format!("{}#backdrop", d.id)));
+    if let Some(k) = backdrop_key {
+        jobs.push((k, build_art_url(&c.base, &d.id, "Backdrop", 1280, &c.token)));
+    }
+    let people = d
+        .people
+        .iter()
+        .take(MAX_PEOPLE)
+        .map(|p: &Person| {
+            let image_key = match p.image_tag.as_ref() {
+                Some(_) if !p.id.is_empty() => {
+                    let k = sys_key(&p.id);
+                    jobs.push((k, build_art_url(&c.base, &p.id, "Primary", 200, &c.token)));
+                    Some(k)
+                }
+                _ => None,
+            };
+            let role = p
+                .role
+                .clone()
+                .filter(|r| !r.trim().is_empty())
+                .or_else(|| p.kind.clone().filter(|k| !k.trim().is_empty()));
+            DetailPerson { name: p.name.clone(), role, image_key }
+        })
+        .collect();
+    let played = d.user_data.as_ref().map(|u| u.played).unwrap_or(false);
+    let position = d.user_data.as_ref().map(|u| u.position_ticks).unwrap_or(0);
+    let view = DetailView {
+        id: d.id.clone(),
+        name: d.name.clone(),
+        item_type: d.item_type.clone(),
+        year: d.year,
+        official_rating: d.official_rating.clone().filter(|r| !r.trim().is_empty()),
+        community_rating: d.community_rating,
+        run_time_ticks: d.run_time_ticks,
+        genres: d.genres.clone(),
+        overview: d.overview.clone().filter(|o| !o.trim().is_empty()),
+        played,
+        resume: !played && position > 0,
+        poster_key,
+        backdrop_key,
+        people,
+    };
+    (view, jobs)
+}
+
+/// Index of the season that holds `next_up` (matched by season id, then by season number),
+/// or the first season when there is no Next Up episode or no matching season.
+pub(crate) fn default_season(seasons: &[Season], next_up: Option<&Episode>) -> usize {
+    let Some(next) = next_up else { return 0 };
+    if let Some(id) = next.season_id.as_deref() {
+        if let Some(i) = seasons.iter().position(|s| s.id == id) {
+            return i;
+        }
+    }
+    if let Some(n) = next.parent_index {
+        if let Some(i) = seasons.iter().position(|s| s.index == Some(n)) {
+            return i;
+        }
+    }
+    0
+}
+
+/// Episode rows for the series page plus their thumbnail jobs `(key, url)`.
+pub(crate) fn plan_episodes(c: &JellyfinClient, eps: &[Episode]) -> (Vec<EpisodeRow>, Vec<(u64, String)>) {
+    let mut jobs = Vec::new();
+    let rows = eps
+        .iter()
+        .map(|e| {
+            let image_key = e.has_image().then(|| sys_key(&e.id));
+            if image_key.is_some() {
+                jobs.push((sys_key(&e.id), build_image_url(&c.base, &e.id, &c.token, 400)));
+            }
+            let ud = e.user_data.clone().unwrap_or_default();
+            EpisodeRow {
+                id: e.id.clone(),
+                number: e.number,
+                name: e.name.clone(),
+                overview: e.overview.clone().filter(|o| !o.trim().is_empty()),
+                run_time_ticks: e.run_time_ticks,
+                played: ud.played,
+                position_ticks: ud.position_ticks,
+                image_key,
+            }
+        })
+        .collect();
+    (rows, jobs)
 }
 
 /// Fetch thumbnails for Seerr results through the user's Seerr server (never TMDB),
@@ -1071,9 +1225,70 @@ mod tests {
                     }
                     _ => {}
                 }
+                if id.starts_with("det-") && *id != "det-bare" {
+                    v["Name"] = "Detail Movie".into();
+                    v["Overview"] = "A detailed overview.".into();
+                    v["Genres"] = serde_json::json!(["Drama", "Thriller"]);
+                    v["CommunityRating"] = serde_json::json!(7.8);
+                    v["OfficialRating"] = "PG-13".into();
+                    v["ImageTags"] = serde_json::json!({"Primary": "tag1"});
+                    v["BackdropImageTags"] = serde_json::json!(["bd1"]);
+                    v["People"] = serde_json::json!([
+                        {"Id": "p-actor", "Name": "Ada Actor", "Role": "Lead", "Type": "Actor", "PrimaryImageTag": "pt"},
+                        {"Id": "p-dir", "Name": "Dan Director", "Role": "", "Type": "Director"},
+                        {"Id": "p-noimg", "Name": "No Image", "Role": "Extra", "Type": "Actor"}
+                    ]);
+                    match *id {
+                        "det-series" => v["Type"] = "Series".into(),
+                        "det-resume" => v["UserData"] = serde_json::json!({"Played": false, "PlaybackPositionTicks": 6_000_000_000i64}),
+                        "det-played" => v["UserData"] = serde_json::json!({"Played": true, "PlaybackPositionTicks": 0}),
+                        _ => {}
+                    }
+                }
                 json(v)
             }
-            ("GET", ["Items", _, "Images", "Primary"]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
+            ("GET", ["Shows", "NextUp"]) => {
+                let items = match r.query.get("SeriesId").map(String::as_str) {
+                    Some("sr1") => vec![serde_json::json!({"Id": "nx1", "Name": "Next", "Type": "Episode", "IndexNumber": 3, "ParentIndexNumber": 2, "SeasonId": "sea-b"})],
+                    Some("sr2") => vec![serde_json::json!({"Id": "nx2", "Name": "Next", "Type": "Episode", "IndexNumber": 1, "ParentIndexNumber": 2})],
+                    Some("sr3") => return status(500),
+                    _ => vec![],
+                };
+                json(serde_json::json!({"Items": items}))
+            }
+            ("GET", ["Shows", sid, "Seasons"]) => match *sid {
+                "noseasons" => json(serde_json::json!({"Items": []})),
+                "seasons-500" => status(500),
+                _ => json(serde_json::json!({"Items": [
+                    {"Id": "sea-a", "Name": "Season 1", "IndexNumber": 1, "Type": "Season"},
+                    {"Id": "sea-b", "Name": "Season 2", "IndexNumber": 2, "Type": "Season"}
+                ]})),
+            },
+            ("GET", ["Shows", _, "Episodes"]) => {
+                let ep = |id: &str, n: u32, season: &str, played: bool, pos: i64, image: bool| {
+                    let mut v = serde_json::json!({
+                        "Id": id, "Name": format!("Episode {}", n), "Type": "Episode", "IndexNumber": n,
+                        "ParentIndexNumber": 1, "SeasonId": season, "Overview": format!("About episode {}.", n),
+                        "RunTimeTicks": 27_000_000_000i64,
+                        "UserData": {"Played": played, "PlaybackPositionTicks": pos, "PlayCount": 0}
+                    });
+                    if image {
+                        v["ImageTags"] = serde_json::json!({"Primary": "tag1"});
+                    }
+                    v
+                };
+                match r.query.get("seasonId").map(String::as_str) {
+                    Some("sea-a") => json(serde_json::json!({"Items": [ep("a1", 1, "sea-a", false, 0, false), ep("a2", 2, "sea-a", false, 0, false)]})),
+                    Some("sea-b") => json(serde_json::json!({"Items": [
+                        ep("b1", 1, "sea-b", true, 0, false),
+                        ep("b2", 2, "sea-b", false, 6_000_000_000, true),
+                        ep("b3", 3, "sea-b", false, 0, false)
+                    ]})),
+                    Some("sea-empty") => json(serde_json::json!({"Items": []})),
+                    _ => status(500),
+                }
+            }
+            ("GET", ["Items", _, "Images", _]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
             ("POST", ["Sessions", "Playing", ..]) => status(204),
             ("POST", ["Users", _, "PlayedItems", id]) | ("DELETE", ["Users", _, "PlayedItems", id]) => {
                 if *id == "boom" {
@@ -1753,6 +1968,207 @@ mod tests {
         h.send(UiCmd::Stopped { item_id: "ch1".into(), ticks: 0 });
         h.drain_via_probe().await;
         assert_eq!(m.find("POST", "/LiveStreams/Close").len(), 1);
+    }
+
+    // ------------------------------------------------------ item detail
+    #[tokio::test]
+    async fn open_detail_builds_view_and_fetches_art() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "det-movie".into() });
+        let v = match h.next().await {
+            MainMsg::DetailLoaded(v) => *v,
+            o => panic!("{:?}", o),
+        };
+        assert_eq!(v.name, "Detail Movie");
+        assert_eq!((v.year, v.official_rating.as_deref()), (Some(2020), Some("PG-13")));
+        assert_eq!(v.community_rating, Some(7.8));
+        assert_eq!(v.genres, vec!["Drama".to_string(), "Thriller".to_string()]);
+        assert_eq!(v.overview.as_deref(), Some("A detailed overview."));
+        assert_eq!(v.run_time_ticks, Some(72_000_000_000));
+        assert!(!v.played && !v.resume);
+        let poster = sys_key("det-movie");
+        let backdrop = sys_key("det-movie#backdrop");
+        assert_eq!((v.poster_key, v.backdrop_key), (Some(poster), Some(backdrop)));
+        assert_eq!(
+            v.people,
+            vec![
+                DetailPerson { name: "Ada Actor".into(), role: Some("Lead".into()), image_key: Some(sys_key("p-actor")) },
+                DetailPerson { name: "Dan Director".into(), role: Some("Director".into()), image_key: None },
+                DetailPerson { name: "No Image".into(), role: Some("Extra".into()), image_key: None },
+            ]
+        );
+        // Artwork arrives after the facts: poster, backdrop and the one person photo.
+        let mut got = std::collections::HashSet::new();
+        while got.len() < 3 {
+            match h.next().await {
+                MainMsg::PosterReady { key, bytes } => {
+                    assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+                    got.insert(key);
+                }
+                o => panic!("{:?}", o),
+            }
+        }
+        assert_eq!(got, [poster, backdrop, sys_key("p-actor")].into_iter().collect());
+        let detail = m.find("GET", "/Users/u1/Items/det-movie");
+        assert_eq!(detail.len(), 1);
+        let fields = detail[0].query.get("Fields").cloned().unwrap_or_default();
+        for f in ["People", "Genres", "Overview"] {
+            assert!(fields.contains(f), "{fields}");
+        }
+        assert_eq!(m.find("GET", "/Items/det-movie/Images/Backdrop").len(), 1);
+        assert_eq!(m.find("GET", "/Items/p-actor/Images/Primary").len(), 1);
+        assert!(m.find("GET", "/Items/p-noimg/Images").is_empty());
+    }
+
+    #[tokio::test]
+    async fn seasons_select_next_up_season_and_load_its_episodes() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::Seasons { series_id: "sr1".into() });
+        match h.next().await {
+            MainMsg::SeasonsLoaded { series_id, seasons, selected } => {
+                assert_eq!(series_id, "sr1");
+                let names: Vec<&str> = seasons.iter().map(|s| s.name.as_str()).collect();
+                assert_eq!(names, vec!["Season 1", "Season 2"]);
+                assert_eq!(selected, 1, "Next Up is in season 2");
+            }
+            o => panic!("{:?}", o),
+        }
+        let seasons_req = m.find("GET", "/Shows/sr1/Seasons");
+        assert_eq!(seasons_req.len(), 1);
+        assert_eq!(seasons_req[0].query.get("UserId").map(String::as_str), Some("u1"));
+        let next = m.find("GET", "/Shows/NextUp");
+        assert_eq!(next[0].query.get("SeriesId").map(String::as_str), Some("sr1"));
+
+        h.send(UiCmd::SeasonEpisodes { series_id: "sr1".into(), season_id: "sea-b".into() });
+        match h.next().await {
+            MainMsg::SeasonEpisodesLoaded { series_id, season_id, episodes } => {
+                assert_eq!((series_id.as_str(), season_id.as_str()), ("sr1", "sea-b"));
+                assert_eq!(episodes.len(), 3);
+                assert!(episodes[0].played);
+                assert_eq!((episodes[0].number, episodes[0].image_key), (Some(1), None));
+                assert_eq!(episodes[1].position_ticks, 6_000_000_000);
+                assert_eq!(episodes[1].image_key, Some(sys_key("b2")));
+                assert_eq!(episodes[1].overview.as_deref(), Some("About episode 2."));
+                assert_eq!(episodes[1].run_time_ticks, Some(27_000_000_000));
+                assert_eq!(episodes[2].image_key, None);
+            }
+            o => panic!("{:?}", o),
+        }
+        // The one episode with a still gets its thumbnail after the rows.
+        match h.next().await {
+            MainMsg::PosterReady { key, bytes } => {
+                assert_eq!(key, sys_key("b2"));
+                assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+            }
+            o => panic!("{:?}", o),
+        }
+        let eps = m.find("GET", "/Shows/sr1/Episodes");
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].query.get("seasonId").map(String::as_str), Some("sea-b"));
+        assert_eq!(eps[0].query.get("UserId").map(String::as_str), Some("u1"));
+    }
+
+    #[tokio::test]
+    async fn seasons_fall_back_and_report_failures() {
+        let (_e, _m, mut h) = connected().await;
+        // Next Up without a season id: matched by season number.
+        h.send(UiCmd::Seasons { series_id: "sr2".into() });
+        assert!(matches!(h.next().await, MainMsg::SeasonsLoaded { selected: 1, .. }));
+        // Next Up request fails: the first season is shown.
+        h.send(UiCmd::Seasons { series_id: "sr3".into() });
+        assert!(matches!(h.next().await, MainMsg::SeasonsLoaded { selected: 0, .. }));
+        // No seasons at all.
+        h.send(UiCmd::Seasons { series_id: "noseasons".into() });
+        match h.next().await {
+            MainMsg::SeasonsLoaded { seasons, selected, .. } => assert!(seasons.is_empty() && selected == 0),
+            o => panic!("{:?}", o),
+        }
+        h.send(UiCmd::Seasons { series_id: "seasons-500".into() });
+        match h.next().await {
+            MainMsg::SeasonsError { series_id, message } => {
+                assert_eq!(series_id, "seasons-500");
+                assert!(message.contains("500"), "{message}");
+            }
+            o => panic!("{:?}", o),
+        }
+        h.send(UiCmd::SeasonEpisodes { series_id: "sr1".into(), season_id: "sea-boom".into() });
+        assert!(matches!(h.next().await, MainMsg::SeasonsError { .. }));
+        h.send(UiCmd::SeasonEpisodes { series_id: "sr1".into(), season_id: "sea-empty".into() });
+        match h.next().await {
+            MainMsg::SeasonEpisodesLoaded { episodes, .. } => assert!(episodes.is_empty()),
+            o => panic!("{:?}", o),
+        }
+    }
+
+    fn season_of(id: &str, index: u32) -> Season {
+        serde_json::from_value(serde_json::json!({"Id": id, "Name": id, "IndexNumber": index})).unwrap()
+    }
+    fn episode_in(season_id: Option<&str>, parent: Option<u32>) -> Episode {
+        serde_json::from_value(serde_json::json!({"Id": "e", "Name": "e", "SeasonId": season_id, "ParentIndexNumber": parent}))
+            .unwrap()
+    }
+
+    #[test]
+    fn default_season_follows_next_up() {
+        let seasons = vec![season_of("s1", 1), season_of("s2", 2), season_of("s3", 3)];
+        assert_eq!(default_season(&seasons, None), 0, "no Next Up: first season");
+        assert_eq!(default_season(&seasons, Some(&episode_in(Some("s3"), Some(3)))), 2, "by season id");
+        assert_eq!(default_season(&seasons, Some(&episode_in(None, Some(2)))), 1, "by season number");
+        assert_eq!(default_season(&seasons, Some(&episode_in(Some("gone"), Some(9)))), 0, "unknown season");
+        assert_eq!(default_season(&[], Some(&episode_in(Some("s1"), Some(1)))), 0, "no seasons");
+    }
+
+    #[tokio::test]
+    async fn detail_resume_played_and_series_kinds() {
+        let (_e, _m, mut h) = connected().await;
+        for (id, want_resume, want_played, want_ty) in
+            [("det-resume", true, false, "Movie"), ("det-played", false, true, "Movie"), ("det-series", false, false, "Series")]
+        {
+            h.send(UiCmd::OpenDetail { item_id: id.into() });
+            match h.next_nonposter().await {
+                MainMsg::DetailLoaded(v) => {
+                    assert_eq!((v.resume, v.played, v.item_type.as_str()), (want_resume, want_played, want_ty), "{id}");
+                }
+                o => panic!("{:?}", o),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_without_artwork_requests_none() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "det-bare".into() });
+        match h.next_nonposter().await {
+            MainMsg::DetailLoaded(v) => {
+                assert_eq!((v.poster_key, v.backdrop_key), (None, None));
+                assert!(v.people.is_empty() && v.genres.is_empty() && v.overview.is_none());
+                assert!(v.official_rating.is_none() && v.community_rating.is_none());
+            }
+            o => panic!("{:?}", o),
+        }
+        let rest = h.drain_via_probe().await;
+        assert!(rest.iter().all(|m| !matches!(m, MainMsg::PosterReady { .. })), "{rest:?}");
+        assert!(m.find("GET", "/Items/det-bare/Images").is_empty());
+    }
+
+    #[tokio::test]
+    async fn detail_error_is_reported() {
+        let (_e, _m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "missing".into() });
+        match h.next().await {
+            MainMsg::DetailError(e) => assert!(e.contains("HTTP 404"), "{e}"),
+            o => panic!("{:?}", o),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_detail_before_connect_is_ignored() {
+        let _env = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::OpenDetail { item_id: "det-movie".into() });
+        h.send(UiCmd::ProbeServer);
+        let got = h.drain_via_probe().await;
+        assert!(got.is_empty(), "{got:?}");
     }
 
     // -------------------------------------------------- progress / played

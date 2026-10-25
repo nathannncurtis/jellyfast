@@ -66,6 +66,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
             show_login_or_library(false);
         },
         MainMsg::ItemsLoaded { title, items, can_go_back } => unsafe {
+            crate::ui::detail::hide();
             let ui = UI.get_mut().unwrap();
             ui.items = items.clone();
             ui.cur_title = title.clone();
@@ -96,7 +97,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::PlaybackError(e) => unsafe {
             let ui = UI.get_mut().unwrap();
             set_busy(false);
-            if ui.playing.is_some() {
+            if ui.playing.is_some() || crate::ui::detail::is_open() {
                 crate::ui::player::toast(&e, Some("exclamationmark.triangle"), true);
             } else if ui.items.is_empty() {
                 grid_set_items(&[]);
@@ -104,6 +105,21 @@ pub(crate) fn handle_main(msg: MainMsg) {
             } else {
                 set_count(&clip_msg(&e, 80), true);
             }
+        },
+        MainMsg::DetailLoaded(view) => unsafe {
+            set_busy(false);
+            crate::ui::detail::show(*view);
+        },
+        MainMsg::SeasonsLoaded { series_id, seasons, selected } => {
+            crate::ui::detail::seasons_loaded(series_id, seasons, selected)
+        }
+        MainMsg::SeasonEpisodesLoaded { series_id, season_id, episodes } => {
+            crate::ui::detail::episodes_loaded(series_id, season_id, episodes)
+        }
+        MainMsg::SeasonsError { series_id, message } => crate::ui::detail::seasons_failed(series_id, message),
+        MainMsg::DetailError(e) => unsafe {
+            set_busy(false);
+            crate::ui::player::toast(&e, Some("exclamationmark.triangle"), true);
         },
         MainMsg::ServerUp => unsafe {
             retry_playback();

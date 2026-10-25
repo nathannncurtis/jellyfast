@@ -165,10 +165,16 @@ pub fn build_hls_url(
 }
 
 pub fn build_image_url(base: &str, item_id: &str, token: &str, max_w: u32) -> String {
+    build_art_url(base, item_id, "Primary", max_w, token)
+}
+
+/// Artwork of any kind: `Primary` (poster or person photo), `Backdrop`, ...
+pub fn build_art_url(base: &str, item_id: &str, kind: &str, max_w: u32, token: &str) -> String {
     format!(
-        "{}/Items/{}/Images/Primary?{}",
+        "{}/Items/{}/Images/{}?{}",
         base,
         item_id,
+        kind,
         qs(&[
             ("maxWidth", max_w.to_string()),
             ("quality", "85".into()),

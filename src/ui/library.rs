@@ -595,6 +595,7 @@ pub fn poster_ready(key: u64, bytes: &[u8]) {
                 }
             }
         }
+        crate::ui::detail::image_ready(key);
     }
 }
 

@@ -211,3 +211,133 @@ pub struct MediaStream {
     #[serde(rename = "DisplayTitle", default)]
     pub display_title: Option<String>,
 }
+
+/// One entry of an item's `People` list (cast and crew).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Person {
+    #[serde(rename = "Id", default)]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    /// Character name for actors; empty for crew.
+    #[serde(rename = "Role", default)]
+    pub role: Option<String>,
+    /// "Actor", "Director", "Writer", "GuestStar", ...
+    #[serde(rename = "Type", default)]
+    pub kind: Option<String>,
+    #[serde(rename = "PrimaryImageTag", default)]
+    pub image_tag: Option<String>,
+}
+
+/// GET /Users/{uid}/Items/{id}?Fields=... for the item detail page.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DetailItem {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "Type", default)]
+    pub item_type: String,
+    #[serde(rename = "ProductionYear", default)]
+    pub year: Option<u32>,
+    #[serde(rename = "OfficialRating", default)]
+    pub official_rating: Option<String>,
+    #[serde(rename = "CommunityRating", default)]
+    pub community_rating: Option<f64>,
+    #[serde(rename = "RunTimeTicks", default)]
+    pub run_time_ticks: Option<i64>,
+    #[serde(rename = "Genres", default)]
+    pub genres: Vec<String>,
+    #[serde(rename = "Overview", default)]
+    pub overview: Option<String>,
+    #[serde(rename = "People", default)]
+    pub people: Vec<Person>,
+    #[serde(rename = "UserData", default)]
+    pub user_data: Option<UserData>,
+    #[serde(rename = "ImageTags", default)]
+    pub image_tags: Option<ImageTags>,
+    #[serde(rename = "BackdropImageTags", default)]
+    pub backdrop_tags: Vec<String>,
+}
+
+/// One season of a series (GET /Shows/{id}/Seasons).
+#[derive(Clone, Debug, Deserialize)]
+pub struct Season {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "IndexNumber", default)]
+    pub index: Option<u32>,
+}
+
+/// One episode from /Shows/{id}/Episodes or /Shows/NextUp.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Episode {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "IndexNumber", default)]
+    pub number: Option<u32>,
+    #[serde(rename = "ParentIndexNumber", default)]
+    pub parent_index: Option<u32>,
+    #[serde(rename = "SeasonId", default)]
+    pub season_id: Option<String>,
+    #[serde(rename = "Overview", default)]
+    pub overview: Option<String>,
+    #[serde(rename = "RunTimeTicks", default)]
+    pub run_time_ticks: Option<i64>,
+    #[serde(rename = "UserData", default)]
+    pub user_data: Option<UserData>,
+    #[serde(rename = "ImageTags", default)]
+    pub image_tags: Option<ImageTags>,
+}
+
+impl Episode {
+    pub fn has_image(&self) -> bool {
+        self.image_tags.as_ref().map(|t| t.primary.is_some()).unwrap_or(false)
+    }
+}
+
+/// The `{ "Items": [...] }` envelope most Jellyfin list endpoints return.
+#[derive(Debug, Deserialize)]
+pub struct ItemsPage<T> {
+    #[serde(rename = "Items", default = "Vec::new")]
+    pub items: Vec<T>,
+}
+
+#[cfg(test)]
+mod season_model_tests {
+    use super::*;
+
+    #[test]
+    fn parses_seasons_and_episodes() {
+        let seasons: ItemsPage<Season> = serde_json::from_str(
+            r#"{"Items":[{"Id":"s1","Name":"Season 1","IndexNumber":1},{"Id":"s0","Name":"Specials","IndexNumber":0}],"TotalRecordCount":2}"#,
+        )
+        .unwrap();
+        assert_eq!(seasons.items.len(), 2);
+        assert_eq!((seasons.items[0].id.as_str(), seasons.items[0].index), ("s1", Some(1)));
+        assert_eq!(seasons.items[1].name, "Specials");
+
+        let eps: ItemsPage<Episode> = serde_json::from_str(
+            r#"{"Items":[{"Id":"e1","Name":"Pilot","IndexNumber":1,"ParentIndexNumber":1,"SeasonId":"s1",
+                "Overview":"Hello","RunTimeTicks":12000000000,
+                "UserData":{"Played":false,"PlaybackPositionTicks":3000000000},
+                "ImageTags":{"Primary":"t"}}]}"#,
+        )
+        .unwrap();
+        let e = &eps.items[0];
+        assert_eq!(e.season_id.as_deref(), Some("s1"));
+        assert_eq!((e.number, e.parent_index), (Some(1), Some(1)));
+        assert_eq!(e.user_data.as_ref().map(|u| u.position_ticks), Some(3_000_000_000));
+        assert!(e.has_image());
+    }
+
+    #[test]
+    fn missing_items_envelope_is_empty() {
+        let p: ItemsPage<Episode> = serde_json::from_str("{}").unwrap();
+        assert!(p.items.is_empty());
+    }
+}

@@ -6,3 +6,4 @@ pub mod settings;
 pub mod shell;
 pub mod shortcuts;
 pub mod nowbar;
+pub mod detail;
