@@ -1,0 +1,24 @@
+[package]
+name = "jellyfin-mac"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+objc = "0.2.7"                       # Objective-C runtime bindings (tiny, stable)
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+security-framework = "2"             # Keychain (thin binding to Security.framework)
+
+[profile.release]
+lto = true
+strip = true
+panic = "abort"
+opt-level = "z"                      # small binary; change to 3 if you want max speed
+
+[dev-dependencies]
+# Test-only: mock HTTP server + #[tokio::test]
+tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread"] }
