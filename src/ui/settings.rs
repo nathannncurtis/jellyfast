@@ -19,122 +19,155 @@ use std::os::raw::c_void;
 use std::sync::{Mutex, OnceLock};
 
 pub(crate) unsafe fn build_settings_window() {
+    use crate::ui::theme::*;
     let ui = UI.get_mut().unwrap();
+    const WIN_W: f64 = 520.;
     let w: *mut Object = msg_send![jr_window_class(), alloc];
     let w: *mut Object = msg_send![w,
-        initWithContentRect: rect(0., 0., 460., 600.)
+        initWithContentRect: rect(0., 0., WIN_W, 560.)
         styleMask: (1 | 2) as NSUInteger backing: 2usize defer: NO];
     let _: () = msg_send![w, setTitle: ns("Settings")];
     let _: () = msg_send![w, setReleasedWhenClosed: NO];
     ui.settings_win = Ptr::retained(w);
     let c: *mut Object = msg_send![w, contentView];
-    let b = bounds_of(c);
 
-    // Laid out top-down: `top` is the distance from the top edge, so rows can never land on each other.
-    const X: f64 = 20.;
-    const FULL: f64 = 420.;
-    const HALF: f64 = 200.;
-    const COL2: f64 = X + HALF + 20.;
-    const LABEL_H: f64 = 16.;
-    const FIELD_H: f64 = 24.;
-    const POPUP_H: f64 = 26.;
-    const GAP: f64 = 4.; // label to control
-    const ROW_GAP: f64 = 16.;
-    let at = |top: f64, h: f64| b.size.h - top - h; // AppKit y for a view `h` tall at `top`
-    let label = |x: f64, top: f64, wd: f64, text: &str| -> *mut Object {
-        let l = make_label(text, 12.0, false, false);
-        set_frame(l, rect(x, at(top, LABEL_H), wd, LABEL_H));
-        add_sub(c, l);
+    // Two-column form laid out top-down from a running `top`; frames are applied once the
+    // total height is known, so rows can never land on each other.
+    const LABEL_X: f64 = SP6;
+    const LABEL_W: f64 = 150.;
+    const CTRL_X: f64 = LABEL_X + LABEL_W + SP3; // 186
+    const CTRL_W: f64 = WIN_W - CTRL_X - SP6; // 310
+    const ROW_H: f64 = 28.;
+    let mut place: Vec<(*mut Object, NSRect)> = vec![]; // rect.origin.y holds `top`
+    let mut top = SP5;
+    let put = |place: &mut Vec<(*mut Object, NSRect)>, v: *mut Object, x: f64, top: f64, wd: f64, h: f64| {
+        add_sub(c, v);
+        place.push((v, rect(x, top, wd, h)));
+    };
+    let section = |place: &mut Vec<(*mut Object, NSRect)>, top: &mut f64, title: &str, first: bool| {
+        if !first {
+            *top += SP6;
+        }
+        put(place, label(title, T_BODY_EM, C_TEXT, ALIGN_LEFT), LABEL_X, *top, CTRL_X + CTRL_W - LABEL_X, 18.);
+        *top += 18. + SP1;
+        put(place, hairline(rect(0., 0., CTRL_X + CTRL_W - LABEL_X, 1.)), LABEL_X, *top, CTRL_X + CTRL_W - LABEL_X, 1.);
+        *top += 1. + SP3;
+    };
+    // A labelled row: right-aligned label vertically centred on the control.
+    let row = |place: &mut Vec<(*mut Object, NSRect)>, top: &mut f64, text: &str, ctl: *mut Object, ctl_h: f64, ctl_w: f64| -> *mut Object {
+        let l = label(text, T_BODY, C_TEXT, ALIGN_RIGHT);
+        put(place, l, LABEL_X, *top + (ROW_H - 16.) / 2., LABEL_W, 16.);
+        put(place, ctl, CTRL_X, *top + (ROW_H - ctl_h) / 2., ctl_w, ctl_h);
+        *top += ROW_H;
         l
     };
-    let field = |x: f64, top: f64, wd: f64, text: &str, placeholder: &str, secure: bool| -> (*mut Object, *mut Object) {
-        let l = label(x, top, wd, text);
-        let f = text_field(placeholder, secure);
-        set_frame(f, rect(x, at(top + LABEL_H + GAP, FIELD_H), wd, FIELD_H));
-        add_sub(c, f);
-        (l, f)
+    // Help text sits under its control, never inside the label.
+    let help = |place: &mut Vec<(*mut Object, NSRect)>, top: &mut f64, text: &str| -> *mut Object {
+        let h = wrapping_label(text, T_CAPTION, C_TEXT2, ALIGN_LEFT);
+        let cell: *mut Object = msg_send![h, cell];
+        let need: NSSize = msg_send![cell, cellSizeForBounds: rect(0., 0., CTRL_W, 1000.)];
+        let ht = need.h.ceil();
+        put(place, h, CTRL_X, *top + SP1, CTRL_W, ht);
+        *top += SP1 + ht;
+        h
     };
-    let popup = |x: f64, top: f64, wd: f64, items: &[&str]| -> *mut Object {
+    let popup = |items: &[&str]| -> *mut Object {
         let p: *mut Object = msg_send![class!(NSPopUpButton), alloc];
-        let p: *mut Object = msg_send![p, initWithFrame: rect(x, at(top, POPUP_H), wd, POPUP_H) pullsDown: NO];
+        let p: *mut Object = msg_send![p, initWithFrame: rect(0., 0., 200., 26.) pullsDown: NO];
         let arr: *mut Object = msg_send![class!(NSMutableArray), array];
         for t in items {
             let _: () = msg_send![arr, addObject: ns(t)];
         }
         let _: () = msg_send![p, addItemsWithTitles: arr];
-        add_sub(c, p);
         autorel(p)
     };
-    let field_row = LABEL_H + GAP + FIELD_H + ROW_GAP;
 
-    // ---- Jellyfin / playback ----
-    let mut top = 20.;
-    let (_, url_f) = field(X, top, FULL, "Server URL", "http://host:8096", false);
+    section(&mut place, &mut top, "Server", true);
+    let url_f = text_field("http://host:8096", false);
+    row(&mut place, &mut top, "Server URL", url_f, 24., CTRL_W);
     ui.s_url = Ptr(url_f);
-    top += field_row;
-    let (_, sub_f) = field(X, top, HALF, "Subtitle language", "eng · blank = off", false);
+
+    section(&mut place, &mut top, "Playback", false);
+    let q = popup(&["Original", "40 Mbps", "20 Mbps", "10 Mbps", "5 Mbps", "3 Mbps"]);
+    row(&mut place, &mut top, "Preferred quality", q, 26., 160.);
+    ui.s_quality = Ptr(q);
+    top += SP3;
+    let sub_f = text_field("eng", false);
+    row(&mut place, &mut top, "Subtitle language", sub_f, 24., 160.);
+    help(&mut place, &mut top, "Three-letter code, like eng. Leave empty to turn subtitles off.");
     ui.s_sub_lang = Ptr(sub_f);
-    let (_, audio_f) = field(COL2, top, HALF, "Audio language", "eng · blank = default", false);
+    top += SP3;
+    let audio_f = text_field("eng", false);
+    row(&mut place, &mut top, "Audio language", audio_f, 24., 160.);
+    help(&mut place, &mut top, "Leave empty to use the file's default.");
     ui.s_audio_lang = Ptr(audio_f);
-    top += field_row;
-    label(X, top, HALF, "Preferred quality");
-    label(COL2, top, HALF, "Appearance");
-    ui.s_quality = Ptr(popup(X, top + LABEL_H + GAP, HALF, &["Original", "40 Mbps", "20 Mbps", "10 Mbps", "5 Mbps", "3 Mbps"]));
-    ui.s_theme = Ptr(popup(COL2, top + LABEL_H + GAP, HALF, &["Match System", "Light", "Dark"]));
-    top += LABEL_H + GAP + POPUP_H + 20.;
-    add_sub(c, crate::ui::theme::hairline(rect(X, at(top, 1.), FULL, 1.)));
-    top += 1. + 16.;
 
-    // ---- Seerr ----
+    section(&mut place, &mut top, "Appearance", false);
+    let th = popup(&["System", "Light", "Dark"]);
+    row(&mut place, &mut top, "Theme", th, 26., 160.);
+    ui.s_theme = Ptr(th);
+
+    section(&mut place, &mut top, "Requests (Seerr)", false);
     let cb: *mut Object = msg_send![class!(NSButton),
-        checkboxWithTitle: ns("Enable Seerr (request movies and shows)")
+        checkboxWithTitle: ns("Enable requests")
         target: nil() action: nil()];
-    set_frame(cb, rect(X, at(top, 20.), FULL, 20.));
-    add_sub(c, cb);
+    put(&mut place, cb, CTRL_X, top + (ROW_H - 18.) / 2., CTRL_W, 18.);
+    top += ROW_H + SP3;
     ui.seerr.s_on = Ptr(cb);
-    top += 20. + 12.;
-    let (_, seerr_url_f) = field(X, top, FULL, "Seerr URL", "http://host:5055", false);
+    let seerr_url_f = text_field("http://host:5055", false);
+    row(&mut place, &mut top, "Seerr URL", seerr_url_f, 24., CTRL_W);
     ui.seerr.s_url = Ptr(seerr_url_f);
-    top += field_row;
-
-    // Sign-in mode: Jellyfin account (default) or API key. Label sits on the popup's text baseline.
-    let ml = make_label("Sign in with", 12.0, false, false);
-    set_frame(ml, rect(X, at(top + (POPUP_H - LABEL_H) / 2., LABEL_H), 90., LABEL_H));
-    add_sub(c, ml);
-    let mp = popup(X + 92., top, 220., &["Jellyfin account", "API key"]);
+    top += SP3;
+    // Sign-in mode: Jellyfin account (default) or API key.
+    let mp = popup(&["Jellyfin account", "API key"]);
     let _: () = msg_send![mp, setTarget: ui.ctl.get()];
     let _: () = msg_send![mp, setAction: sel!(seerrModeChanged:)];
+    row(&mut place, &mut top, "Sign in with", mp, 26., 200.);
     ui.seerr.s_mode = Ptr(mp);
-    top += POPUP_H + ROW_GAP;
-
-    let (ul, uf) = field(X, top, FULL, "Seerr username (your Jellyfin username)", "username", false);
+    top += SP3;
+    // Login rows and the API-key row share the same slot; apply_mode shows one group.
+    let slot = top;
+    let uf = text_field("username", false);
+    let ul = row(&mut place, &mut top, "Username", uf, 24., CTRL_W);
+    let uh = help(&mut place, &mut top, "Your Jellyfin username and password.");
+    top += SP3;
+    let pf = text_field("password", true);
+    let pl = row(&mut place, &mut top, "Password", pf, 24., CTRL_W);
+    let login_end = top;
+    top = slot;
+    let kf = text_field("API key", true);
+    let kl = row(&mut place, &mut top, "API key", kf, 24., CTRL_W);
+    let kh = help(&mut place, &mut top, "In Seerr: Settings > General > API Key.");
+    top = top.max(login_end);
     ui.seerr.s_user = Ptr(uf);
-    let (kl, kf) = field(X, top, FULL, "Seerr API key (Seerr > Settings > General)", "API key", true);
-    ui.seerr.s_key = Ptr(kf);
-    let (pl, pf) = field(X, top + field_row, FULL, "Seerr password (your Jellyfin password)", "password", true);
     ui.seerr.s_pass = Ptr(pf);
-    ui.seerr.s_login_group = vec![Ptr(ul), Ptr(uf), Ptr(pl), Ptr(pf)];
-    ui.seerr.s_key_group = vec![Ptr(kl), Ptr(kf)];
-    top += 2. * field_row;
+    ui.seerr.s_key = Ptr(kf);
+    ui.seerr.s_login_group = vec![Ptr(ul), Ptr(uf), Ptr(uh), Ptr(pl), Ptr(pf)];
+    ui.seerr.s_key_group = vec![Ptr(kl), Ptr(kf), Ptr(kh)];
 
-    let seerr_st = make_label("", 12.0, false, false);
-    set_frame(seerr_st, rect(X, at(top, 32.), FULL, 32.));
-    let _: () = msg_send![seerr_st, setTextColor: color_named("secondary")];
-    let _: () = msg_send![seerr_st.cell(), setLineBreakMode: 0usize]; // wrap
-    add_sub(c, seerr_st);
+    top += SP2;
+    let seerr_st = wrapping_label("", T_CALLOUT, C_TEXT2, ALIGN_LEFT);
+    put(&mut place, seerr_st, CTRL_X, top, CTRL_W, 32.);
+    top += 32.;
     ui.seerr.s_status = Ptr(seerr_st);
-    crate::ui::seerr::apply_mode();
 
+    // Buttons: bottom-right, 88 wide, SP3 apart, SP5 from the edges.
+    top += SP5;
     let save: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Save")
         target: ui.ctl.get() action: sel!(saveSettings:)];
-    set_frame(save, rect(b.size.w - 116., 16., 96., 32.));
     let _: () = msg_send![save, setKeyEquivalent: ns("\r")];
-    add_sub(c, save);
+    put(&mut place, save, WIN_W - SP5 - 88., top, 88., 32.);
     let cancel: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Cancel")
         target: ui.ctl.get() action: sel!(cancelSettings:)];
-    set_frame(cancel, rect(b.size.w - 222., 16., 96., 32.));
     let _: () = msg_send![cancel, setKeyEquivalent: ns("\u{1b}")];
-    add_sub(c, cancel);
+    put(&mut place, cancel, WIN_W - SP5 - 88. - SP3 - 88., top, 88., 32.);
+    top += 32. + SP5;
+
+    let _: () = msg_send![w, setContentSize: size(WIN_W, top)];
+    for (v, r) in place {
+        set_frame(v, rect(r.origin.x, top - r.origin.y - r.size.h, r.size.w, r.size.h));
+    }
+    crate::ui::seerr::apply_mode();
 }
 
 pub(crate) unsafe fn settings_fill(cfg: &Config) {

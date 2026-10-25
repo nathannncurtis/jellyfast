@@ -1020,6 +1020,24 @@ fn s_settings_cancel() {
             log("  cancelling settings sheet");
             audit("settings sheet");
             let ui = UI.get_mut().unwrap();
+            {
+                let ctl_x: Vec<f64> = [ui.s_url.get(), ui.s_quality.get(), ui.s_sub_lang.get(), ui.s_audio_lang.get(), ui.s_theme.get(), ui.seerr.s_url.get(), ui.seerr.s_mode.get()]
+                    .iter()
+                    .map(|&v| { let f: NSRect = msg_send![v, frame]; f.origin.x })
+                    .collect();
+                state_check("settings controls share x = 186", ctl_x.iter().all(|&x| (x - 186.0).abs() < 0.5));
+                let c: *mut Object = msg_send![ui.settings_win.get(), contentView];
+                let subs: *mut Object = msg_send![c, subviews];
+                let n: usize = msg_send![subs, count];
+                let mut esc = false;
+                for i in 0..n {
+                    let v: *mut Object = msg_send![subs, objectAtIndex: i];
+                    if is_kind(v, class!(NSButton)) && to_str(msg_send![v, title]) == "Cancel" {
+                        esc = to_str(msg_send![v, keyEquivalent]) == "\u{1b}";
+                    }
+                }
+                state_check("cancel has Escape", esc);
+            }
             state_check("seerr fields filled", read_field(ui.seerr.s_url.get()) == "https://seerr.example");
             set_text(ui.seerr.s_key.get(), "typed-then-cancelled");
             act(sel!(cancelSettings:), nil());
