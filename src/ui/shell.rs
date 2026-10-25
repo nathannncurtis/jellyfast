@@ -95,9 +95,9 @@ pub(crate) unsafe fn build_window_and_ui() {
     let settings_btn: *mut Object = msg_send![class!(NSButton),
         buttonWithTitle: ns("Settings…") target: ui.ctl.get() action: sel!(showSettings:)];
     add_arranged(stack, settings_btn, 0.0, 2.0);
-    let searx_btn: *mut Object = msg_send![class!(NSButton),
-        buttonWithTitle: ns("Find something new (SearXNG)") target: ui.ctl.get() action: sel!(openSearx:)];
-    add_arranged(stack, searx_btn, 0.0, 2.0);
+    let seerr_btn: *mut Object = msg_send![class!(NSButton),
+        buttonWithTitle: ns("Request something new…") target: ui.ctl.get() action: sel!(openSeerr:)];
+    add_arranged(stack, seerr_btn, 0.0, 2.0);
 
     // Header row (title + sort)
     let ht = make_label("Library", 20.0, true, false);
@@ -401,7 +401,7 @@ pub(crate) unsafe fn build_menus() {
     add(go_menu, "Refresh", sel!(refresh:), "r", CMD, 0);
     add(go_menu, "Back", sel!(goBack:), "[", CMD, 0);
     add(go_menu, "Sign Out", sel!(signOut:), "l", ALT, 0);
-    add(go_menu, "Find something new (SearXNG)", sel!(openSearx:), "k", ALT, 0);
+    add(go_menu, "Request Something New…", sel!(openSeerr:), "k", ALT, 0);
 }
 
 pub(crate) unsafe fn separator() -> *mut Object {

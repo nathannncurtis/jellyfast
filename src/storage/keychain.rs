@@ -23,6 +23,11 @@ pub fn seerr_account(url: &str) -> String {
     format!("seerr@{}", url)
 }
 
+/// Keychain account for the Seerr sign-in password (Jellyfin-account login).
+pub fn seerr_login_account(url: &str) -> String {
+    format!("seerr-login@{}", url)
+}
+
 // Test seam: unit tests never touch the real Keychain; they use this
 // in-memory map instead. Compiled out of non-test builds.
 #[cfg(test)]
@@ -208,6 +213,61 @@ pub fn delete_seerr_key(url: &str) {
     let _ = fs::remove_file(fallback_seerr_path());
 }
 
+fn fallback_seerr_login_path() -> PathBuf {
+    config_dir().join("seerr-login.fallback")
+}
+
+/// Store the Seerr sign-in password (Keychain; 0600 base64 fallback file only
+/// if the Keychain write fails). `url` should be the normalized base URL.
+pub fn store_seerr_login(url: &str, password: &str) {
+    #[cfg(test)]
+    {
+        test_store(|m| m.insert(seerr_login_account(url), password.to_string()));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        use security_framework::passwords;
+        match passwords::set_generic_password(KEYCHAIN_SERVICE, &seerr_login_account(url), password.as_bytes()) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(fallback_seerr_login_path());
+            }
+            Err(e) => {
+                tracing::warn!("Keychain unavailable ({}); using documented fallback file for Seerr login", e);
+                store_fallback_at(&fallback_seerr_login_path(), password);
+            }
+        }
+    }
+}
+
+pub fn load_seerr_login(url: &str) -> Option<String> {
+    #[cfg(test)]
+    {
+        return test_store(|m| m.get(&seerr_login_account(url)).cloned());
+    }
+    #[cfg(not(test))]
+    {
+        use security_framework::passwords;
+        match passwords::get_generic_password(KEYCHAIN_SERVICE, &seerr_login_account(url)) {
+            Ok(t) if !t.is_empty() => String::from_utf8(t).ok(),
+            _ => load_fallback_at(&fallback_seerr_login_path()),
+        }
+    }
+}
+
+pub fn delete_seerr_login(url: &str) {
+    #[cfg(test)]
+    {
+        test_store(|m| m.remove(&seerr_login_account(url)));
+    }
+    #[cfg(not(test))]
+    {
+        use security_framework::passwords;
+        let _ = passwords::delete_generic_password(KEYCHAIN_SERVICE, &seerr_login_account(url));
+    }
+    let _ = fs::remove_file(fallback_seerr_login_path());
+}
+
 fn set_owner_only(p: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o600));
@@ -275,6 +335,20 @@ mod tests {
         assert_eq!(load_seerr_key("http://s:5055"), None);
         assert_eq!(load_seerr_key("http://other").as_deref(), Some("k2"));
         assert_eq!(load_token("http://s:5055").as_deref(), Some("jf-token"));
+    }
+
+    #[test]
+    fn seerr_login_password_is_separate_from_key_and_token() {
+        let _e = TestEnv::new();
+        assert_eq!(seerr_login_account("http://s"), "seerr-login@http://s");
+        store_seerr_key("http://s", "api");
+        assert_eq!(load_seerr_login("http://s"), None);
+        store_seerr_login("http://s", "pw");
+        assert_eq!(load_seerr_login("http://s").as_deref(), Some("pw"));
+        assert_eq!(load_seerr_key("http://s").as_deref(), Some("api"));
+        delete_seerr_login("http://s");
+        assert_eq!(load_seerr_login("http://s"), None);
+        assert_eq!(load_seerr_key("http://s").as_deref(), Some("api"));
     }
 
     #[test]

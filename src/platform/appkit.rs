@@ -273,8 +273,7 @@ pub struct Ui {
     pub retry_pending: bool,
     pub s_quality: Ptr,
     pub s_theme: Ptr,
-    pub s_searx_on: Ptr,
-    pub s_searx_url: Ptr,
+    pub seerr: crate::ui::seerr::SeerrUi,
     // Rust-side state
     pub rows: Vec<(*mut Object, String)>, // sidebar row buttons + view ids
     pub views: Vec<(String, String, Option<String>)>,
@@ -404,7 +403,10 @@ pub(crate) unsafe fn register_classes() {
             (sel!(showSettings:), show_settings as Extern0),
             (sel!(signOut:), sign_out as Extern0),
             (sel!(refresh:), refresh as Extern0),
-            (sel!(openSearx:), open_searx as Extern0),
+            (sel!(openSeerr:), crate::ui::seerr::open_seerr as Extern0),
+            (sel!(seerrRequest:), crate::ui::seerr::seerr_request as Extern0),
+            (sel!(seerrTab:), crate::ui::seerr::seerr_tab as Extern0),
+            (sel!(seerrModeChanged:), crate::ui::seerr::seerr_mode_changed as Extern0),
             (sel!(goBack:), go_back as Extern0),
             (sel!(viewSelected:), view_selected as Extern0),
             (sel!(itemClicked:), item_clicked as Extern0),
@@ -423,6 +425,7 @@ pub(crate) unsafe fn register_classes() {
         d.add_method(sel!(observeValueForKeyPath:ofObject:change:context:), kvo as KvoFn);
         d.register();
     }
+    crate::ui::seerr::register_seerr_classes();
     // Poster grid container
     {
         let mut d = ClassDecl::new("JRGridView", class!(NSView)).unwrap();
@@ -540,6 +543,9 @@ pub(crate) extern "C" fn cancel_settings(_t: &mut Object, _c: Sel, _s: *mut Obje
 }
 pub(crate) unsafe fn close_settings() {
     let ui = UI.get_mut().unwrap();
+    set_text(ui.seerr.s_key.get(), "");
+    set_text(ui.seerr.s_pass.get(), "");
+    ui.seerr.pending = None;
     let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
     if !attached.is_null() {
         let _: () = msg_send![ui.win.get(), endSheet: ui.settings_win.get()];
@@ -555,9 +561,6 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         s.max_bitrate_kbps = [0u64, 40_000, 20_000, 10_000, 5_000, 3_000][q.clamp(0, 5) as usize];
         let th: NSInteger = msg_send![ui.s_theme.get(), indexOfSelectedItem];
         s.theme = ["system", "light", "dark"][th.clamp(0, 2) as usize].to_string();
-        let searx_on: NSInteger = msg_send![ui.s_searx_on.get(), state];
-        s.searx_enabled = searx_on != 0;
-        s.searx_url = read_field(ui.s_searx_url.get());
         let new_url = read_field(ui.s_url.get());
         let url_changed = match &ui.cfg.server_url {
             Some(u) => u != &new_url && !new_url.is_empty(),
@@ -569,12 +572,53 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         }
         crate::config::save_config(&ui.cfg);
         apply_theme();
-        close_settings();
-        if url_changed {
-            let _ = ui.ui_tx.send(UiCmd::SaveSettings {
-                settings: ui.cfg.settings.clone(),
-                reconnect: true,
+        // SaveSettings replaces the worker's whole Settings, so it goes first;
+        // ui.cfg.settings carries the last *confirmed* Seerr values. SaveSeerr
+        // follows and wins for seerr_enabled/seerr_url.
+        let _ = ui.ui_tx.send(UiCmd::SaveSettings {
+            settings: ui.cfg.settings.clone(),
+            reconnect: url_changed,
+        });
+        let seerr_on: NSInteger = msg_send![ui.seerr.s_on.get(), state];
+        let seerr_on = seerr_on != 0;
+        let seerr_url = read_field(ui.seerr.s_url.get()).trim().to_string();
+        let mode: NSInteger = msg_send![ui.seerr.s_mode.get(), indexOfSelectedItem];
+        let (user, pass, key) = if mode == 0 {
+            (
+                read_field(ui.seerr.s_user.get()).trim().to_string(),
+                read_field_secure(ui.seerr.s_pass.get()),
+                String::new(),
+            )
+        } else {
+            (String::new(), String::new(), read_field_secure(ui.seerr.s_key.get()))
+        };
+        let secret_typed = !pass.is_empty() || !key.trim().is_empty();
+        let cur = &ui.cfg.settings;
+        let seerr_dirty = seerr_on != cur.seerr_enabled
+            || (seerr_on && (seerr_url != cur.seerr_url || user != cur.seerr_username))
+            || (!seerr_on && !seerr_url.is_empty() && seerr_url != cur.seerr_url)
+            || secret_typed;
+        if seerr_on && mode == 0 && user.is_empty() && seerr_dirty {
+            // Nothing to validate against; keep the sheet open and say why.
+            set_text(ui.seerr.s_status.get(), "Enter your Jellyfin username to sign in to Seerr.");
+            return;
+        }
+        if seerr_dirty {
+            // Keep the sheet open: it shows the SeerrStatus reply.
+            ui.seerr.pending = Some((seerr_on, seerr_url.clone(), user.clone()));
+            set_text(ui.seerr.s_status.get(), if seerr_on { "Checking connection…" } else { "Saving…" });
+            let _ = ui.ui_tx.send(UiCmd::SaveSeerr {
+                enabled: seerr_on,
+                url: seerr_url,
+                username: user,
+                password: if pass.is_empty() { None } else { Some(pass) },
+                api_key: if key.trim().is_empty() { None } else { Some(key) },
             });
+            // never keep secrets in the UI
+            set_text(ui.seerr.s_key.get(), "");
+            set_text(ui.seerr.s_pass.get(), "");
+        } else {
+            close_settings();
         }
     }
 }
@@ -604,11 +648,6 @@ pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
                 let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
             }
         }
-    }
-}
-pub(crate) extern "C" fn open_searx(_t: &mut Object, _c: Sel, _s: *mut Object) {
-    unsafe {
-        crate::search_integration::open_searx_dialog();
     }
 }
 pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Object) {
@@ -711,7 +750,9 @@ pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Objec
     unsafe {
         let ui = UI.get_mut().unwrap();
         let obj: *mut Object = msg_send![note, object];
-        if obj == ui.search.get() {
+        if obj == ui.seerr.search.get() && !obj.is_null() {
+            crate::ui::seerr::search_changed();
+        } else if obj == ui.search.get() {
             let q = read_field(ui.search.get());
             if q.trim().is_empty() {
                 if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
@@ -915,8 +956,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         retry_pending: false,
         s_quality: Ptr(nil()),
         s_theme: Ptr(nil()),
-        s_searx_on: Ptr(nil()),
-        s_searx_url: Ptr(nil()),
+        seerr: crate::ui::seerr::SeerrUi::new(),
         rows: vec![],
         views: vec![],
         items: vec![],
@@ -951,61 +991,6 @@ pub fn set_busy(b: bool) {
             None => return,
         };
         set_hidden(ui.spinner.get(), !b);
-    }
-}
-
-pub fn open_searx_prompt() {
-    unsafe {
-        let ui = match UI.get_mut() {
-            Some(u) => u,
-            None => return,
-        };
-        if !ui.cfg.settings.searx_enabled {
-            set_chip_in_login("SearXNG is disabled — enable it in Settings.", false);
-            return;
-        }
-        let base = ui.cfg.settings.searx_url.trim().to_string();
-        if base.is_empty() {
-            set_chip_in_login("Set your SearXNG URL in Settings first.", false);
-            return;
-        }
-        let alert: *mut Object = msg_send![class!(NSAlert), alloc];
-        let alert: *mut Object = msg_send![alert, init];
-        let _: () = msg_send![alert, setMessageText: ns("Search the web")];
-        let _: () = msg_send![alert,
-            setInformativeText: ns("Query to send to your SearXNG instance:")];
-        let input: *mut Object = msg_send![class!(NSTextField), alloc];
-        let input: *mut Object = msg_send![input, initWithFrame: rect(0., 0., 260., 24.)];
-        let _: () = msg_send![alert, setAccessoryView: input];
-        let _: () = msg_send![alert, addButtonWithTitle: ns("Search")];
-        let _: () = msg_send![alert, addButtonWithTitle: ns("Cancel")];
-        let resp: i64 = msg_send![alert, runModal];
-        if resp == 1000 {
-            let q = to_str(msg_send![input, stringValue]);
-            if !q.trim().is_empty() {
-                let url = format!(
-                    "{}/search?q={}",
-                    base.trim_end_matches('/'),
-                    crate::jellyfin::urls::enc(&q)
-                );
-                let u: *mut Object = msg_send![class!(NSURL), URLWithString: ns(&url)];
-                if !u.is_null() {
-                    let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-                    let _: BOOL = msg_send![ws, openURL: u];
-                }
-            }
-        }
-        let _: () = msg_send![input, release];
-        let _: () = msg_send![alert, release];
-    }
-}
-pub(crate) fn set_chip_in_login(msg: &str, _err: bool) {
-    unsafe {
-        let ui = match UI.get_mut() {
-            Some(u) => u,
-            None => return,
-        };
-        let _: () = msg_send![ui.login_err.get(), setStringValue: ns(msg)];
     }
 }
 

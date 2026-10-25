@@ -63,7 +63,7 @@
 //!   src/ui/login.rs, settings.rs ← login card & settings sheet in UI section
 //!   src/app/controller.rs    ← SECTION: Application Controller (message pump)
 //!   src/app/worker.rs        ← SECTION: Background Worker (tokio loop)
-//!   src/search_integration.rs← SECTION: SearXNG Integration
+//!   src/ui/seerr.rs          ← SECTION: Seerr request window
 //!   `mod sys` is the only unsafe code; everything else is safe Rust under
 //!   #![deny(unsafe_code)].
 //!
@@ -149,7 +149,6 @@ pub mod app;
 pub mod config;
 pub mod jellyfin;
 pub mod platform;
-pub mod search_integration;
 pub mod seerr;
 pub mod storage;
 pub mod transcode;

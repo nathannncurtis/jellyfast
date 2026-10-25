@@ -17,13 +17,18 @@ pub struct Req {
 pub struct Resp {
     pub status: u16,
     pub body: String,
+    pub headers: Vec<(String, String)>,
 }
 impl Resp {
     pub fn json(status: u16, v: serde_json::Value) -> Resp {
-        Resp { status, body: v.to_string() }
+        Resp { status, body: v.to_string(), headers: vec![] }
     }
     pub fn text(status: u16, s: &str) -> Resp {
-        Resp { status, body: s.to_string() }
+        Resp { status, body: s.to_string(), headers: vec![] }
+    }
+    pub fn with_header(mut self, k: &str, v: &str) -> Resp {
+        self.headers.push((k.into(), v.into()));
+        self
     }
 }
 
@@ -122,9 +127,11 @@ pub async fn start(handler: impl Fn(&Req) -> Resp + Send + Sync + 'static) -> Mo
                 let req = Req { method, path: pct_decode(path), raw_target: target.clone(), query, headers, body };
                 log.lock().unwrap().push(req.clone());
                 let resp = handler(&req);
+                let extra: String = resp.headers.iter().map(|(k, v)| format!("{}: {}\r\n", k, v)).collect();
                 let head = format!(
-                    "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {} X\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
                     resp.status,
+                    extra,
                     resp.body.len()
                 );
                 let _ = sock.write_all(head.as_bytes()).await;
@@ -192,5 +199,48 @@ pub fn default_route(r: &Req) -> Resp {
         ("GET", "/api/v1/movie/27205") => Resp::json(200, serde_json::json!({"id": 27205, "title": "Inception", "releaseDate": "2010-07-16", "posterPath": "/inc.jpg"})),
         ("GET", "/api/v1/tv/1399") => Resp::json(200, serde_json::json!({"id": 1399, "name": "Game of Thrones", "firstAirDate": "2011-04-17", "posterPath": "/got.jpg"})),
         _ => Resp::json(404, serde_json::json!({"message": "not found"})),
+    }
+}
+
+/// Knobs for [`login_route`].
+#[derive(Clone, Default)]
+pub struct LoginState {
+    /// Bumping this invalidates every previously issued session cookie.
+    pub epoch: Arc<std::sync::atomic::AtomicU32>,
+    /// While true the login endpoint rejects everyone.
+    pub deny_login: Arc<std::sync::atomic::AtomicBool>,
+}
+impl LoginState {
+    pub fn expire_sessions(&self) {
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Fake Seerr that authenticates by Jellyfin login (`user` / `pass`) and a
+/// `connect.sid=s<epoch>` session cookie; API keys are not accepted. Everything
+/// behind authentication is delegated to [`default_route`].
+pub fn login_route(user: &'static str, pass: &'static str, st: LoginState) -> impl Fn(&Req) -> Resp + Send + Sync + 'static {
+    use std::sync::atomic::Ordering::SeqCst;
+    move |r: &Req| {
+        let epoch = st.epoch.load(SeqCst);
+        if r.method == "POST" && r.path == "/api/v1/auth/jellyfin" {
+            let b: serde_json::Value = serde_json::from_str(&r.body).unwrap_or_default();
+            if st.deny_login.load(SeqCst) || b["username"] != user || b["password"] != pass {
+                return Resp::json(401, serde_json::json!({"message": "Invalid credentials"}));
+            }
+            return Resp::json(200, serde_json::json!({"id": 1, "displayName": "Nathan"}))
+                .with_header("Set-Cookie", &format!("connect.sid=s{}; Path=/; HttpOnly", epoch))
+                .with_header("Set-Cookie", "locale=en; Path=/");
+        }
+        if r.method == "GET" && r.path == "/api/v1/status" {
+            return default_route(r);
+        }
+        let ok = r.headers.get("cookie").map(|c| c.contains(&format!("connect.sid=s{}", epoch))).unwrap_or(false);
+        if !ok {
+            return Resp::json(403, serde_json::json!({"message": "You do not have permission to access this endpoint"}));
+        }
+        let mut r2 = r.clone();
+        r2.headers.insert("x-api-key".into(), "good-key".into());
+        default_route(&r2)
     }
 }

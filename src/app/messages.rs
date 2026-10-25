@@ -72,11 +72,15 @@ pub enum UiCmd {
     },
     /// The signed-in Seerr user's recent requests, newest first.
     SeerrRequests,
-    /// Validate the connection, then persist. `api_key: None` (or blank)
-    /// reuses the key already stored in the Keychain for this URL.
+    /// Validate the connection, then persist. A non-blank `username` selects
+    /// Jellyfin-account sign-in (`password: None`/blank reuses the Keychain
+    /// password for this URL); a blank one selects API-key mode (`api_key:
+    /// None`/blank reuses the stored key).
     SaveSeerr {
         enabled: bool,
         url: String,
+        username: String,
+        password: Option<String>,
         api_key: Option<String>,
     },
     QuitSaving,
@@ -146,12 +150,10 @@ pub struct Settings {
     /// (account "seerr@<url>"), never here.
     #[serde(default)]
     pub seerr_url: String,
-    // TODO(seerr-ui): remove after UI wiring (kept only so platform/ui still compile)
-    #[serde(skip)]
-    pub searx_enabled: bool,
-    // TODO(seerr-ui): remove after UI wiring
-    #[serde(skip)]
-    pub searx_url: String,
+    /// Non-empty = sign in with a Jellyfin account (password in the Keychain,
+    /// account `seerr-login@<url>`); empty = API-key mode.
+    #[serde(default)]
+    pub seerr_username: String,
 }
 fn default_sub_lang() -> String {
     String::new()
@@ -170,14 +172,13 @@ mod tests {
     }
 
     #[test]
-    fn seerr_settings_default_and_old_searx_ignored() {
-        let s: Settings = serde_json::from_str(r#"{"searx_enabled":true,"searx_url":"https://s.x"}"#).unwrap();
+    fn seerr_settings_default_and_unknown_keys_ignored() {
+        let s: Settings = serde_json::from_str(r#"{"legacy_flag":true,"legacy_url":"https://s.x"}"#).unwrap();
         assert!(!s.seerr_enabled && s.seerr_url.is_empty());
-        assert!(!s.searx_enabled && s.searx_url.is_empty());
         let s: Settings = serde_json::from_str(r#"{"seerr_enabled":true,"seerr_url":"http://h:5055"}"#).unwrap();
         assert!(s.seerr_enabled);
         let j = serde_json::to_string(&s).unwrap();
-        assert!(j.contains("seerr_url") && !j.contains("searx"));
+        assert!(j.contains("seerr_url") );
         assert!(!j.contains("api_key"));
     }
 }
