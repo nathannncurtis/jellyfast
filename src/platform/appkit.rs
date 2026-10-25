@@ -345,6 +345,14 @@ pub struct Ui {
     pub retry_pending: bool,
     pub s_quality: Ptr,
     pub s_theme: Ptr,
+    pub s_theme_note: Ptr,
+    pub s_light: Ptr,
+    pub s_dark: Ptr,
+    /// Ids behind each popup item (an empty id is a separator).
+    pub s_theme_ids: Vec<String>,
+    pub s_light_ids: Vec<String>,
+    pub s_dark_ids: Vec<String>,
+    pub s_follow: crate::ui::settings::FollowLayout,
     pub s_lib_pop: Ptr,
     pub s_lib_show: Ptr,
     pub s_lib_up: Ptr,
@@ -521,6 +529,9 @@ pub(crate) unsafe fn register_classes() {
             (sel!(markWatched:), mark_watched as Extern0),
             (sel!(markUnwatched:), mark_unwatched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
+            (sel!(themePicked:), crate::ui::settings::theme_picked as Extern0),
+            (sel!(openThemesFolder:), open_themes_folder as Extern0),
+            (sel!(reloadThemes:), reload_themes_action as Extern0),
             (sel!(connectClicked:), connect_clicked as Extern0),
             (sel!(toggleApiKey:), toggle_api_key as Extern0),
             (sel!(saveSettings:), save_settings as Extern0),
@@ -739,8 +750,9 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         s.audio_lang = read_field(ui.s_audio_lang.get());
         let q: NSInteger = msg_send![ui.s_quality.get(), indexOfSelectedItem];
         s.max_bitrate_kbps = [0u64, 40_000, 20_000, 10_000, 5_000, 3_000][q.clamp(0, 5) as usize];
-        let th: NSInteger = msg_send![ui.s_theme.get(), indexOfSelectedItem];
-        s.theme = ["system", "light", "dark"][th.clamp(0, 2) as usize].to_string();
+        s.theme = popup_choice(ui.s_theme.get(), &ui.s_theme_ids, "system");
+        s.system_light = popup_choice(ui.s_light.get(), &ui.s_light_ids, &s.system_light);
+        s.system_dark = popup_choice(ui.s_dark.get(), &ui.s_dark_ids, &s.system_dark);
         // Compare display forms: the field shows a bare host, while the stored
         // URL carries a resolved scheme. The worker resolves and stores the URL.
         let new_url = read_field(ui.s_url.get()).trim().to_string();
@@ -975,6 +987,27 @@ pub(crate) extern "C" fn mark_unwatched(_t: &mut Object, _c: Sel, sender: *mut O
         }
     }
 }
+/// Settings: open the themes folder in Finder. A no-op under the self-test.
+pub(crate) extern "C" fn open_themes_folder(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    if std::env::var_os("JELLYFAST_SELFTEST").is_some() {
+        return;
+    }
+    unsafe {
+        let dir = crate::ui::palettes::themes_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let u: *mut Object = msg_send![class!(NSURL), fileURLWithPath: ns(&dir.to_string_lossy())];
+        let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let _: BOOL = msg_send![ws, openURL: u];
+    }
+}
+
+/// Rescan the themes folder (Settings button or the App menu) without restarting.
+pub(crate) extern "C" fn reload_themes_action(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        crate::ui::shell::reload_themes();
+    }
+}
+
 pub(crate) extern "C" fn open_in_web(_t: &mut Object, _c: Sel, sender: *mut Object) {
     // The self-test sets fake server URLs; never open a real browser tab for them.
     if std::env::var_os("JELLYFAST_SELFTEST").is_some() {
@@ -1251,6 +1284,13 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         retry_pending: false,
         s_quality: Ptr(nil()),
         s_theme: Ptr(nil()),
+        s_theme_note: Ptr(nil()),
+        s_light: Ptr(nil()),
+        s_dark: Ptr(nil()),
+        s_theme_ids: Vec::new(),
+        s_light_ids: Vec::new(),
+        s_dark_ids: Vec::new(),
+        s_follow: Default::default(),
         s_lib_pop: Ptr(nil()),
         s_lib_show: Ptr(nil()),
         s_lib_up: Ptr(nil()),

@@ -395,6 +395,7 @@ pub(crate) unsafe fn build_window_and_ui() {
         selector: sel!(jrTick:) userInfo: nil() repeats: YES];
     ui.timer = Ptr(timer);
 
+    load_themes();
     apply_theme();
     // Launch state: only the login card (the library chrome is hidden until a
     // session exists); `app_did_finish_launch` turns it into a connecting state.
@@ -405,25 +406,116 @@ pub(crate) unsafe fn add_arranged(stack: *mut Object, v: *mut Object, _top: CGFl
     let _: () = msg_send![stack, addArrangedSubview: v];
 }
 
+/// Apply the saved Appearance, Theme and Accent app-wide. Safe to call again at any
+/// time: colours resolve through the active palette, so live views repaint.
+/// Note shown on the Settings Theme row when the selection fell back (missing or invalid
+/// palette, or a palette of the wrong base). Empty when all is well.
+pub(crate) static THEME_NOTE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// Dark state the last `apply_theme` resolved under Follow system (polled by `sync_system_appearance`).
+static SYSTEM_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Theme setting in effect. Self-test only: JELLYFAST_APPEARANCE=light|dark pins
+/// Follow system to that appearance, so screenshots can be taken per mode. A chosen
+/// theme is never overridden.
+unsafe fn theme_selection(ui: &crate::platform::appkit::Ui) -> String {
+    let cfg = if ui.cfg.settings.theme.is_empty() { "system".to_string() } else { ui.cfg.settings.theme.clone() };
+    if cfg != "system" {
+        return cfg;
+    }
+    let forced = if crate::app::selftest::enabled() { std::env::var("JELLYFAST_APPEARANCE").ok() } else { None };
+    forced.filter(|f| f == "light" || f == "dark").unwrap_or(cfg)
+}
+
+/// Whether the system (or self-test) appearance is dark right now.
+unsafe fn effective_is_dark() -> bool {
+    let app = NSApp_obj();
+    let ap: *mut Object = msg_send![app, effectiveAppearance];
+    if ap.is_null() {
+        return false;
+    }
+    let name: *mut Object = msg_send![ap, name];
+    !name.is_null() && to_str(name).contains("Dark")
+}
+
+unsafe fn NSApp_obj() -> *mut Object {
+    msg_send![class!(NSApplication), sharedApplication]
+}
+
+/// Apply the saved Appearance and Theme app-wide: the palette, the NSApp appearance and
+/// a repaint of every window. Safe to call at any time; playback is not touched.
 pub(crate) unsafe fn apply_theme() {
     let ui = UI.get_mut().unwrap();
-    // Self-test only: JELLYFAST_APPEARANCE=light|dark pins the appearance for screenshots.
-    let forced = if crate::app::selftest::enabled() { std::env::var("JELLYFAST_APPEARANCE").ok() } else { None };
-    let theme = forced.unwrap_or_else(|| ui.cfg.settings.theme.clone());
-    let appearance: *mut Object = match theme.as_str() {
-        "light" => {
-            let a: *mut Object =
-                msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameAqua")];
-            a
-        }
-        "dark" => {
-            let a: *mut Object =
-                msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameDarkAqua")];
-            a
-        }
-        _ => nil(),
+    let sel = theme_selection(ui);
+    let cache = ui.cfg.palette_cache.clone();
+    let app = ui.app.get();
+    let (pick, want) = if sel == "system" {
+        // Follow macOS: drop any override first so the effective appearance is the system's.
+        let _: () = msg_send![app, setAppearance: nil()];
+        let dark = effective_is_dark();
+        SYSTEM_DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+        let s = &ui.cfg.settings;
+        let pick = if dark {
+            if s.system_dark.is_empty() { "dark".to_string() } else { s.system_dark.clone() }
+        } else if s.system_light.is_empty() {
+            "light".to_string()
+        } else {
+            s.system_light.clone()
+        };
+        (pick, Some(dark))
+    } else {
+        (sel.clone(), None)
     };
-    let _: () = msg_send![ui.app.get(), setAppearance: appearance];
+    let r = crate::ui::palettes::resolve(&pick, want, &cache);
+    crate::ui::theme::set_active(r.theme.as_ref());
+    if let Ok(mut n) = THEME_NOTE.lock() {
+        *n = r.note.clone().unwrap_or_default();
+    }
+    if want.is_none() {
+        let ap = if r.dark { "NSAppearanceNameDarkAqua" } else { "NSAppearanceNameAqua" };
+        let a: *mut Object = msg_send![class!(NSAppearance), appearanceNamed: ns(ap)];
+        let _: () = msg_send![app, setAppearance: a];
+    }
+    // Same-appearance swaps (Midnight to Warm) do not notify views, so repaint every
+    // window's tree by hand. Layers re-resolve their colours in that pass.
+    let wins: *mut Object = msg_send![app, windows];
+    let n: usize = msg_send![wins, count];
+    for i in 0..n {
+        let w: *mut Object = msg_send![wins, objectAtIndex: i];
+        let cv: *mut Object = msg_send![w, contentView];
+        crate::ui::theme::refresh_appearance_tree(cv);
+    }
+}
+
+/// Seed and scan the palette folder, keeping last accepted palettes in the config cache.
+/// Saves the config only when the cache actually changed.
+pub(crate) unsafe fn load_themes() {
+    let ui = UI.get_mut().unwrap();
+    let before = ui.cfg.palette_cache.clone();
+    let n = crate::ui::palettes::load_all(&mut ui.cfg.palette_cache);
+    tracing::info!("themes: {n} palette(s) loaded");
+    if ui.cfg.palette_cache != before {
+        crate::config::save_config_keeping_session(&ui.cfg);
+    }
+}
+
+/// Rescan palettes, re-apply the theme, and refresh the Settings pickers.
+pub(crate) unsafe fn reload_themes() {
+    load_themes();
+    apply_theme();
+    let ui = UI.get_mut().unwrap();
+    crate::ui::settings::fill_theme_popups(&ui.cfg);
+}
+
+/// Called from the 1 s UI tick: under Follow system, switch palettes when macOS flips
+/// between light and dark. Cheap; does nothing otherwise.
+pub(crate) unsafe fn sync_system_appearance() {
+    let ui = UI.get_mut().unwrap();
+    if theme_selection(ui) != "system" {
+        return;
+    }
+    if effective_is_dark() != SYSTEM_DARK.load(std::sync::atomic::Ordering::Relaxed) {
+        apply_theme();
+    }
 }
 
 /// Native menu bar, generated from `ui::shortcuts::SHORTCUTS`.
@@ -512,7 +604,7 @@ pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, ta
     let cls = *ROW_CLASS.get().unwrap();
     let row: *mut Object = msg_send![cls, alloc];
     let row: *mut Object = msg_send![row, initWithFrame: rect(0., 0., w, SIDEBAR_ROW_H)];
-    let bg = surface(rect(0., 0., w, SIDEBAR_ROW_H), C_FILL_SEL, R_ROW);
+    let bg = surface(rect(0., 0., w, SIDEBAR_ROW_H), C_FILL_ACTIVE, R_ROW);
     let _: () = msg_send![bg, setTransparent: YES];
     set_autoresize(bg, RESIZE_W | RESIZE_H);
     add_sub(row, bg);
@@ -864,8 +956,7 @@ mod tests {
 }
 
 unsafe fn color_a_black_fn(a: f64) -> *mut Object {
-    let b: *mut Object = msg_send![class!(NSColor), blackColor];
-    msg_send![b, colorWithAlphaComponent: a]
+    crate::ui::theme::color_a(crate::ui::theme::Col::Scrim, a)
 }
 
 // ---- Header band ----------------------------------------------------------------------

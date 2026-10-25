@@ -68,6 +68,9 @@ pub struct Config {
     /// `None` means Name.
     #[serde(default)]
     pub sort_by: Option<String>,
+    /// Last accepted JSON text per palette id, used when a palette file goes missing or invalid.
+    #[serde(default)]
+    pub palette_cache: std::collections::BTreeMap<String, String>,
 }
 
 fn default_remember_me() -> bool {
@@ -92,6 +95,7 @@ impl Default for Config {
             sort_by: None,
             layout_mode: None,
             home_section: None,
+            palette_cache: Default::default(),
         }
     }
 }

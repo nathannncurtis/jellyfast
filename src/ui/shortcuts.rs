@@ -47,6 +47,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     // Application
     s("App", "About Jellyfast", "showAbout:", "", 0, 0),
     s("App", "Settings…", "showSettings:", ",", CMD, 0),
+    s("App", "Reload Themes", "reloadThemes:", "", 0, 0),
     s("App", "Quit Jellyfast", "terminate:", "q", CMD, 0),
     // Text editing (standard Edit menu; nil target, so the first responder gets them)
     s("Edit", "Undo", "undo:", "z", CMD, 0),
@@ -105,7 +106,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
 ];
 
 /// Actions that exist without a key equivalent on purpose.
-pub(crate) const EXEMPT_ACTIONS: &[&str] = &["showAbout:"];
+pub(crate) const EXEMPT_ACTIONS: &[&str] = &["showAbout:", "reloadThemes:"];
 
 /// Actions that only make sense while something is playing; they grey out when idle.
 const PLAYBACK_ACTIONS: &[&str] = &[

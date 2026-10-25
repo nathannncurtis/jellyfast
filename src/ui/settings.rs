@@ -111,9 +111,39 @@ pub(crate) unsafe fn build_settings_window() {
     ui.s_audio_lang = Ptr(audio_f);
 
     section(&mut place, &mut top, "Appearance", false);
-    let th = popup(&["System", "Light", "Dark"]);
-    row(&mut place, &mut top, "Theme", th, 26., 160.);
+    let th = popup(&["Follow system"]);
+    row(&mut place, &mut top, "Theme", th, 26., 200.);
+    let _: () = msg_send![th, setTarget: ui.ctl.get()];
+    let _: () = msg_send![th, setAction: sel!(themePicked:)];
     ui.s_theme = Ptr(th);
+    let note = wrapping_label("", T_CAPTION, C_TEXT2, ALIGN_LEFT);
+    put(&mut place, note, CTRL_X, top, CTRL_W, 30.);
+    top += 30. + SP2;
+    ui.s_theme_note = Ptr(note);
+    // Follow system only: a light and a dark picker. Hidden (and the rows below shifted)
+    // by `set_follow_rows` when a single theme is chosen.
+    let sub_top0 = top;
+    let sub_start = place.len();
+    let lp = popup(&["Jellyfast Light"]);
+    row(&mut place, &mut top, "Light mode theme", lp, 26., 200.);
+    ui.s_light = Ptr(lp);
+    top += SP2;
+    let dp = popup(&["Jellyfast Dark"]);
+    row(&mut place, &mut top, "Dark mode theme", dp, 26., 200.);
+    ui.s_dark = Ptr(dp);
+    top += SP2;
+    let sub_end = place.len();
+    let sub_h = top - sub_top0;
+    // Theme folder: always visible, under the pickers.
+    let folder_btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Open themes folder")
+        target: ui.ctl.get() action: sel!(openThemesFolder:)];
+    let _: () = msg_send![folder_btn, setBezelStyle: 1isize];
+    put(&mut place, folder_btn, CTRL_X, top, 160., 24.);
+    let reload_btn: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Reload themes")
+        target: ui.ctl.get() action: sel!(reloadThemes:)];
+    let _: () = msg_send![reload_btn, setBezelStyle: 1isize];
+    put(&mut place, reload_btn, CTRL_X + 170., top, 120., 24.);
+    top += 24. + SP3;
 
     // Libraries: pick one, then reorder it or hide it. Filled from the server views on open.
     section(&mut place, &mut top, "Libraries", false);
@@ -207,6 +237,24 @@ pub(crate) unsafe fn build_settings_window() {
     top += 32. + SP5;
 
     let _: () = msg_send![w, setContentSize: size(WIN_W, top)];
+    ui.s_follow = FollowLayout {
+        items: place
+            .iter()
+            .enumerate()
+            .map(|(i, (v, r))| LayoutItem {
+                v: Ptr(*v),
+                t: r.origin.y,
+                x: r.origin.x,
+                w: r.size.w,
+                h: r.size.h,
+                sub: i >= sub_start && i < sub_end,
+                below: i >= sub_end,
+            })
+            .collect(),
+        sub_h,
+        base_h: top,
+        cur_h: top,
+    };
     for (v, r) in place {
         set_frame(v, rect(r.origin.x, top - r.origin.y - r.size.h, r.size.w, r.size.h));
     }
@@ -229,12 +277,7 @@ pub(crate) unsafe fn settings_fill(cfg: &Config) {
         _ => 5,
     };
     let _: () = msg_send![ui.s_quality.get(), selectItemAtIndex: q_idx as NSInteger];
-    let t_idx = match cfg.settings.theme.as_str() {
-        "light" => 1usize,
-        "dark" => 2,
-        _ => 0,
-    };
-    let _: () = msg_send![ui.s_theme.get(), selectItemAtIndex: t_idx as NSInteger];
+    fill_theme_popups(cfg);
     let l_idx = if cfg.layout_mode == Some(crate::config::LayoutMode::Unified) { 1isize } else { 0 };
     let _: () = msg_send![ui.s_layout.get(), selectItemAtIndex: l_idx];
     let _: () = msg_send![ui.seerr.s_on.get(), setState: cfg.settings.seerr_enabled as NSInteger];
@@ -362,4 +405,132 @@ pub(crate) unsafe fn commit_library_prefs() {
     ui.cfg.hidden_libraries = hidden.clone();
     let _ = ui.ui_tx.send(UiCmd::SaveLibraries { order, hidden });
     crate::ui::shell::apply_library_prefs();
+}
+
+/// One Settings row as laid out, so the Follow-system pickers can be shown or hidden
+/// and everything below them moved without rebuilding the window.
+pub(crate) struct LayoutItem {
+    pub v: Ptr,
+    /// Distance from the top of the content view.
+    pub t: f64,
+    pub x: f64,
+    pub w: f64,
+    pub h: f64,
+    /// One of the two Follow-system picker rows (label or popup).
+    pub sub: bool,
+    /// Sits below the picker rows, so it moves up when they are hidden.
+    pub below: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct FollowLayout {
+    pub items: Vec<LayoutItem>,
+    pub sub_h: f64,
+    pub base_h: f64,
+    pub cur_h: f64,
+}
+
+/// Append a saved selection the popup does not list (a missing palette), so the picker
+/// still shows what is in effect.
+fn with_saved(mut items: Vec<(String, String)>, selected: &str, cache: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
+    if selected.is_empty() || items.iter().any(|(id, _)| id == selected) {
+        return items;
+    }
+    let name = crate::ui::palettes::find(selected, cache)
+        .map(|(t, _)| t.name)
+        .unwrap_or_else(|| format!("{selected} (missing)"));
+    items.push((selected.to_string(), name));
+    items
+}
+
+/// Fill a popup from `(id, name)` pairs (an empty id is a separator) and select `selected`.
+unsafe fn fill_popup(p: *mut Object, items: &[(String, String)], ids: &mut Vec<String>, selected: &str) {
+    let _: () = msg_send![p, removeAllItems];
+    ids.clear();
+    let mut idx = 0usize;
+    for (id, name) in items {
+        if id.is_empty() {
+            let menu: *mut Object = msg_send![p, menu];
+            let sep: *mut Object = msg_send![class!(NSMenuItem), separatorItem];
+            let _: () = msg_send![menu, addItem: sep];
+        } else {
+            let _: () = msg_send![p, addItemWithTitle: ns(name)];
+            if id == selected {
+                idx = ids.len();
+            }
+        }
+        ids.push(id.clone());
+    }
+    let _: () = msg_send![p, selectItemAtIndex: idx as NSInteger];
+}
+
+/// Repopulate the Theme, Light-mode and Dark-mode pickers from the palette registry,
+/// select the saved choices, show the fallback note, and show or hide the Follow-system
+/// pickers. Called on open, after Reload themes and after Save.
+pub(crate) unsafe fn fill_theme_popups(cfg: &Config) {
+    let ui = UI.get_mut().unwrap();
+    let cache = &cfg.palette_cache;
+    let cur = if cfg.settings.theme.is_empty() { "system".to_string() } else { cfg.settings.theme.clone() };
+    let top = with_saved(crate::ui::palettes::theme_choices(), &cur, cache);
+    let mut theme_ids = std::mem::take(&mut ui.s_theme_ids);
+    fill_popup(ui.s_theme.get(), &top, &mut theme_ids, &cur);
+    ui.s_theme_ids = theme_ids;
+
+    let light_sel = if cfg.settings.system_light.is_empty() { "light".to_string() } else { cfg.settings.system_light.clone() };
+    let dark_sel = if cfg.settings.system_dark.is_empty() { "dark".to_string() } else { cfg.settings.system_dark.clone() };
+    let light = with_saved(crate::ui::palettes::mode_choices(false), &light_sel, cache);
+    let mut light_ids = std::mem::take(&mut ui.s_light_ids);
+    fill_popup(ui.s_light.get(), &light, &mut light_ids, &light_sel);
+    ui.s_light_ids = light_ids;
+    let dark = with_saved(crate::ui::palettes::mode_choices(true), &dark_sel, cache);
+    let mut dark_ids = std::mem::take(&mut ui.s_dark_ids);
+    fill_popup(ui.s_dark.get(), &dark, &mut dark_ids, &dark_sel);
+    ui.s_dark_ids = dark_ids;
+
+    let note = crate::ui::shell::THEME_NOTE.lock().map(|n| n.clone()).unwrap_or_default();
+    set_text(ui.s_theme_note.get(), &note);
+    set_follow_rows(cur == "system");
+}
+
+/// Show or hide the Follow-system picker rows. Hiding moves the rows below them up and
+/// shrinks the window from the top, so the layout stays tight in both states.
+pub(crate) unsafe fn set_follow_rows(show: bool) {
+    let ui = UI.get_mut().unwrap();
+    let f = &mut ui.s_follow;
+    if f.items.is_empty() {
+        return;
+    }
+    let delta = if show { 0. } else { -f.sub_h };
+    let new_h = f.base_h + delta;
+    for it in &f.items {
+        let t = if it.below { it.t + delta } else { it.t };
+        if it.sub {
+            let _: () = msg_send![it.v.get(), setHidden: if show { NO } else { YES }];
+        }
+        set_frame(it.v.get(), rect(it.x, new_h - t - it.h, it.w, it.h));
+    }
+    let dh = new_h - f.cur_h;
+    if dh.abs() > 0.5 {
+        let win = ui.settings_win.get();
+        let fr: NSRect = msg_send![win, frame];
+        let nf = rect(fr.origin.x, fr.origin.y - dh, fr.size.w, fr.size.h + dh);
+        let _: () = msg_send![win, setFrame: nf display: YES animate: NO];
+    }
+    f.cur_h = new_h;
+}
+
+/// Theme popup action: Follow system shows the Light/Dark mode pickers.
+pub(crate) extern "C" fn theme_picked(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let i: NSInteger = msg_send![ui.s_theme.get(), indexOfSelectedItem];
+        let id = ui.s_theme_ids.get(i.max(0) as usize).cloned().unwrap_or_default();
+        set_follow_rows(id == "system");
+    }
+}
+
+/// Selected id of a theme-style popup, or `fallback` when nothing valid is selected.
+pub(crate) unsafe fn popup_choice(p: *mut Object, ids: &[String], fallback: &str) -> String {
+    let i: NSInteger = msg_send![p, indexOfSelectedItem];
+    ids.get(i.max(0) as usize).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| fallback.to_string())
 }

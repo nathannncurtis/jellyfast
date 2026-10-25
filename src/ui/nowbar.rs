@@ -225,8 +225,7 @@ pub(crate) unsafe fn build(content_host: *mut Object, b: NSRect) {
 }
 
 unsafe fn cg_white(alpha: f64) -> *mut Object {
-    let c: *mut Object = msg_send![class!(NSColor), colorWithWhite: 1.0f64 alpha: alpha];
-    msg_send![c, CGColor]
+    crate::ui::theme::cg_a(crate::ui::theme::Col::OnMedia, alpha)
 }
 
 /// Pure layout of the bar's controls for a bar `w` wide. Returns, in order:

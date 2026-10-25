@@ -151,7 +151,7 @@ pub(crate) unsafe fn build_cell_keyed(
 
     // Shadow host (no masking) + clipped art layer.
     let host = new_layer();
-    let _: () = msg_send![host, setShadowColor: black_cg()];
+    let _: () = msg_send![host, setShadowColor: cg(Col::Shadow)];
     let _: () = msg_send![host, setShadowOpacity: SH_REST.opacity];
     let _: () = msg_send![host, setShadowRadius: SH_REST.radius];
     let _: () = msg_send![host, setShadowOffset: size(0., SH_REST.dy)];
