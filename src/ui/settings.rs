@@ -22,7 +22,7 @@ pub(crate) unsafe fn build_settings_window() {
     let ui = UI.get_mut().unwrap();
     let w: *mut Object = msg_send![jr_window_class(), alloc];
     let w: *mut Object = msg_send![w,
-        initWithContentRect: rect(0., 0., 460., 620.)
+        initWithContentRect: rect(0., 0., 460., 600.)
         styleMask: (1 | 2) as NSUInteger backing: 2usize defer: NO];
     let _: () = msg_send![w, setTitle: ns("Settings")];
     let _: () = msg_send![w, setReleasedWhenClosed: NO];
@@ -30,101 +30,100 @@ pub(crate) unsafe fn build_settings_window() {
     let c: *mut Object = msg_send![w, contentView];
     let b = bounds_of(c);
 
-    let mk = |y: f64, label: &str, placeholder: &str| -> *mut Object {
-        let l = make_label(label, 12.0, false, false);
-        set_frame(l, rect(20., b.size.h - y - 16., 200., 14.));
+    // Laid out top-down: `top` is the distance from the top edge, so rows can never land on each other.
+    const X: f64 = 20.;
+    const FULL: f64 = 420.;
+    const HALF: f64 = 200.;
+    const COL2: f64 = X + HALF + 20.;
+    const LABEL_H: f64 = 16.;
+    const FIELD_H: f64 = 24.;
+    const POPUP_H: f64 = 26.;
+    const GAP: f64 = 4.; // label to control
+    const ROW_GAP: f64 = 16.;
+    let at = |top: f64, h: f64| b.size.h - top - h; // AppKit y for a view `h` tall at `top`
+    let label = |x: f64, top: f64, wd: f64, text: &str| -> *mut Object {
+        let l = make_label(text, 12.0, false, false);
+        set_frame(l, rect(x, at(top, LABEL_H), wd, LABEL_H));
         add_sub(c, l);
-        let f = text_field(placeholder, false);
-        set_frame(f, rect(20., b.size.h - y - 40., 420., 24.));
-        add_sub(c, f);
-        f
+        l
     };
-    let url_f = mk(24.0, "Server URL", "http://host:8096");
-    ui.s_url = Ptr(url_f);
-    let sub_f = mk(84.0, "Preferred subtitle language (e.g. eng, empty = off)", "eng");
-    ui.s_sub_lang = Ptr(sub_f);
-    let audio_f = mk(204.0, "Preferred audio language (e.g. eng, empty = default)", "eng");
-    ui.s_audio_lang = Ptr(audio_f);
-    let seerr_url_f = mk(296.0, "Seerr URL", "http://host:5055");
-    ui.seerr.s_url = Ptr(seerr_url_f);
-
-    // Sign-in mode: Jellyfin account (default) or API key.
-    let ml = make_label("Sign in with", 12.0, false, false);
-    set_frame(ml, rect(20., b.size.h - 360. - 16., 90., 14.));
-    add_sub(c, ml);
-    let mp: *mut Object = msg_send![class!(NSPopUpButton), alloc];
-    let mp: *mut Object = msg_send![mp, initWithFrame: rect(112., b.size.h - 360. - 22., 220., 26.) pullsDown: NO];
-    let arr: *mut Object = msg_send![class!(NSMutableArray), array];
-    for t in ["Jellyfin account", "API key"] {
-        let _: () = msg_send![arr, addObject: ns(t)];
-    }
-    let _: () = msg_send![mp, addItemsWithTitles: arr];
-    let _: () = msg_send![mp, setTarget: ui.ctl.get()];
-    let _: () = msg_send![mp, setAction: sel!(seerrModeChanged:)];
-    add_sub(c, mp);
-    autorel(mp);
-    ui.seerr.s_mode = Ptr(mp);
-
-    let field_at = |y: f64, label: &str, placeholder: &str, secure: bool| -> (*mut Object, *mut Object) {
-        let l = make_label(label, 12.0, false, false);
-        set_frame(l, rect(20., b.size.h - y - 16., 300., 14.));
-        add_sub(c, l);
+    let field = |x: f64, top: f64, wd: f64, text: &str, placeholder: &str, secure: bool| -> (*mut Object, *mut Object) {
+        let l = label(x, top, wd, text);
         let f = text_field(placeholder, secure);
-        set_frame(f, rect(20., b.size.h - y - 40., 420., 24.));
+        set_frame(f, rect(x, at(top + LABEL_H + GAP, FIELD_H), wd, FIELD_H));
         add_sub(c, f);
         (l, f)
     };
-    let (ul, uf) = field_at(396.0, "Seerr username (your Jellyfin username)", "username", false);
+    let popup = |x: f64, top: f64, wd: f64, items: &[&str]| -> *mut Object {
+        let p: *mut Object = msg_send![class!(NSPopUpButton), alloc];
+        let p: *mut Object = msg_send![p, initWithFrame: rect(x, at(top, POPUP_H), wd, POPUP_H) pullsDown: NO];
+        let arr: *mut Object = msg_send![class!(NSMutableArray), array];
+        for t in items {
+            let _: () = msg_send![arr, addObject: ns(t)];
+        }
+        let _: () = msg_send![p, addItemsWithTitles: arr];
+        add_sub(c, p);
+        autorel(p)
+    };
+    let field_row = LABEL_H + GAP + FIELD_H + ROW_GAP;
+
+    // ---- Jellyfin / playback ----
+    let mut top = 20.;
+    let (_, url_f) = field(X, top, FULL, "Server URL", "http://host:8096", false);
+    ui.s_url = Ptr(url_f);
+    top += field_row;
+    let (_, sub_f) = field(X, top, HALF, "Subtitle language", "eng · blank = off", false);
+    ui.s_sub_lang = Ptr(sub_f);
+    let (_, audio_f) = field(COL2, top, HALF, "Audio language", "eng · blank = default", false);
+    ui.s_audio_lang = Ptr(audio_f);
+    top += field_row;
+    label(X, top, HALF, "Preferred quality");
+    label(COL2, top, HALF, "Appearance");
+    ui.s_quality = Ptr(popup(X, top + LABEL_H + GAP, HALF, &["Original", "40 Mbps", "20 Mbps", "10 Mbps", "5 Mbps", "3 Mbps"]));
+    ui.s_theme = Ptr(popup(COL2, top + LABEL_H + GAP, HALF, &["Match System", "Light", "Dark"]));
+    top += LABEL_H + GAP + POPUP_H + 20.;
+    add_sub(c, crate::ui::theme::hairline(rect(X, at(top, 1.), FULL, 1.)));
+    top += 1. + 16.;
+
+    // ---- Seerr ----
+    let cb: *mut Object = msg_send![class!(NSButton),
+        checkboxWithTitle: ns("Enable Seerr (request movies and shows)")
+        target: nil() action: nil()];
+    set_frame(cb, rect(X, at(top, 20.), FULL, 20.));
+    add_sub(c, cb);
+    ui.seerr.s_on = Ptr(cb);
+    top += 20. + 12.;
+    let (_, seerr_url_f) = field(X, top, FULL, "Seerr URL", "http://host:5055", false);
+    ui.seerr.s_url = Ptr(seerr_url_f);
+    top += field_row;
+
+    // Sign-in mode: Jellyfin account (default) or API key. Label sits on the popup's text baseline.
+    let ml = make_label("Sign in with", 12.0, false, false);
+    set_frame(ml, rect(X, at(top + (POPUP_H - LABEL_H) / 2., LABEL_H), 90., LABEL_H));
+    add_sub(c, ml);
+    let mp = popup(X + 92., top, 220., &["Jellyfin account", "API key"]);
+    let _: () = msg_send![mp, setTarget: ui.ctl.get()];
+    let _: () = msg_send![mp, setAction: sel!(seerrModeChanged:)];
+    ui.seerr.s_mode = Ptr(mp);
+    top += POPUP_H + ROW_GAP;
+
+    let (ul, uf) = field(X, top, FULL, "Seerr username (your Jellyfin username)", "username", false);
     ui.seerr.s_user = Ptr(uf);
-    let (pl, pf) = field_at(452.0, "Seerr password (your Jellyfin password)", "password", true);
-    ui.seerr.s_pass = Ptr(pf);
-    let (kl, kf) = field_at(396.0, "Seerr API key (Seerr > Settings > General)", "API key", true);
+    let (kl, kf) = field(X, top, FULL, "Seerr API key (Seerr > Settings > General)", "API key", true);
     ui.seerr.s_key = Ptr(kf);
+    let (pl, pf) = field(X, top + field_row, FULL, "Seerr password (your Jellyfin password)", "password", true);
+    ui.seerr.s_pass = Ptr(pf);
     ui.seerr.s_login_group = vec![Ptr(ul), Ptr(uf), Ptr(pl), Ptr(pf)];
     ui.seerr.s_key_group = vec![Ptr(kl), Ptr(kf)];
+    top += 2. * field_row;
 
     let seerr_st = make_label("", 12.0, false, false);
-    set_frame(seerr_st, rect(20., b.size.h - 548., 420., 32.));
+    set_frame(seerr_st, rect(X, at(top, 32.), FULL, 32.));
     let _: () = msg_send![seerr_st, setTextColor: color_named("secondary")];
     let _: () = msg_send![seerr_st.cell(), setLineBreakMode: 0usize]; // wrap
     add_sub(c, seerr_st);
     ui.seerr.s_status = Ptr(seerr_st);
     crate::ui::seerr::apply_mode();
-
-    let ql = make_label("Preferred quality", 12.0, false, false);
-    set_frame(ql, rect(20., b.size.h - 144. - 16., 200., 14.));
-    add_sub(c, ql);
-    let q: *mut Object = msg_send![class!(NSPopUpButton), alloc];
-    let q: *mut Object = msg_send![q, initWithFrame: rect(20., b.size.h - 168., 220., 26.) pullsDown: NO];
-    let arr: *mut Object = msg_send![class!(NSMutableArray), array];
-    for t in ["Original", "40 Mbps", "20 Mbps", "10 Mbps", "5 Mbps", "3 Mbps"] {
-        let _: () = msg_send![arr, addObject: ns(t)];
-    }
-    let _: () = msg_send![q, addItemsWithTitles: arr];
-    add_sub(c, q);
-    autorel(q);
-    ui.s_quality = Ptr(q);
-
-    let tl = make_label("Appearance", 12.0, false, false);
-    set_frame(tl, rect(260., b.size.h - 144. - 16., 200., 14.));
-    add_sub(c, tl);
-    let th: *mut Object = msg_send![class!(NSPopUpButton), alloc];
-    let th: *mut Object = msg_send![th, initWithFrame: rect(260., b.size.h - 168., 180., 26.) pullsDown: NO];
-    let arr: *mut Object = msg_send![class!(NSMutableArray), array];
-    for t in ["Match System", "Light", "Dark"] {
-        let _: () = msg_send![arr, addObject: ns(t)];
-    }
-    let _: () = msg_send![th, addItemsWithTitles: arr];
-    add_sub(c, th);
-    autorel(th);
-    ui.s_theme = Ptr(th);
-
-    let cb: *mut Object = msg_send![class!(NSButton),
-        checkboxWithTitle: ns("Enable Seerr (request movies and shows)")
-        target: nil() action: nil()];
-    set_frame(cb, rect(20., b.size.h - 268., 420., 20.));
-    add_sub(c, cb);
-    ui.seerr.s_on = Ptr(cb);
 
     let save: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Save")
         target: ui.ctl.get() action: sel!(saveSettings:)];
@@ -134,6 +133,7 @@ pub(crate) unsafe fn build_settings_window() {
     let cancel: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Cancel")
         target: ui.ctl.get() action: sel!(cancelSettings:)];
     set_frame(cancel, rect(b.size.w - 222., 16., 96., 32.));
+    let _: () = msg_send![cancel, setKeyEquivalent: ns("\u{1b}")];
     add_sub(c, cancel);
 }
 

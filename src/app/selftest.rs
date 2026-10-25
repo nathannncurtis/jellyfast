@@ -366,6 +366,57 @@ unsafe fn audit_view(v: *mut Object, issues: &mut Vec<String>) {
         }
     }
 }
+/// Cross-container overlap: every visible, on-canvas text item compared in window coordinates,
+/// so labels in different subviews that collide on screen are caught too.
+unsafe fn collect_text_windowrects(v: *mut Object, out: &mut Vec<(*mut Object, NSRect)>) {
+    if !visible(v) {
+        return;
+    }
+    if is_text_item(v) && !is_hit_target(v) {
+        let txt = if is_kind(v, class!(NSButton)) { to_str(msg_send![v, title]) } else { to_str(msg_send![v, stringValue]) };
+        let vr: NSRect = msg_send![v, visibleRect];
+        if !txt.is_empty() && vr.size.w > 1.0 && vr.size.h > 1.0 {
+            let bb: NSRect = msg_send![v, bounds];
+            let r: NSRect = msg_send![v, convertRect: bb toView: nil()];
+            out.push((v, r));
+        }
+    }
+    if is_kind(v, class!(NSControl)) {
+        return; // a control's internal subviews (e.g. NSButtonTextField) are part of it
+    }
+    let subs: *mut Object = msg_send![v, subviews];
+    let n: usize = msg_send![subs, count];
+    for i in 0..n {
+        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        collect_text_windowrects(c, out);
+    }
+}
+unsafe fn audit_global_overlap(win: *mut Object, issues: &mut Vec<String>) {
+    let content: *mut Object = msg_send![win, contentView];
+    let mut items = vec![];
+    collect_text_windowrects(content, &mut items);
+    for i in 0..items.len() {
+        for j in (i + 1)..items.len() {
+            let ((va, a), (vb, b)) = (items[i], items[j]);
+            let anc_a: BOOL = msg_send![va, isDescendantOf: vb];
+            let anc_b: BOOL = msg_send![vb, isDescendantOf: va];
+            let sa: *mut Object = msg_send![va, superview];
+            let sb: *mut Object = msg_send![vb, superview];
+            if anc_a == YES || anc_b == YES || sa == sb {
+                continue; // siblings are covered by audit_view
+            }
+            let ox = (a.origin.x + a.size.w).min(b.origin.x + b.size.w) - a.origin.x.max(b.origin.x);
+            let oy = (a.origin.y + a.size.h).min(b.origin.y + b.size.h) - a.origin.y.max(b.origin.y);
+            if ox > 1.0 && oy > 1.0 {
+                issues.push(format!(
+                    "overlap (cross-view): {} x {} at window ({:.0},{:.0} {:.0}x{:.0}) / ({:.0},{:.0} {:.0}x{:.0})",
+                    describe(va), describe(vb),
+                    a.origin.x, a.origin.y, a.size.w, a.size.h, b.origin.x, b.origin.y, b.size.w, b.size.h
+                ));
+            }
+        }
+    }
+}
 /// Traffic-light collision: any visible text in the window's content that sits under a standard button.
 unsafe fn audit_traffic(win: *mut Object, issues: &mut Vec<String>) {
     let content: *mut Object = msg_send![win, contentView];
@@ -439,21 +490,25 @@ fn shot(tag: &str, idx: usize, win: *mut Object) {
         Ok(d) if !d.is_empty() => d,
         _ => return,
     };
-    if offscreen_mode() {
-        // screencapture cannot grab windows that sit off every screen; use JELLYFIN_MAC_SELFTEST_ONSCREEN=1 for shot runs.
-        return;
-    }
     unsafe {
-        let _: () = msg_send![win, displayIfNeeded];
-        let _: () = msg_send![class!(CATransaction), flush];
-        let num: isize = msg_send![win, windowNumber];
         let appearance = std::env::var("JELLYFIN_MAC_APPEARANCE").unwrap_or_else(|_| "system".into());
         let clean: String = tag.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let path = format!("{}/{}-{}-w{}.png", dir, appearance, clean, idx);
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        let _ = std::process::Command::new("screencapture")
-            .args(["-x", "-o", "-l", &num.to_string(), &path])
-            .status();
+        // Render the view tree straight to a bitmap: works for off-screen windows, unlike screencapture.
+        // The frame view (contentView's superview) includes the titlebar and traffic lights.
+        let content: *mut Object = msg_send![win, contentView];
+        let root: *mut Object = msg_send![content, superview];
+        let root = if root.is_null() { content } else { root };
+        let _: () = msg_send![root, layoutSubtreeIfNeeded];
+        let b: NSRect = msg_send![root, bounds];
+        let rep: *mut Object = msg_send![root, bitmapImageRepForCachingDisplayInRect: b];
+        if rep.is_null() {
+            return;
+        }
+        let _: () = msg_send![root, cacheDisplayInRect: b toBitmapImageRep: rep];
+        let props: *mut Object = msg_send![class!(NSDictionary), dictionary];
+        let png: *mut Object = msg_send![rep, representationUsingType: 4usize properties: props]; // NSBitmapImageFileTypePNG
+        let _: BOOL = msg_send![png, writeToFile: ns(&path) atomically: YES];
         log(&format!("  shot {}", path));
     }
 }
@@ -475,6 +530,7 @@ fn audit(tag: &str) {
             let content: *mut Object = msg_send![w, contentView];
             let before = issues.len();
             audit_view(content, &mut issues);
+            audit_global_overlap(w, &mut issues);
             let is_main = w == ui.win.get();
             if is_main {
                 audit_traffic(w, &mut issues);
@@ -962,7 +1018,7 @@ fn s_settings_cancel() {
         std::thread::sleep(std::time::Duration::from_millis(300));
         on_main(|| unsafe {
             log("  cancelling settings sheet");
-            check_offscreen("settings sheet");
+            audit("settings sheet");
             let ui = UI.get_mut().unwrap();
             state_check("seerr fields filled", read_field(ui.seerr.s_url.get()) == "https://seerr.example");
             set_text(ui.seerr.s_key.get(), "typed-then-cancelled");
@@ -1264,6 +1320,7 @@ fn s_seerr_results() {
         state_check("7 rows", ui.seerr.rows.len() == 7);
         state_check("2 request buttons (NotRequested only)", seerr_button_rows() == 2);
     }
+    audit("seerr results");
 }
 fn s_seerr_typing() {
     unsafe {
@@ -1362,6 +1419,7 @@ fn s_seerr_requests_tab() {
         ]));
         state_check("6 request rows", ui.seerr.rows.len() == 6);
         state_check("no request buttons in My requests", seerr_button_rows() == 0);
+        audit("seerr my requests");
         handle_main(MainMsg::SeerrRequestList(vec![]));
         state_check("empty requests -> 1 info row", ui.seerr.rows.len() == 1);
         handle_main(MainMsg::SeerrRequestList(vec![seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending)]));
@@ -1390,8 +1448,9 @@ fn s_seerr_resize() {
             let _: () = msg_send![ui.seerr.win.get(), setContentSize: size(w, h)];
             let _: () = msg_send![ui.seerr.win.get(), displayIfNeeded];
             let _: () = msg_send![ui.seerr.doc.get(), layoutSubtreeIfNeeded];
+            handle_main(MainMsg::SeerrResults(seerr_mixed())); // rebuild at the new width
+            audit(&format!("seerr @{}x{}", w, h));
         }
-        handle_main(MainMsg::SeerrResults(seerr_mixed())); // rebuild at the new width
     }
 }
 fn s_seerr_reopen() {
@@ -1489,6 +1548,7 @@ fn s_seerr_settings_fail() {
         state_check("sheet still open after failure", sheet_open());
         state_check("settings unchanged after failure", !ui.cfg.settings.seerr_enabled);
     }
+    audit("settings seerr error");
 }
 fn s_seerr_settings_ok() {
     handle_main(MainMsg::SeerrStatus { ok: true, message: "Connected to Seerr 2.7.3 as admin.".into() });
