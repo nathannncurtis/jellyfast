@@ -81,6 +81,63 @@ extern "C" {}
 extern "C" {}
 #[link(name = "CoreMedia", kind = "framework")]
 extern "C" {}
+#[link(name = "QuartzCore", kind = "framework")]
+extern "C" {}
+
+// ---- Self-test isolation ---------------------------------------------------------------------
+/// In self-test mode windows open far outside every screen and the app never takes
+/// focus, so a headless run is invisible to whoever is at the machine.
+/// `JELLYFAST_SELFTEST_ONSCREEN=1` opts out (for screenshot runs on a visible window).
+pub fn offscreen_mode() -> bool {
+    crate::app::selftest::enabled()
+        && std::env::var("JELLYFAST_SELFTEST_ONSCREEN").map(|v| v != "1").unwrap_or(true)
+}
+/// Right edge of the union of all screens.
+pub unsafe fn screens_max_x() -> f64 {
+    let screens: *mut Object = msg_send![class!(NSScreen), screens];
+    let n: NSUInteger = msg_send![screens, count];
+    let mut max_x: f64 = 0.0;
+    for i in 0..n {
+        let s: *mut Object = msg_send![screens, objectAtIndex: i];
+        let f: NSRect = msg_send![s, frame];
+        max_x = max_x.max(f.origin.x + f.size.w);
+    }
+    max_x
+}
+/// Self-test only: move a window fully off every screen (size unchanged).
+pub unsafe fn place_offscreen(win: *mut Object) {
+    let x = screens_max_x() + 2000.0;
+    let _: () = msg_send![win, setFrameOrigin: NSPoint { x, y: 100.0 }];
+}
+/// Center normally; off-screen in self-test mode.
+pub unsafe fn place_window(win: *mut Object) {
+    if offscreen_mode() {
+        place_offscreen(win);
+    } else {
+        let _: () = msg_send![win, center];
+    }
+}
+/// Window subclass that, in self-test mode, lets AppKit keep it off-screen.
+extern "C" fn constrain_frame(this: &mut Object, _c: Sel, r: NSRect, screen: *mut Object) -> NSRect {
+    unsafe {
+        if offscreen_mode() {
+            r
+        } else {
+            msg_send![super(this, class!(NSWindow)), constrainFrameRect: r toScreen: screen]
+        }
+    }
+}
+pub(crate) unsafe fn register_window_class() {
+    let mut d = ClassDecl::new("JRWindow", class!(NSWindow)).unwrap();
+    d.add_method(
+        sel!(constrainFrameRect:toScreen:),
+        constrain_frame as extern "C" fn(&mut Object, Sel, NSRect, *mut Object) -> NSRect,
+    );
+    d.register();
+}
+pub(crate) unsafe fn jr_window_class() -> *const Class {
+    objc::runtime::objc_getClass(b"JRWindow\0".as_ptr() as *const std::os::raw::c_char) as *const Class
+}
 
 // ---- Tiny pointer RAII for process-lifetime globals --------------------
 #[derive(Clone, Copy)]
@@ -155,61 +212,54 @@ pub(crate) unsafe fn layer_of(v: *mut Object) -> *mut Object {
     msg_send![v, layer]
 }
 pub(crate) unsafe fn color_named(name: &str) -> *mut Object {
-    let c: *mut Object = msg_send![class!(NSColor), performSelector: sel!(
-        labelColor
-    )];
+    use crate::ui::theme::*;
     match name {
-        "secondary" => {
-            let c: *mut Object = msg_send![class!(NSColor), secondaryLabelColor];
-            c
-        }
-        "accent" => {
-            let c: *mut Object = msg_send![class!(NSColor), controlAccentColor];
-            c
-        }
-        "red" => {
-            let c: *mut Object = msg_send![class!(NSColor), systemRedColor];
-            c
-        }
-        "white" => {
-            let c: *mut Object = msg_send![class!(NSColor), whiteColor];
-            c
-        }
-        _ => c,
+        "label" => color(C_TEXT),
+        "secondary" => color(C_TEXT2),
+        "tertiary" => color(C_TEXT3),
+        "accent" => color(C_ACCENT),
+        "red" => color(C_DANGER),
+        "white" => color(C_ON_MEDIA),
+        _ => color(C_TEXT),
     }
 }
 pub(crate) unsafe fn symbol_image(name: &str, point_size: CGFloat) -> *mut Object {
-    let img: *mut Object =
-        msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name) accessibilityDescription: nil()];
-    if img.is_null() || point_size <= 0.0 {
-        return img;
+    use crate::ui::theme::*;
+    if point_size <= 0.0 {
+        return msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name) accessibilityDescription: nil()];
     }
-    // Resize via symbol configuration (SF Symbols scale cleanly).
-    let cfg: *mut Object = msg_send![class!(NSImageSymbolConfiguration),
-        configurationWithPointSize: point_size weight: 0.0f64];
-    let scaled: *mut Object = msg_send![img, imageWithSymbolConfiguration: cfg];
-    if scaled.is_null() {
-        img
-    } else {
-        scaled // imageWithSymbolConfiguration: returns an autoreleased object
-    }
+    symbol(name, point_size, Weight::Regular)
 }
 
 // ---- Global UI state (main thread only) --------------------------------
 pub struct CellHandle {
     pub container: *mut Object,
-    pub poster: *mut Object,
+    /// Clipped artwork layer (radius, placeholder colour, poster contents).
+    pub art: *mut Object,
+    /// Unclipped shadow host that also takes the hover transform.
+    pub shadow: *mut Object,
+    pub prog_track: *mut Object,
+    pub prog_fill: *mut Object,
+    pub prog_frac: f64,
+    pub dim: *mut Object,
+    pub circle: *mut Object,
+    pub glyph: *mut Object,
+    pub play_icon: *mut Object,
+    pub badge: *mut Object,
     pub title: *mut Object,
     pub sub: *mut Object,
-    pub prog: *mut Object,
-    pub badge: *mut Object,
-    pub hover_icon: *mut Object,
+    pub btn: *mut Object,
+    /// Skeleton text bars (null for real cells).
+    pub skel_title: *mut Object,
+    pub skel_sub: *mut Object,
     pub key: u64,
     pub meta: ListItem,
 }
 
 pub struct GridData {
     pub cells: Vec<CellHandle>,
+    /// Poster height / width shared by every cell in the grid.
+    pub ratio: f64,
 }
 
 pub struct PlayingNow {
@@ -248,7 +298,14 @@ pub struct Ui {
     pub side_stack: Ptr,
     pub search: Ptr,
     pub sort_popup: Ptr,
+    pub header: Ptr,
     pub header_title: Ptr,
+    pub header_count: Ptr,
+    pub lib_back: Ptr,
+    pub state_host: Ptr,
+    pub state_icon: Ptr,
+    pub state_body: Ptr,
+    pub state_btn: Ptr,
     pub lib_scroll: Ptr,
     pub spinner: Ptr,
     pub status_label: Ptr,
@@ -256,6 +313,16 @@ pub struct Ui {
     pub player_host: Ptr,
     pub top_bar: Ptr,
     pub top_title: Ptr,
+    pub top_sub: Ptr,
+    pub toast_icon: Ptr,
+    pub info_panel: Ptr,
+    pub info_label: Ptr,
+    pub info_item: Ptr,
+    pub backdrop: Ptr,
+    pub backdrop_poster: Ptr,
+    pub backdrop_spin: Ptr,
+    pub last_mouse: Option<std::time::Instant>,
+    pub bar_shown: bool,
     pub chip: Ptr,
     pub chip_label: Ptr,
     pub back_btn: Ptr,
@@ -266,6 +333,8 @@ pub struct Ui {
     pub login_key: Ptr,
     pub login_btn: Ptr,
     pub login_err: Ptr,
+    pub login_spin: Ptr,
+    pub login_toggle: Ptr,
     pub settings_win: Ptr,
     pub s_url: Ptr,
     pub s_sub_lang: Ptr,
@@ -288,7 +357,11 @@ pub struct Ui {
     pub sel_sub: usize,
     pub sel_audio: usize,
     pub mode_stack: Vec<(String, String, Option<String>)>, // for back nav
+    pub selected_view: Option<usize>,
+    pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
+    pub now: crate::ui::nowbar::NowBar,
+    pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
 unsafe impl Send for Ui {}
 // SAFETY: raw pointers above are dereferenced only on the main thread.
@@ -404,6 +477,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(signOut:), sign_out as Extern0),
             (sel!(refresh:), refresh as Extern0),
             (sel!(openSeerr:), crate::ui::seerr::open_seerr as Extern0),
+            (sel!(showAbout:), show_about as Extern0),
             (sel!(seerrRequest:), crate::ui::seerr::seerr_request as Extern0),
             (sel!(seerrTab:), crate::ui::seerr::seerr_tab as Extern0),
             (sel!(seerrModeChanged:), crate::ui::seerr::seerr_mode_changed as Extern0),
@@ -411,14 +485,24 @@ pub(crate) unsafe fn register_classes() {
             (sel!(viewSelected:), view_selected as Extern0),
             (sel!(itemClicked:), item_clicked as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
+            (sel!(markUnwatched:), mark_unwatched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
             (sel!(connectClicked:), connect_clicked as Extern0),
+            (sel!(toggleApiKey:), toggle_api_key as Extern0),
             (sel!(saveSettings:), save_settings as Extern0),
             (sel!(cancelSettings:), cancel_settings as Extern0),
             (sel!(sortChanged:), sort_changed as Extern0),
             (sel!(controlTextDidChange:), text_changed as Extern0),
             (sel!(jrTick:), tick as Extern0),
+            (sel!(jrSearchNow:), search_now as Extern0),
+            (sel!(jrHideToast:), crate::ui::player::hide_toast as Extern0),
+            (sel!(jrBackdropOff:), crate::ui::player::backdrop_off as Extern0),
+            (sel!(togglePlaybackInfo:), crate::ui::player::toggle_info as Extern0),
             (sel!(jrRetry:), retry_now as Extern0),
+            (sel!(jrNowRestart:), crate::ui::nowbar::restart as Extern0),
+            (sel!(jrNowSkip:), crate::ui::nowbar::skip as Extern0),
+            (sel!(jrNowScrub:), crate::ui::nowbar::scrub as Extern0),
+            (sel!(jrNowVolume:), crate::ui::nowbar::volume as Extern0),
         ] {
             d.add_method(s, f);
         }
@@ -426,12 +510,21 @@ pub(crate) unsafe fn register_classes() {
         d.register();
     }
     crate::ui::seerr::register_seerr_classes();
+    register_window_class();
+    register_sidebar_row();
+    register_header_class();
+    crate::ui::player::register_player_classes();
+    crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
     {
         let mut d = ClassDecl::new("JRGridView", class!(NSView)).unwrap();
         d.add_ivar::<*mut c_void>("jrData");
         d.add_method(sel!(isFlipped), always_yes as extern "C" fn(&mut Object, Sel) -> BOOL);
         d.add_method(sel!(layout), grid_layout as extern "C" fn(&mut Object, Sel));
+        d.add_method(
+            sel!(viewDidChangeEffectiveAppearance),
+            grid_appearance_changed as extern "C" fn(&mut Object, Sel),
+        );
         d.add_method(
             sel!(setFrameSize:),
             grid_set_frame as extern "C" fn(&mut Object, Sel, NSSize),
@@ -458,11 +551,15 @@ pub(crate) unsafe fn register_classes() {
 pub(crate) type Extern0 = extern "C" fn(&mut Object, Sel, *mut Object);
 pub(crate) type KvoFn = extern "C" fn(&mut Object, Sel, *mut Object, *mut Object, *mut Object, *mut c_void);
 
+/// Refresh the playback-info panel text (time, resolution, bitrate, method). No-op while it is off.
 pub(crate) unsafe fn update_chip() {
     let ui = match UI.get_mut() {
         Some(u) => u,
         None => return,
     };
+    if !ui.cfg.settings.show_stats {
+        return;
+    }
     let pn = match ui.playing.as_ref() {
         Some(p) => p,
         None => return,
@@ -471,49 +568,40 @@ pub(crate) unsafe fn update_chip() {
         return; // item being swapped (KVO can fire mid-replace)
     }
     let mut s = String::new();
-    let tcs: NSInteger = msg_send![ui.player.get(), timeControlStatus];
-    if tcs == 1 {
-        s.push_str("Buffering…");
-    } else {
-        // position / duration
-        let t: CMTime = msg_send![ui.player.get(), currentTime];
-        let d: CMTime = msg_send![ui.pitem.get(), duration];
-        let dur = d.seconds();
-        s.push_str(&format!(
-            "{} / {}",
-            crate::jellyfin::urls::fmt_clock(t.seconds()),
-            crate::jellyfin::urls::fmt_clock(dur)
-        ));
-        // resolution
-        let sz: NSSize = msg_send![ui.pitem.get(), presentationSize];
-        if sz.w > 0.0 {
-            s.push_str(&format!("  ·  {}×{}", sz.w as i64, sz.h as i64));
-        }
-        // bitrate from access log (last event)
-        let log: *mut Object = msg_send![ui.pitem.get(), accessLog];
-        if !log.is_null() {
-            let events: *mut Object = msg_send![log, events];
-            if !events.is_null() {
-                let n: NSUInteger = msg_send![events, count];
-                if n > 0 {
-                    let ev: *mut Object = msg_send![events, objectAtIndex: n - 1];
-                    let br: f64 = msg_send![ev, indicatedBitrate];
-                    if br > 0.0 {
-                        s.push_str(&format!("  ·  {:.1} Mb/s", br / 1_000_000.0));
-                    }
+    let t: CMTime = msg_send![ui.player.get(), currentTime];
+    let d: CMTime = msg_send![ui.pitem.get(), duration];
+    s.push_str(&format!(
+        "{} / {}",
+        crate::jellyfin::urls::fmt_clock(t.seconds()),
+        crate::jellyfin::urls::fmt_clock(d.seconds())
+    ));
+    let sz: NSSize = msg_send![ui.pitem.get(), presentationSize];
+    if sz.w > 0.0 {
+        s.push_str(&format!("  ·  {}×{}", sz.w as i64, sz.h as i64));
+    }
+    let log: *mut Object = msg_send![ui.pitem.get(), accessLog];
+    if !log.is_null() {
+        let events: *mut Object = msg_send![log, events];
+        if !events.is_null() {
+            let n: NSUInteger = msg_send![events, count];
+            if n > 0 {
+                let ev: *mut Object = msg_send![events, objectAtIndex: n - 1];
+                let br: f64 = msg_send![ev, indicatedBitrate];
+                if br > 0.0 {
+                    s.push_str(&format!("  ·  {:.1} Mb/s", br / 1_000_000.0));
                 }
             }
         }
-        s.push_str(&format!("  ·  {}", crate::transcode::decision::method_label(pn.method)));
     }
-    set_chip(&s, false);
-}
-
-pub(crate) unsafe fn set_chip(text: &str, is_err: bool) {
-    let ui = UI.get_mut().unwrap();
-    set_text(ui.chip_label.get(), text);
-    let col = if is_err { color_named("red") } else { color_named("label") };
-    let _: () = msg_send![ui.chip_label.get(), setTextColor: col];
+    s.push_str(&format!("  ·  {}", crate::transcode::decision::method_label(pn.method)));
+    set_text(ui.info_label.get(), &s);
+    // Fit the pill to its text (the label truncates if the window is too narrow).
+    let cell: *mut Object = msg_send![ui.info_label.get(), cell];
+    let tsz: NSSize = msg_send![cell, cellSize];
+    let w = (tsz.w.ceil() + 2. * crate::ui::theme::SP2 + 2.).min(bounds_of(ui.player_host.get()).size.w - 2. * crate::ui::theme::SP4);
+    let f = frame_of(ui.info_panel.get());
+    set_frame(ui.info_panel.get(), rect(f.origin.x, f.origin.y, w, f.size.h));
+    set_frame(ui.info_label.get(), rect(crate::ui::theme::SP2, 5., w - 2. * crate::ui::theme::SP2, 16.));
 }
 
 pub(crate) extern "C" fn fullscreen(_t: &mut Object, _c: Sel, _s: *mut Object) {
@@ -528,10 +616,39 @@ pub(crate) extern "C" fn show_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         let _ = ui.main_tx.send(MainMsg::SettingsSnapshot(Box::new(ui.cfg.clone())));
     }
 }
+/// Whether the settings sheet is up. (Headless self-test shows it as a plain off-screen window:
+/// AppKit drags an off-screen parent onto a screen to present a sheet.)
+pub(crate) unsafe fn settings_open() -> bool {
+    let ui = UI.get_mut().unwrap();
+    if offscreen_mode() {
+        let v: BOOL = msg_send![ui.settings_win.get(), isVisible];
+        return v == YES;
+    }
+    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
+    !attached.is_null()
+}
+/// Standard About panel, with a credits line saying what this is and where the idea came from.
+pub(crate) extern "C" fn show_about(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let credits: *mut Object = msg_send![class!(NSAttributedString), alloc];
+        let credits: *mut Object = msg_send![credits, initWithString: ns("A native client for Jellyfin. Inspired by Spotifast.")];
+        let opts: *mut Object = msg_send![class!(NSMutableDictionary), dictionary];
+        let _: () = msg_send![opts, setObject: credits forKey: ns("Credits")];
+        let _: () = msg_send![opts, setObject: ns("Jellyfast") forKey: ns("ApplicationName")];
+        let _: () = msg_send![opts, setObject: ns(env!("CARGO_PKG_VERSION")) forKey: ns("ApplicationVersion")];
+        let _: () = msg_send![ui.app.get(), orderFrontStandardAboutPanelWithOptions: opts];
+        autorel(credits);
+    }
+}
 pub(crate) unsafe fn show_settings_sheet() {
     let ui = UI.get_mut().unwrap();
-    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
-    if !attached.is_null() {
+    if settings_open() {
+        return;
+    }
+    if offscreen_mode() {
+        place_offscreen(ui.settings_win.get());
+        let _: () = msg_send![ui.settings_win.get(), orderFront: nil()];
         return;
     }
     let _: () = msg_send![ui.win.get(), beginSheet: ui.settings_win.get() completionHandler: nil()];
@@ -546,9 +663,13 @@ pub(crate) unsafe fn close_settings() {
     set_text(ui.seerr.s_key.get(), "");
     set_text(ui.seerr.s_pass.get(), "");
     ui.seerr.pending = None;
-    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
-    if !attached.is_null() {
-        let _: () = msg_send![ui.win.get(), endSheet: ui.settings_win.get()];
+    if offscreen_mode() {
+        let _: () = msg_send![ui.settings_win.get(), orderOut: nil()];
+    } else {
+        let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
+        if !attached.is_null() {
+            let _: () = msg_send![ui.win.get(), endSheet: ui.settings_win.get()];
+        }
     }
 }
 pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object) {
@@ -635,6 +756,7 @@ pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+            begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
         }
     }
@@ -645,6 +767,7 @@ pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
         if ui.mode_stack.len() > 1 {
             ui.mode_stack.pop();
             if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+                begin_load(false);
                 let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
             }
         }
@@ -656,8 +779,11 @@ pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Ob
         let tag: NSInteger = msg_send![sender, tag];
         if let Some((id, name, ct)) = ui.views.get(tag as usize).cloned() {
             ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
-            set_hidden(ui.spinner.get(), false);
-            set_hidden(ui.status_label.get(), true);
+            ui.selected_view = Some(tag as usize);
+            sidebar_refresh_selection();
+            ui.cfg.last_view = Some(id.clone());
+            crate::config::save_config(&ui.cfg);
+            begin_load(true);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
         }
     }
@@ -670,7 +796,7 @@ pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Obj
             Some(i) => i.clone(),
             None => return,
         };
-        set_hidden(ui.spinner.get(), false);
+        set_busy(true);
         match it.item_type.as_str() {
             "Series" => {
                 let _ = ui.ui_tx.send(UiCmd::Episodes { series_id: it.id.clone(), series_name: it.name.clone() });
@@ -697,6 +823,16 @@ pub(crate) extern "C" fn mark_watched(_t: &mut Object, _c: Sel, sender: *mut Obj
         }
     }
 }
+pub(crate) extern "C" fn mark_unwatched(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let ro: *mut Object = msg_send![sender, representedObject];
+        let id = to_str(ro);
+        if !id.is_empty() {
+            let _ = ui.ui_tx.send(UiCmd::MarkPlayed { item_id: id, played: false });
+        }
+    }
+}
 pub(crate) extern "C" fn open_in_web(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -718,18 +854,21 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
         let url = read_field(ui.login_url.get());
         let user = read_field(ui.login_user.get());
         let pass = read_field_secure(ui.login_pass.get());
-        let key = read_field_secure(ui.login_key.get());
-        login_error(""); // clear
+        let key_mode = is_hidden(ui.login_pass.get());
+        let key = if key_mode { read_field_secure(ui.login_key.get()) } else { String::new() };
+        let pass = if key_mode { String::new() } else { pass };
+        login_status(""); // clear
         if url.is_empty() {
-            login_error("Enter your server address (e.g. http://192.168.1.10:8096).");
+            login_error("Enter your server's address, like jellyfin.local:8096.");
             return;
         }
-        if user.is_empty() && key.is_empty() {
-            login_error("Enter a username + password, or an API key.");
+        if (key_mode && key.is_empty()) || (!key_mode && user.is_empty()) {
+            login_error("Enter your username and password, or use an API key.");
             return;
         }
         let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
         set_text(ui.login_btn.get(), "Connecting…");
+        login_status(&format!("Connecting to {}…", host_of(&url)));
         let _ = ui.ui_tx.send(UiCmd::Connect {
             url,
             username: user,
@@ -742,6 +881,7 @@ pub(crate) extern "C" fn sort_changed(_t: &mut Object, _c: Sel, _s: *mut Object)
     unsafe {
         let ui = UI.get_mut().unwrap();
         if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+            begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
         }
     }
@@ -753,14 +893,25 @@ pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Objec
         if obj == ui.seerr.search.get() && !obj.is_null() {
             crate::ui::seerr::search_changed();
         } else if obj == ui.search.get() {
-            let q = read_field(ui.search.get());
-            if q.trim().is_empty() {
-                if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
-                    let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-                }
-            } else {
-                let _ = ui.ui_tx.send(UiCmd::Search { q });
+            // Debounce: keep the grid as is and search 200 ms after the last keystroke.
+            let ctl = ui.ctl.get();
+            let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl
+                selector: sel!(jrSearchNow:) object: nil()];
+            let _: () = msg_send![ctl, performSelector: sel!(jrSearchNow:) withObject: nil() afterDelay: 0.2f64];
+        }
+    }
+}
+pub(crate) extern "C" fn search_now(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let q = read_field(ui.search.get());
+        begin_load(false);
+        if q.trim().is_empty() {
+            if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+                let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
             }
+        } else {
+            let _ = ui.ui_tx.send(UiCmd::Search { q });
         }
     }
 }
@@ -772,8 +923,10 @@ pub(crate) extern "C" fn app_did_finish_launch(_t: &mut Object, _c: Sel, _n: *mu
         let ui = UI.get_mut().unwrap();
         // If a server + token are stored, the worker is already auto-connecting;
         // reflect that state in the login card.
-        if ui.cfg.server_url.is_some() {
-            set_text(ui.login_err.get(), "Connecting to your server…");
+        if let Some(u) = ui.cfg.server_url.clone() {
+            login_status(&format!("Connecting to {}…", host_of(&u)));
+            let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
+            set_text(ui.login_btn.get(), "Connecting…");
         }
         crate::app::controller::drain_main(); // anything queued before launch
         if crate::app::selftest::enabled() {
@@ -817,20 +970,11 @@ pub(crate) extern "C" fn app_should_terminate(
 // All of these become safe functions taking typed view handles once `mod
 // sys` is its own platform crate.
 
+/// Legacy label helper kept while screens migrate to `theme::label`.
 pub(crate) unsafe fn make_label(text: &str, size: CGFloat, bold: bool, center: bool) -> *mut Object {
-    let v: *mut Object = if bold {
-        msg_send![class!(NSTextField), labelWithString: ns(text)]
-    } else {
-        msg_send![class!(NSTextField), labelWithString: ns(text)]
-    };
-    let font: *mut Object = if bold {
-        msg_send![class!(NSFont), boldSystemFontOfSize: size]
-    } else {
-        msg_send![class!(NSFont), systemFontOfSize: size]
-    };
-    let _: () = msg_send![v, setFont: font];
-    let _: () = msg_send![v, setAlignment: if center { 2usize } else { 0usize }];
-    v // labelWithString: already returned an autoreleased object
+    use crate::ui::theme::*;
+    let t = TypeStyle { size, weight: if bold { Weight::Bold } else { Weight::Regular }, mono: false };
+    label(text, t, C_TEXT, if center { ALIGN_CENTER } else { ALIGN_LEFT })
 }
 pub(crate) unsafe fn set_text(v: *mut Object, s: &str) {
     let _: () = msg_send![v, setStringValue: ns(s)];
@@ -850,10 +994,6 @@ pub(crate) unsafe fn vev(material: i64, blending: i64) -> *mut Object {
     autorel(v)
 }
 // Materials / blending modes (AppKit enum values, stable since 10.10):
-pub(crate) const MAT_SIDEBAR: i64 = 7;
-pub(crate) const MAT_POPOVER: i64 = 6;
-pub(crate) const MAT_HUD: i64 = 13;
-pub(crate) const MAT_UNDER_WINDOW: i64 = 21;
 pub(crate) const BLEND_BEHIND: i64 = 0;
 pub(crate) const BLEND_WITHIN: i64 = 1;
 pub(crate) const RESIZE_W: NSUInteger = 2;
@@ -888,7 +1028,7 @@ impl CellOf for *mut Object {
 pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: UnboundedSender<MainMsg>) {
     register_classes();
     let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-    let _: BOOL = msg_send![app, setActivationPolicy: 0i64]; // regular app
+    let _: BOOL = msg_send![app, setActivationPolicy: if offscreen_mode() { 1i64 } else { 0i64 }]; // regular app (accessory in headless self-test)
 
     let pump: *mut Object = {
         let cls = class!(NSObject); // JRPump registered above; look it up:
@@ -931,7 +1071,14 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         side_stack: Ptr(nil()),
         search: Ptr(nil()),
         sort_popup: Ptr(nil()),
+        header: Ptr(nil()),
         header_title: Ptr(nil()),
+        header_count: Ptr(nil()),
+        lib_back: Ptr(nil()),
+        state_host: Ptr(nil()),
+        state_icon: Ptr(nil()),
+        state_body: Ptr(nil()),
+        state_btn: Ptr(nil()),
         lib_scroll: Ptr(nil()),
         spinner: Ptr(nil()),
         status_label: Ptr(nil()),
@@ -939,6 +1086,16 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         player_host: Ptr(nil()),
         top_bar: Ptr(nil()),
         top_title: Ptr(nil()),
+        top_sub: Ptr(nil()),
+        toast_icon: Ptr(nil()),
+        info_panel: Ptr(nil()),
+        info_label: Ptr(nil()),
+        info_item: Ptr(nil()),
+        backdrop: Ptr(nil()),
+        backdrop_poster: Ptr(nil()),
+        backdrop_spin: Ptr(nil()),
+        last_mouse: None,
+        bar_shown: false,
         chip: Ptr(nil()),
         chip_label: Ptr(nil()),
         back_btn: Ptr(nil()),
@@ -949,6 +1106,8 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         login_key: Ptr(nil()),
         login_btn: Ptr(nil()),
         login_err: Ptr(nil()),
+        login_spin: Ptr(nil()),
+        login_toggle: Ptr(nil()),
         settings_win: Ptr(nil()),
         s_url: Ptr(nil()),
         s_sub_lang: Ptr(nil()),
@@ -970,7 +1129,11 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         sel_sub: 0,
         sel_audio: 0,
         mode_stack: vec![],
+        selected_view: None,
+        side_dyn: vec![],
         cur_title: String::new(),
+        now: crate::ui::nowbar::NowBar::new(),
+        tint_cache: HashMap::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
     let _ = UI.set(ui);
@@ -991,6 +1154,11 @@ pub fn set_busy(b: bool) {
             None => return,
         };
         set_hidden(ui.spinner.get(), !b);
+        if b {
+            let _: () = msg_send![ui.spinner.get(), startAnimation: nil()];
+        } else {
+            let _: () = msg_send![ui.spinner.get(), stopAnimation: nil()];
+        }
     }
 }
 
@@ -1017,6 +1185,20 @@ unsafe impl objc::Encode for NSSize {
 unsafe impl objc::Encode for NSRect {
     fn encode() -> objc::Encoding {
         unsafe { objc::Encoding::from_str("{CGRect={CGPoint=dd}{CGSize=dd}}") }
+    }
+}
+/// NSEdgeInsets { top, left, bottom, right }.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NSEdgeInsets {
+    pub top: CGFloat,
+    pub left: CGFloat,
+    pub bottom: CGFloat,
+    pub right: CGFloat,
+}
+unsafe impl objc::Encode for NSEdgeInsets {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{NSEdgeInsets=dddd}") }
     }
 }
 unsafe impl objc::Encode for CMTime {

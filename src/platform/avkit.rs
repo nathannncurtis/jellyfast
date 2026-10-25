@@ -39,7 +39,7 @@ pub(crate) extern "C" fn kvo(
                 if st == 2 {
                     // AVPlayerItemFailedToPlayToEndTime — probe server, retry
                     if let Some(pn) = ui.playing.as_ref() {
-                        set_chip("Network interruption — checking server…", true);
+                        crate::ui::player::toast("Network interruption. Checking your server…", Some("wifi.exclamationmark"), true);
                         let _ = ui.ui_tx.send(UiCmd::ProbeServer);
                         let _ = pn; // retry uses stored URL + current position
                     }
@@ -49,6 +49,9 @@ pub(crate) extern "C" fn kvo(
                 let s: NSInteger = msg_send![obj, timeControlStatus];
                 if let Some(pn) = ui.playing.as_mut() {
                     pn.paused = s != 2;
+                }
+                if s == 2 {
+                    crate::ui::player::backdrop_hide();
                 }
                 update_chip();
             }
@@ -68,7 +71,12 @@ pub(crate) extern "C" fn tick(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
         if ui.playing.is_none() || ui.pitem.get().is_null() {
             return;
         }
+        crate::ui::nowbar::update(); // every tick (0.25 s while the bar shows)
+        if !crate::ui::nowbar::slow_due() {
+            return;
+        }
         update_chip();
+        crate::ui::player::hide_bars_if_idle();
         ensure_media_groups();
         let pn = match ui.playing.as_mut() {
             Some(p) => p,
@@ -247,10 +255,15 @@ pub fn stop_playback_ui() {
         release_obj(ui.pitem.get());
         ui.pitem = Ptr(nil());
         ui.playing = None;
+        let content: *mut Object = msg_send![ui.win.get(), contentView];
+        crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
         set_hidden(ui.player_host.get(), true);
         set_hidden(ui.content_host.get(), false);
-        let _: () = msg_send![ui.win.get(), setTitle: ns("Jellyfin")];
-        let _: () = msg_send![ui.win.get(), setTitleVisibility: 0i64];
+        crate::ui::nowbar::hide();
+        crate::ui::player::toast("", None, false);
+        crate::ui::player::backdrop_hide();
+        let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: NO];
+        let _: () = msg_send![ui.win.get(), setTitle: ns("Jellyfast")];
         let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
     }
 }
@@ -340,11 +353,12 @@ pub(crate) unsafe fn cycle(which: usize) {
     } else {
         ui.sel_audio = next;
     }
-    set_chip(
+    crate::ui::player::toast(
         &format!("{}: {}", if which == 0 { "Subtitles" } else { "Audio" },
             if next == 0 { "Off".to_string() } else {
                 to_str(msg_send![opt, displayName])
             }),
+        Some(if which == 0 { "captions.bubble" } else { "speaker.wave.2" }),
         false,
     );
 }
@@ -371,7 +385,7 @@ pub(crate) extern "C" fn set_speed(_t: &mut Object, _c: Sel, sender: *mut Object
         if rate > 0.0 {
             let _: () = msg_send![ui.player.get(), setRate: v];
         }
-        set_chip(&format!("Speed {}×", v), false);
+        crate::ui::player::toast(&format!("Speed: {}×", v), Some("gauge.with.dots.needle.67percent"), false);
     }
 }
 
@@ -426,17 +440,51 @@ pub fn start_playback(ps: &PlaybackStart) {
             ticks_since_save: 0,
         });
         set_text(ui.top_title.get(), &ps.title);
+        set_text(ui.top_sub.get(), ps.subtitle.as_deref().unwrap_or(""));
+        {
+            // One line vertically centred when there is no subtitle.
+            let has_sub = ps.subtitle.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+            let f = frame_of(ui.top_title.get());
+            let y = if has_sub { 26. } else { (crate::ui::theme::PLAYER_BAR_H - 18.) / 2. };
+            set_frame(ui.top_title.get(), rect(f.origin.x, y, f.size.w, 18.));
+        }
         let sub = ps.subtitle.clone().unwrap_or_default();
         if !sub.is_empty() {
             let _: () = msg_send![ui.win.get(), setTitle: ns(&format!("{} — {}", ps.title, sub))];
         } else {
             let _: () = msg_send![ui.win.get(), setTitle: ns(&ps.title)];
         }
-        set_hidden(ui.content_host.get(), true);
-        set_hidden(ui.player_host.get(), false);
-        let _: () = msg_send![ui.win.get(), setTitleVisibility: 1i64]; // hidden (custom top bar)
-        let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.avview.get()];
-        set_chip("", false);
+        if ps.media_kind == MediaKind::Audio {
+            // Audio: same AVPlayer, no video view. The library stays up with the bar below it.
+            let content: *mut Object = msg_send![ui.win.get(), contentView];
+            if !is_hidden(ui.player_host.get()) {
+                // Coming from video: swap the player view out.
+                crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
+                set_hidden(ui.player_host.get(), true);
+                set_hidden(ui.content_host.get(), false);
+                crate::ui::player::backdrop_hide();
+            }
+            crate::ui::player::toast("", None, false);
+            let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: NO];
+            crate::ui::nowbar::show(ps);
+        } else {
+            crate::ui::nowbar::hide();
+            let content: *mut Object = msg_send![ui.win.get(), contentView];
+            crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
+            set_hidden(ui.content_host.get(), true);
+            set_hidden(ui.player_host.get(), false);
+            let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.avview.get()];
+            crate::ui::player::toast("", None, false);
+            ui.bar_shown = false;
+            crate::ui::player::show_bars();
+            crate::ui::player::apply_info_visibility();
+            {
+                use crate::ui::theme::*;
+                let poster = ps.image_key.and_then(|k| ui.poster_cache.get(&k).copied()).unwrap_or(nil());
+                let tint: *mut Object = msg_send![class!(NSColor), colorWithWhite: 0.13f64 alpha: 1.0f64];
+                crate::ui::player::backdrop_show(tint, poster);
+            }
+        }
         if ps.resume_secs > 1.0 {
             let tm = CMTimeMakeWithSeconds(ps.resume_secs, 600);
             let _: () = msg_send![ui.player.get(), seekToTime: tm];
@@ -468,7 +516,7 @@ pub fn retry_playback() {
         if let Some(pn) = ui.playing.as_mut() {
             pn.attempts += 1;
         }
-        set_chip("Reconnected — resuming…", false);
+        crate::ui::player::toast("Back online. Resuming…", Some("wifi"), false);
         let _ = ui.ui_tx.send(UiCmd::Progress {
             item_id,
             ticks: crate::jellyfin::urls::ticks_from_secs(resume),

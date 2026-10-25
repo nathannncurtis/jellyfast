@@ -149,6 +149,13 @@ pub fn default_route(r: &Req) -> Resp {
     if r.method == "GET" && r.path == "/api/v1/status" {
         return Resp::json(200, serde_json::json!({"version": "2.7.2", "commitTag": "x", "updateAvailable": false}));
     }
+    // Seerr's image proxy needs no credentials.
+    if let Some(p) = r.path.strip_prefix("/imageproxy/tmdb/t/p/w92") {
+        return match p {
+            "/inc.jpg" | "/got.jpg" => Resp::text(200, &format!("IMG{}", p)),
+            _ => Resp::text(404, "nope"),
+        };
+    }
     if r.headers.get("x-api-key").map(String::as_str) != Some("good-key") {
         return Resp::json(403, serde_json::json!({"message": "You do not have permission to access this endpoint"}));
     }

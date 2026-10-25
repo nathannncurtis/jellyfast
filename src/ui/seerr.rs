@@ -7,13 +7,14 @@
 use crate::app::messages::*;
 use crate::platform::appkit::*;
 use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
+use crate::ui::theme::*;
 use objc::class;
 use objc::declare::ClassDecl;
 use objc::msg_send;
 use objc::runtime::{Object, Sel, BOOL, NO, YES};
 use objc::{sel, sel_impl};
-
-const ROW_H: f64 = 64.0;
+use std::collections::HashMap;
+use std::ffi::c_void;
 
 pub struct SeerrUi {
     pub win: Ptr,
@@ -24,6 +25,15 @@ pub struct SeerrUi {
     pub doc: Ptr,
     pub hint: Ptr,
     pub hint_btn: Ptr,
+    /// Centred empty-state over the list (hidden while rows exist).
+    pub empty: Ptr,
+    pub empty_icon: Ptr,
+    pub empty_title: Ptr,
+    pub empty_body: Ptr,
+    /// Thumbnails in the current rows: (poster_path, art view, placeholder glyph).
+    pub thumbs: Vec<(String, *mut Object, *mut Object)>,
+    /// Decoded poster images by poster_path (owned, +1).
+    pub images: HashMap<String, *mut Object>,
     pub requests_mode: bool,
     pub results: Vec<SeerrResult>,
     pub results_loaded: bool,
@@ -60,6 +70,12 @@ impl SeerrUi {
             doc: n,
             hint: n,
             hint_btn: n,
+            empty: n,
+            empty_icon: n,
+            empty_title: n,
+            empty_body: n,
+            thumbs: vec![],
+            images: HashMap::new(),
             requests_mode: false,
             results: vec![],
             results_loaded: false,
@@ -88,9 +104,13 @@ pub struct RowSpec {
     pub title: String,
     pub sub: String,
     pub badge: String,
-    /// "green" | "red" | "secondary"
+    /// Role name: "ok" | "warn" | "danger" | "neutral".
     pub badge_color: &'static str,
     pub can_request: bool,
+    /// TMDB-relative poster path, fetched through the Seerr server.
+    pub poster: Option<String>,
+    /// SF Symbol for the thumbnail placeholder.
+    pub glyph: &'static str,
 }
 
 pub fn media_label(media_type: &str) -> String {
@@ -100,11 +120,19 @@ pub fn media_label(media_type: &str) -> String {
         o => o.to_string(),
     }
 }
+fn media_glyph(media_type: &str) -> &'static str {
+    if media_type == "tv" {
+        "tv"
+    } else {
+        "film"
+    }
+}
 fn avail_color(a: Availability) -> &'static str {
     match a {
-        Availability::Available => "green",
-        Availability::Blocklisted => "red",
-        _ => "secondary",
+        Availability::Available => "ok",
+        Availability::Pending | Availability::Processing | Availability::PartiallyAvailable => "warn",
+        Availability::Blocklisted => "danger",
+        Availability::NotRequested => "neutral",
     }
 }
 pub fn result_spec(r: &SeerrResult) -> RowSpec {
@@ -118,6 +146,8 @@ pub fn result_spec(r: &SeerrResult) -> RowSpec {
         badge: r.availability.label().to_string(),
         badge_color: avail_color(r.availability),
         can_request: r.availability == Availability::NotRequested,
+        poster: r.poster_path.clone(),
+        glyph: media_glyph(&r.media_type),
     }
 }
 pub fn request_spec(r: &SeerrRequestItem) -> RowSpec {
@@ -134,15 +164,47 @@ pub fn request_spec(r: &SeerrRequestItem) -> RowSpec {
         format!("{} · {}", r.status.label(), r.availability.label())
     };
     let color = match r.status {
-        RequestStatus::Declined | RequestStatus::Failed => "red",
-        RequestStatus::Completed => "green",
-        _ => avail_color(r.availability),
+        RequestStatus::Declined | RequestStatus::Failed => "danger",
+        RequestStatus::Completed => "ok",
+        RequestStatus::Pending | RequestStatus::Approved => "warn",
+        RequestStatus::Unknown => avail_color(r.availability),
     };
-    RowSpec { title: r.title.clone(), sub, badge, badge_color: color, can_request: false }
+    RowSpec {
+        title: r.title.clone(),
+        sub,
+        badge,
+        badge_color: color,
+        can_request: false,
+        poster: r.poster_path.clone(),
+        glyph: media_glyph(&r.media_type),
+    }
 }
 
 pub fn is_configured(s: &Settings) -> bool {
     s.seerr_enabled && !s.seerr_url.trim().is_empty()
+}
+
+/// What the list area shows when there are no rows: (symbol, title, body).
+/// `None` while a search or load is still in flight (the status line says so).
+pub fn empty_state(requests_mode: bool, loaded: bool, query: &str) -> Option<(&'static str, &'static str, String)> {
+    if requests_mode {
+        return loaded.then(|| ("tray", "No requests yet", "You haven't requested anything yet.".to_string()));
+    }
+    let q = query.trim();
+    if q.is_empty() {
+        Some(("magnifyingglass", "Find a title", "Search for a movie or show to request.".to_string()))
+    } else if loaded {
+        Some(("magnifyingglass", "No results", format!("No matches for “{}”.", clip(q, 40))))
+    } else {
+        None
+    }
+}
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    }
 }
 
 // ---- Classes ----------------------------------------------------------------
@@ -151,66 +213,172 @@ extern "C" fn yes(_t: &mut Object, _c: Sel) -> BOOL {
     YES
 }
 
+/// Hover: the row's background box is transparent unless the pointer is inside.
+fn row_hover(this: &mut Object, on: bool) {
+    unsafe {
+        let bg = *this.get_ivar::<*mut c_void>("jrBg") as *mut Object;
+        if !bg.is_null() {
+            let _: () = msg_send![bg, setTransparent: (!on) as BOOL];
+        }
+    }
+}
+extern "C" fn row_enter(this: &mut Object, _c: Sel, _e: *mut Object) {
+    row_hover(this, true);
+}
+extern "C" fn row_exit(this: &mut Object, _c: Sel, _e: *mut Object) {
+    row_hover(this, false);
+}
+
 pub(crate) unsafe fn register_seerr_classes() {
     let mut d = ClassDecl::new("JRFlipView", class!(NSView)).unwrap();
     d.add_method(sel!(isFlipped), yes as extern "C" fn(&mut Object, Sel) -> BOOL);
     d.register();
+    let mut r = ClassDecl::new("JRSeerrRow", class!(NSView)).unwrap();
+    r.add_ivar::<*mut c_void>("jrBg");
+    r.add_method(sel!(isFlipped), yes as extern "C" fn(&mut Object, Sel) -> BOOL);
+    r.add_method(sel!(mouseEntered:), row_enter as extern "C" fn(&mut Object, Sel, *mut Object));
+    r.add_method(sel!(mouseExited:), row_exit as extern "C" fn(&mut Object, Sel, *mut Object));
+    r.register();
 }
 
-unsafe fn flip_view(frame: NSRect) -> *mut Object {
-    let cls = objc::runtime::objc_getClass(b"JRFlipView\0".as_ptr() as *const std::os::raw::c_char);
+unsafe fn class_view(name: &[u8], frame: NSRect) -> *mut Object {
+    let cls = objc::runtime::objc_getClass(name.as_ptr() as *const std::os::raw::c_char);
     let v: *mut Object = msg_send![cls as *mut Object, alloc];
     msg_send![v, initWithFrame: frame] // +1; caller autorels after add
+}
+unsafe fn flip_view(frame: NSRect) -> *mut Object {
+    class_view(b"JRFlipView\0", frame)
+}
+
+// ---- Centered empty/hint state ----------------------------------------------
+
+const STATE_W: f64 = 360.;
+
+pub struct StateParts {
+    pub host: *mut Object,
+    pub icon: *mut Object,
+    pub title: *mut Object,
+    pub body: *mut Object,
+    pub btn: *mut Object,
+}
+
+/// Symbol, title, body (and optionally a button) stacked and centred in `frame`.
+unsafe fn make_state(frame: NSRect, with_btn: bool) -> StateParts {
+    let ui = UI.get_mut().unwrap();
+    let host: *mut Object = msg_send![class!(NSView), alloc];
+    let host: *mut Object = msg_send![host, initWithFrame: frame];
+    set_autoresize(host, RESIZE_W | RESIZE_H);
+    let ih = 40. + SP3 + 28. + SP2 + 36. + if with_btn { SP4 + 28. } else { 0. };
+    let inner: *mut Object = autorel(msg_send![class!(NSView), alloc]);
+    let inner: *mut Object = msg_send![inner, initWithFrame: rect(
+        ((frame.size.w - STATE_W) / 2.).floor(), ((frame.size.h - ih) / 2.).floor(), STATE_W, ih)];
+    set_autoresize(inner, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY | MARGIN_MAXY);
+    add_sub(host, inner);
+    let mut y = ih - 40.;
+    let icon: *mut Object = msg_send![class!(NSImageView), alloc];
+    let icon: *mut Object = autorel(msg_send![icon, initWithFrame: rect((STATE_W - 40.) / 2., y, 40., 40.)]);
+    let _: () = msg_send![icon, setContentTintColor: color(C_TEXT3)];
+    add_sub(inner, icon);
+    y -= SP3 + 28.;
+    let title = label("", T_TITLE, C_TEXT, ALIGN_CENTER);
+    set_frame(title, rect(0., y, STATE_W, 28.));
+    add_sub(inner, title);
+    y -= SP2 + 36.;
+    let body = wrapping_label("", T_CALLOUT, C_TEXT2, ALIGN_CENTER);
+    set_frame(body, rect(0., y, STATE_W, 36.));
+    add_sub(inner, body);
+    let mut btn = std::ptr::null_mut();
+    if with_btn {
+        y -= SP4 + 28.;
+        btn = msg_send![class!(NSButton), buttonWithTitle: ns("Open Settings…")
+            target: ui.ctl.get() action: sel!(showSettings:)];
+        set_frame(btn, rect((STATE_W - 140.) / 2., y, 140., 28.));
+        add_sub(inner, btn);
+    }
+    StateParts { host, icon, title, body, btn }
+}
+unsafe fn fill_state(p: &StateParts, sym: &str, title: &str, body: &str) {
+    let img = symbol(sym, 40., Weight::Regular);
+    if !img.is_null() {
+        let _: () = msg_send![p.icon, setImage: img];
+    }
+    set_text(p.title, title);
+    set_text(p.body, body);
 }
 
 // ---- Window -----------------------------------------------------------------
 
+const ROW_H: f64 = 76.0;
+const THUMB_W: f64 = 40.0;
+const THUMB_H: f64 = 60.0;
+const PILL_H: f64 = 20.0;
+const PILL_MAX_W: f64 = 220.0;
+const BTN_W: f64 = 100.0;
+const SPIN: f64 = 16.0;
+const SEG_H: f64 = 32.0;
+const FIELD_H: f64 = 28.0;
+const STATUS_H: f64 = 16.0;
+
 unsafe fn build_window() {
     let ui = UI.get_mut().unwrap();
-    let w: *mut Object = msg_send![class!(NSWindow), alloc];
+    let w: *mut Object = msg_send![jr_window_class(), alloc];
     let w: *mut Object = msg_send![w,
-        initWithContentRect: rect(0., 0., 620., 640.)
-        styleMask: (1 | 2 | 8) as NSUInteger backing: 2usize defer: NO];
-    let _: () = msg_send![w, setTitle: ns("Request something new")];
+        initWithContentRect: rect(0., 0., 680., 680.)
+        styleMask: (1 | 2 | 8 | (1 << 15)) as NSUInteger backing: 2usize defer: NO];
+    let _: () = msg_send![w, setTitle: ns("Request Movies & Shows")];
+    let _: () = msg_send![w, setTitlebarAppearsTransparent: YES];
+    let _: () = msg_send![w, setTitleVisibility: 1isize];
     let _: () = msg_send![w, setReleasedWhenClosed: NO];
-    let _: () = msg_send![w, setMinSize: size(460., 360.)];
-    let _: () = msg_send![w, center];
+    let _: () = msg_send![w, setMinSize: size(520., 420.)];
+    place_window(w);
     let c: *mut Object = msg_send![w, contentView];
     let b = bounds_of(c);
+    let hdr_w = b.size.w - 2. * SP6;
 
-    // Segmented control: Search | My requests
+    // Opaque canvas behind everything.
+    let canvas = surface(b, C_CANVAS, 0.);
+    set_autoresize(canvas, RESIZE_W | RESIZE_H);
+    add_sub(c, canvas);
+
+    // Header, measured from the top below the reserved title band.
+    let mut top = TITLEBAR_H;
     let labels: *mut Object = msg_send![class!(NSMutableArray), array];
-    for t in ["Search", "My requests"] {
+    for t in ["Search", "My Requests"] {
         let _: () = msg_send![labels, addObject: ns(t)];
     }
     let tabs: *mut Object = msg_send![class!(NSSegmentedControl),
         segmentedControlWithLabels: labels trackingMode: 0i64
         target: ui.ctl.get() action: sel!(seerrTab:)];
+    let _: () = msg_send![tabs, setControlSize: 3isize];
     let _: () = msg_send![tabs, setSelectedSegment: 0isize];
-    set_frame(tabs, rect(16., b.size.h - 44., 220., 24.));
-    set_autoresize(tabs, MARGIN_MINY);
+    let tw = 240.;
+    set_frame(tabs, rect(((b.size.w - tw) / 2.).floor(), b.size.h - top - SEG_H, tw, SEG_H));
+    set_autoresize(tabs, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY);
     add_sub(c, tabs);
+    top += SEG_H + SP3;
 
     let sf: *mut Object = msg_send![class!(NSSearchField), alloc];
-    let sf: *mut Object = msg_send![sf, initWithFrame: rect(16., b.size.h - 80., b.size.w - 32., 28.)];
-    let _: () = msg_send![sf.cell(), setPlaceholderString: ns("Search movies and TV shows")];
+    let sf: *mut Object = msg_send![sf, initWithFrame: rect(SP6, b.size.h - top - FIELD_H, hdr_w, FIELD_H)];
+    let _: () = msg_send![sf, setControlSize: 3isize];
+    let _: () = msg_send![sf.cell(), setPlaceholderString: ns("Search movies and shows")];
     let _: () = msg_send![sf, setDelegate: ui.ctl.get()]; // controlTextDidChange: -> SeerrSearch
     let _: () = msg_send![sf, setSendsWholeSearchString: NO];
     set_autoresize(sf, RESIZE_W | MARGIN_MINY);
     add_sub(c, sf);
     autorel(sf);
+    top += FIELD_H + SP2;
 
-    let st = make_label("", 12.0, false, false);
-    set_frame(st, rect(16., b.size.h - 104., b.size.w - 32., 16.));
-    let _: () = msg_send![st, setTextColor: color_named("secondary")];
-    let _: () = msg_send![st.cell(), setLineBreakMode: 4usize];
+    let st = label("", T_CALLOUT, C_TEXT2, ALIGN_LEFT);
+    set_frame(st, rect(SP6, b.size.h - top - STATUS_H, hdr_w, STATUS_H));
     set_autoresize(st, RESIZE_W | MARGIN_MINY);
     add_sub(c, st);
+    top += STATUS_H + SP2;
 
     let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: rect(0., 0., b.size.w, b.size.h - 112.)];
+    let sc: *mut Object = msg_send![sc, initWithFrame: rect(0., 0., b.size.w, b.size.h - top)];
     let _: () = msg_send![sc, setHasVerticalScroller: YES];
     let _: () = msg_send![sc, setDrawsBackground: NO];
+    let _: () = msg_send![sc, setBorderType: 0usize];
     set_autoresize(sc, RESIZE_W | RESIZE_H);
     let doc = flip_view(rect(0., 0., b.size.w, 10.));
     set_autoresize(doc, RESIZE_W);
@@ -219,17 +387,22 @@ unsafe fn build_window() {
     autorel(sc);
     autorel(doc);
 
-    // Inline "not set up" hint (shown instead of the search UI).
-    let hint: *mut Object = msg_send![class!(NSTextField),
-        wrappingLabelWithString: ns("Seerr isn't set up yet. Open Settings, turn on Seerr, then enter its URL and API key.")];
-    set_frame(hint, rect(24., b.size.h - 90., b.size.w - 48., 48.));
-    set_autoresize(hint, RESIZE_W | MARGIN_MINY);
-    add_sub(c, hint);
-    let hb: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("Open Settings…")
-        target: ui.ctl.get() action: sel!(showSettings:)];
-    set_frame(hb, rect(24., b.size.h - 128., 140., 28.));
-    set_autoresize(hb, MARGIN_MINY);
-    add_sub(c, hb);
+    // Empty state over the list area (hidden while rows exist).
+    let empty = make_state(rect(0., 0., b.size.w, b.size.h - top), false);
+    add_sub(c, empty.host);
+    autorel(empty.host);
+    set_hidden(empty.host, true);
+
+    // "Not set up" state over the whole content area (instead of the search UI).
+    let hint = make_state(rect(0., 0., b.size.w, b.size.h - TITLEBAR_H), true);
+    fill_state(
+        &hint,
+        "gearshape",
+        "Requests aren't set up",
+        "Turn on Seerr in Settings and add its URL and API key.",
+    );
+    add_sub(c, hint.host);
+    autorel(hint.host);
 
     ui.seerr.win = Ptr::retained(w);
     ui.seerr.tabs = Ptr(tabs);
@@ -237,8 +410,12 @@ unsafe fn build_window() {
     ui.seerr.status = Ptr(st);
     ui.seerr.scroll = Ptr(sc);
     ui.seerr.doc = Ptr(doc);
-    ui.seerr.hint = Ptr(hint);
-    ui.seerr.hint_btn = Ptr(hb);
+    ui.seerr.hint = Ptr(hint.host);
+    ui.seerr.hint_btn = Ptr(hint.btn);
+    ui.seerr.empty = Ptr(empty.host);
+    ui.seerr.empty_icon = Ptr(empty.icon);
+    ui.seerr.empty_title = Ptr(empty.title);
+    ui.seerr.empty_body = Ptr(empty.body);
     release_obj(w); // Ptr::retained took its own +1
 }
 
@@ -253,9 +430,10 @@ pub(crate) unsafe fn apply_config_state() {
         set_hidden(v.get(), !ok);
     }
     set_hidden(ui.seerr.hint.get(), ok);
-    set_hidden(ui.seerr.hint_btn.get(), ok);
     if ok {
         rebuild();
+    } else {
+        set_hidden(ui.seerr.empty.get(), true);
     }
 }
 
@@ -284,77 +462,156 @@ pub(crate) unsafe fn set_status(msg: &str, err: bool) {
         return;
     }
     set_text(ui.seerr.status.get(), msg);
-    let c = if err { color_named("red") } else { color_named("secondary") };
-    let _: () = msg_send![ui.seerr.status.get(), setTextColor: c];
+    set_label_color(ui.seerr.status.get(), if err { C_DANGER } else { C_TEXT2 });
 }
 
 // ---- Rows -------------------------------------------------------------------
 
-unsafe fn badge_color(name: &str) -> *mut Object {
-    match name {
-        "green" => msg_send![class!(NSColor), systemGreenColor],
-        "red" => color_named("red"),
-        _ => color_named("secondary"),
+/// (text colour, fill) for a pill role; fill is the role colour at 16% alpha.
+unsafe fn pill_colors(role: &str) -> (Col, *mut Object) {
+    let base = match role {
+        "ok" => C_OK,
+        "warn" => C_WARN,
+        "danger" => C_DANGER,
+        _ => return (C_TEXT2, color(C_FILL_SEL)),
+    };
+    (base, color_a(base, 0.16))
+}
+
+/// Rounded status pill (NSBox, radius 10) with its caption; returns (box, width).
+unsafe fn make_pill(text: &str, role: &str) -> (*mut Object, f64) {
+    let (tc, fill) = pill_colors(role);
+    let l = label(text, T_CAPTION_EM, tc, ALIGN_CENTER);
+    let cell: *mut Object = msg_send![l, cell];
+    let sz: NSSize = msg_send![cell, cellSize];
+    let w = (sz.w.ceil() + 2. * SP2 + 2.).min(PILL_MAX_W);
+    let b = surface(rect(0., 0., w, PILL_H), C_FILL_SEL, PILL_H / 2.);
+    let _: () = msg_send![b, setFillColor: fill];
+    let cv: *mut Object = msg_send![b, contentView];
+    set_frame(l, rect(SP2, 3., w - 2. * SP2, 14.));
+    add_sub(cv, l);
+    (b, w)
+}
+
+unsafe fn make_spinner(frame: NSRect) -> *mut Object {
+    let sp: *mut Object = msg_send![class!(NSProgressIndicator), alloc];
+    let sp: *mut Object = autorel(msg_send![sp, initWithFrame: frame]);
+    let _: () = msg_send![sp, setStyle: 1usize]; // spinning
+    let _: () = msg_send![sp, setControlSize: 1usize];
+    let _: () = msg_send![sp, setIndeterminate: YES];
+    let _: () = msg_send![sp, startAnimation: nil()];
+    sp
+}
+
+/// Placeholder (fill + glyph) with the poster layer on top; registers the thumb for later images.
+unsafe fn make_thumb(row: *mut Object, spec: &RowSpec) {
+    let ui = UI.get_mut().unwrap();
+    let f = rect(SP6, (ROW_H - THUMB_H) / 2., THUMB_W, THUMB_H);
+    let ph = surface(f, C_FILL_SEL, R_THUMB);
+    add_sub(row, ph);
+    let glyph: *mut Object = msg_send![class!(NSImageView), alloc];
+    let glyph: *mut Object = autorel(msg_send![glyph, initWithFrame: rect(f.origin.x + 10., f.origin.y + 20., 20., 20.)]);
+    let img = symbol(spec.glyph, 16., Weight::Regular);
+    if !img.is_null() {
+        let _: () = msg_send![glyph, setImage: img];
     }
+    let _: () = msg_send![glyph, setContentTintColor: color(C_TEXT3)];
+    add_sub(row, glyph);
+    let art: *mut Object = msg_send![class!(NSView), alloc];
+    let art: *mut Object = autorel(msg_send![art, initWithFrame: f]);
+    let layer = layer_of(art);
+    set_corner(layer, R_THUMB);
+    let _: () = msg_send![layer, setMasksToBounds: YES];
+    let _: () = msg_send![layer, setContentsGravity: ns("resizeAspectFill")];
+    add_sub(row, art);
+    if let Some(p) = &spec.poster {
+        ui.seerr.thumbs.push((p.clone(), art, glyph));
+        if let Some(img) = ui.seerr.images.get(p) {
+            apply_thumb(art, glyph, *img, false);
+        }
+    }
+}
+unsafe fn apply_thumb(art: *mut Object, glyph: *mut Object, img: *mut Object, animate: bool) {
+    let cg = cg_image(img);
+    if cg.is_null() {
+        return;
+    }
+    if animate {
+        tx_begin(M_STD);
+    } else {
+        tx_begin_instant();
+    }
+    let layer: *mut Object = msg_send![art, layer];
+    let _: () = msg_send![layer, setContents: cg];
+    tx_end();
+    set_hidden(glyph, true);
 }
 
 unsafe fn make_row(i: usize, spec: &RowSpec, width: f64, requesting: bool) -> *mut Object {
     let ui = UI.get_mut().unwrap();
-    let row = flip_view(rect(0., i as f64 * ROW_H, width, ROW_H));
+    let row = class_view(b"JRSeerrRow\0", rect(0., i as f64 * ROW_H, width, ROW_H));
     set_autoresize(row, RESIZE_W);
-    let btn_w = if spec.can_request { 104.0 } else { 0.0 };
-    let badge_w = 190.0;
-    let right_pad = 16.0;
 
-    let title = make_label(&spec.title, 14.0, true, false);
-    let _: () = msg_send![title.cell(), setLineBreakMode: 4usize];
-    set_frame(title, rect(16., 10., width - 16. - badge_w - btn_w - right_pad - 8., 20.));
-    set_autoresize(title, RESIZE_W);
-    add_sub(row, title);
+    // Hover background (transparent until the pointer is inside).
+    let bg = surface(rect(SP3, 0., width - 2. * SP3, ROW_H), C_FILL_HOVER, R_ROW);
+    let _: () = msg_send![bg, setTransparent: YES];
+    set_autoresize(bg, RESIZE_W);
+    add_sub(row, bg);
+    (*row).set_ivar::<*mut c_void>("jrBg", bg as *mut c_void);
+    let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut Object = msg_send![ta,
+        initWithRect: rect(0., 0., width, ROW_H)
+        options: (0x01usize | 0x80usize | 0x200usize) owner: row userInfo: nil()];
+    let _: () = msg_send![row, addTrackingArea: ta];
+    autorel(ta);
 
-    let sub = make_label(&spec.sub, 12.0, false, false);
-    let _: () = msg_send![sub, setTextColor: color_named("secondary")];
-    let _: () = msg_send![sub.cell(), setLineBreakMode: 4usize];
-    set_frame(sub, rect(16., 34., width - 16. - badge_w - btn_w - right_pad - 8., 16.));
-    set_autoresize(sub, RESIZE_W);
-    add_sub(row, sub);
+    make_thumb(row, spec);
 
-    let badge = make_label(&spec.badge, 12.0, false, false);
-    let _: () = msg_send![badge, setAlignment: 1usize]; // right
-    let _: () = msg_send![badge, setTextColor: badge_color(spec.badge_color)];
-    let _: () = msg_send![badge.cell(), setLineBreakMode: 4usize];
-    set_frame(badge, rect(width - right_pad - btn_w - badge_w - if btn_w > 0. { 8. } else { 0. }, 22., badge_w, 16.));
-    set_autoresize(badge, MARGIN_MINX);
-    add_sub(row, badge);
-
+    // Right cluster, laid out from the trailing edge: pill, then (Request) button + spinner.
+    // A requestable row shows only the Request button; a "Not requested" pill beside it says nothing new.
+    let mut left = width - SP6;
+    if !spec.can_request {
+        let (pill, pw) = make_pill(&spec.badge, spec.badge_color);
+        left -= pw;
+        set_frame(pill, rect(left, (ROW_H - PILL_H) / 2., pw, PILL_H));
+        set_autoresize(pill, MARGIN_MINX);
+        add_sub(row, pill);
+    }
     if spec.can_request {
+        let bx = left - BTN_W;
         let btn: *mut Object = msg_send![class!(NSButton),
             buttonWithTitle: ns(if requesting { "Requesting…" } else { "Request" })
             target: ui.ctl.get() action: sel!(seerrRequest:)];
+        let _: () = msg_send![btn, setBezelStyle: 1isize];
+        let _: () = msg_send![btn, setControlSize: 1isize];
+        let plus = symbol("plus", 11., Weight::Medium);
+        if !plus.is_null() {
+            let _: () = msg_send![btn, setImage: plus];
+            let _: () = msg_send![btn, setImagePosition: 7isize]; // leading
+        }
         let _: () = msg_send![btn, setTag: i as NSInteger];
         let _: () = msg_send![btn, setEnabled: (!requesting) as BOOL];
-        set_frame(btn, rect(width - right_pad - btn_w, 18., btn_w, 28.));
+        set_frame(btn, rect(bx, (ROW_H - 22.) / 2., BTN_W, 22.));
         set_autoresize(btn, MARGIN_MINX);
         add_sub(row, btn);
+        left = bx - SP2 - SPIN;
+        if requesting {
+            let sp = make_spinner(rect(left, (ROW_H - SPIN) / 2., SPIN, SPIN));
+            set_autoresize(sp, MARGIN_MINX);
+            add_sub(row, sp);
+        }
     }
 
-    let sep: *mut Object = msg_send![class!(NSBox), alloc];
-    let sep: *mut Object = msg_send![sep, initWithFrame: rect(16., ROW_H - 1., width - 32., 1.)];
-    let _: () = msg_send![sep, setBoxType: 2isize]; // NSBoxSeparator
-    set_autoresize(sep, RESIZE_W);
-    add_sub(row, sep);
-    autorel(sep);
-    row
-}
-
-unsafe fn empty_row(text: &str, width: f64) -> *mut Object {
-    let row = flip_view(rect(0., 0., width, ROW_H));
-    set_autoresize(row, RESIZE_W);
-    let l = make_label(text, 13.0, false, false);
-    let _: () = msg_send![l, setTextColor: color_named("secondary")];
-    set_frame(l, rect(16., 20., width - 32., 18.));
-    set_autoresize(l, RESIZE_W);
-    add_sub(row, l);
+    let tx = SP6 + THUMB_W + SP3;
+    let tw = (left - SP3 - tx).max(40.);
+    let title = label(&spec.title, T_HEADLINE, C_TEXT, ALIGN_LEFT);
+    set_frame(title, rect(tx, 19., tw, 20.));
+    set_autoresize(title, RESIZE_W);
+    add_sub(row, title);
+    let sub = label(&spec.sub, T_CALLOUT, C_TEXT2, ALIGN_LEFT);
+    set_frame(sub, rect(tx, 41., tw, 16.));
+    set_autoresize(sub, RESIZE_W);
+    add_sub(row, sub);
     row
 }
 
@@ -365,35 +622,40 @@ pub(crate) unsafe fn rebuild() {
     if s.win.get().is_null() {
         return;
     }
+    s.thumbs.clear();
     for r in s.rows.drain(..) {
         let _: () = msg_send![r, removeFromSuperview];
     }
     let doc = s.doc.get();
     let width = bounds_of(doc).size.w.max(200.0);
     let mut specs: Vec<(RowSpec, bool)> = vec![];
-    let empty_text;
     if s.requests_mode {
         specs = s.requests.iter().map(|r| (request_spec(r), false)).collect();
-        empty_text = if s.requests_loaded { "No requests yet." } else { "Loading your requests…" };
     } else {
         for r in &s.results {
             let busy = s.inflight.iter().any(|(m, id, _)| *m == r.media_type && *id == r.tmdb_id);
             specs.push((result_spec(r), busy));
         }
-        let blank = read_field(s.search.get()).trim().is_empty();
-        empty_text = if blank {
-            "Search for a movie or TV show to request."
-        } else if s.results_loaded {
-            "No results."
-        } else {
-            "Searching…"
-        };
     }
-    if specs.is_empty() {
-        let r = empty_row(empty_text, width);
-        add_sub(doc, r);
-        autorel(r);
-        s.rows.push(r);
+    let empty = if specs.is_empty() {
+        let q = read_field(s.search.get());
+        empty_state(s.requests_mode, s.requests_loaded && s.requests_mode || s.results_loaded && !s.requests_mode, &q)
+    } else {
+        None
+    };
+    match &empty {
+        Some((sym, title, body)) => {
+            let p = StateParts {
+                host: s.empty.get(),
+                icon: s.empty_icon.get(),
+                title: s.empty_title.get(),
+                body: s.empty_body.get(),
+                btn: std::ptr::null_mut(),
+            };
+            fill_state(&p, sym, title, body);
+            set_hidden(s.empty.get(), false);
+        }
+        None => set_hidden(s.empty.get(), true),
     }
     for (i, (spec, busy)) in specs.iter().enumerate() {
         let r = make_row(i, spec, width, *busy);
@@ -401,8 +663,49 @@ pub(crate) unsafe fn rebuild() {
         autorel(r);
         s.rows.push(r);
     }
-    let h = (specs.len().max(1) as f64 * ROW_H).max(bounds_of(s.scroll.get()).size.h);
+    let h = (specs.len() as f64 * ROW_H).max(bounds_of(s.scroll.get()).size.h);
     let _: () = msg_send![doc, setFrameSize: size(width, h)];
+}
+
+/// Poster bytes arrived (via the Seerr server): cache the image and fill matching thumbnails.
+pub(crate) fn on_poster(path: String, bytes: &[u8]) {
+    unsafe {
+        let ui = match UI.get_mut() {
+            Some(u) => u,
+            None => return,
+        };
+        let data: *mut Object = msg_send![class!(NSData),
+            dataWithBytes: bytes.as_ptr() length: bytes.len() as NSUInteger];
+        if data.is_null() {
+            return;
+        }
+        let img: *mut Object = msg_send![class!(NSImage), alloc];
+        let img: *mut Object = msg_send![img, initWithData: data];
+        if img.is_null() {
+            return; // undecodable: the placeholder stays
+        }
+        if cg_image(img).is_null() {
+            release_obj(img);
+            return;
+        }
+        if let Some(old) = ui.seerr.images.insert(path.clone(), img) {
+            release_obj(old);
+        }
+        for (p, art, glyph) in ui.seerr.thumbs.iter() {
+            if *p == path {
+                apply_thumb(*art, *glyph, img, true);
+            }
+        }
+    }
+}
+
+/// Whether the thumbnail for `path` currently shows an image (None: no such row).
+pub(crate) unsafe fn thumb_has_image(path: &str) -> Option<bool> {
+    let ui = UI.get().unwrap();
+    let (_, art, _) = ui.seerr.thumbs.iter().find(|(p, _, _)| p == path)?;
+    let layer: *mut Object = msg_send![*art, layer];
+    let c: *mut Object = msg_send![layer, contents];
+    Some(!c.is_null())
 }
 
 // ---- Actions ----------------------------------------------------------------
@@ -468,6 +771,13 @@ pub(crate) extern "C" fn seerr_request(_t: &mut Object, _c: Sel, sender: *mut Ob
         // Update the clicked button in place (never remove a control from inside its own action).
         let _: () = msg_send![sender, setEnabled: NO];
         let _: () = msg_send![sender, setTitle: ns("Requesting…")];
+        let row: *mut Object = msg_send![sender, superview];
+        let bf = frame_of(sender);
+        if !row.is_null() {
+            let sp = make_spinner(rect(bf.origin.x - SP2 - SPIN, bf.origin.y + (bf.size.h - SPIN) / 2., SPIN, SPIN));
+            set_autoresize(sp, MARGIN_MINX);
+            add_sub(row, sp);
+        }
         set_status(&format!("Requesting “{}”…", r.title), false);
         let _ = ui.ui_tx.send(UiCmd::SeerrRequest {
             media_type: r.media_type,
@@ -565,8 +875,7 @@ pub(crate) unsafe fn on_save_status(ok: bool, message: String) {
     }
     if !ui.seerr.s_status.get().is_null() {
         set_text(ui.seerr.s_status.get(), &message);
-        let c = if ok { color_named("secondary") } else { color_named("red") };
-        let _: () = msg_send![ui.seerr.s_status.get(), setTextColor: c];
+        set_label_color(ui.seerr.s_status.get(), if ok { C_TEXT2 } else { C_DANGER });
     }
     if ok {
         set_status(&message, false);
@@ -604,6 +913,54 @@ mod tests {
             assert!(!result_spec(&res("movie", None, a)).can_request);
         }
         assert!(result_spec(&res("movie", None, Availability::NotRequested)).can_request);
+    }
+
+    #[test]
+    fn badge_roles() {
+        let role = |a| result_spec(&res("movie", None, a)).badge_color;
+        assert_eq!(role(Availability::Available), "ok");
+        assert_eq!(role(Availability::Pending), "warn");
+        assert_eq!(role(Availability::Processing), "warn");
+        assert_eq!(role(Availability::PartiallyAvailable), "warn");
+        assert_eq!(role(Availability::Blocklisted), "danger");
+        assert_eq!(role(Availability::NotRequested), "neutral");
+        let req = |st, av| {
+            request_spec(&SeerrRequestItem {
+                request_id: 1,
+                media_type: "movie".into(),
+                tmdb_id: 1,
+                title: "T".into(),
+                year: None,
+                poster_path: Some("/p.jpg".into()),
+                status: st,
+                availability: av,
+                requested_by: String::new(),
+                created_at: String::new(),
+            })
+        };
+        assert_eq!(req(RequestStatus::Declined, Availability::NotRequested).badge_color, "danger");
+        assert_eq!(req(RequestStatus::Failed, Availability::NotRequested).badge_color, "danger");
+        assert_eq!(req(RequestStatus::Completed, Availability::Available).badge_color, "ok");
+        assert_eq!(req(RequestStatus::Approved, Availability::Processing).badge_color, "warn");
+        assert_eq!(req(RequestStatus::Pending, Availability::Pending).badge_color, "warn");
+        assert_eq!(req(RequestStatus::Unknown, Availability::Blocklisted).badge_color, "danger");
+        assert_eq!(req(RequestStatus::Unknown, Availability::NotRequested).badge_color, "neutral");
+        assert_eq!(req(RequestStatus::Pending, Availability::Pending).poster.as_deref(), Some("/p.jpg"));
+    }
+
+    #[test]
+    fn glyph_follows_media_type() {
+        assert_eq!(result_spec(&res("movie", None, Availability::Available)).glyph, "film");
+        assert_eq!(result_spec(&res("tv", None, Availability::Available)).glyph, "tv");
+    }
+
+    #[test]
+    fn empty_states() {
+        assert_eq!(empty_state(false, false, "  ").unwrap().0, "magnifyingglass");
+        assert_eq!(empty_state(false, false, "dune"), None); // still searching
+        assert_eq!(empty_state(false, true, "dune").unwrap().2, "No matches for “dune”.");
+        assert_eq!(empty_state(true, false, ""), None); // still loading
+        assert_eq!(empty_state(true, true, "").unwrap().0, "tray");
     }
 
     #[test]

@@ -25,7 +25,7 @@ Jellyfast talks to AppKit and AVKit directly, so the UI is fully native (vibranc
 
 ```sh
 cargo build --release
-./target/release/jellyfin-mac
+./target/release/jellyfast
 ```
 
 If your Jellyfin server is plain HTTP, AVPlayer needs an App Transport Security exception in the app bundle's `Info.plist` (`NSAppTransportSecurity` → `NSAllowsArbitraryLoads`).
@@ -41,7 +41,7 @@ Unit and integration tests run offline against mock Jellyfin and Seerr servers; 
 The UI has a headless self-test that drives every screen and action with fake data and exits on its own:
 
 ```sh
-HOME=$(mktemp -d) JELLYFIN_MAC_SELFTEST=1 ./target/debug/jellyfin-mac
+HOME=$(mktemp -d) JELLYFAST_SELFTEST=1 ./target/debug/jellyfast
 ```
 
 Optional live tests against your own servers are `#[ignore]`d and configured through environment variables; see the test modules for the variable names.

@@ -1,4 +1,6 @@
 use crate::config::{config_dir, KEYCHAIN_SERVICE};
+#[cfg(not(test))]
+use crate::config::LEGACY_KEYCHAIN_SERVICE;
 use crate::*;
 use std::fs;
 use std::path::PathBuf;
@@ -75,7 +77,7 @@ pub fn load_token(server: &str) -> Option<String> {
     #[cfg(not(test))]
     {
         use security_framework::passwords;
-        match passwords::get_generic_password(KEYCHAIN_SERVICE, &keychain_account(server)) {
+        match get_migrating(&keychain_account(server)) {
             Ok(t) if !t.is_empty() => String::from_utf8(t).ok(),
             _ => load_fallback(),
         }
@@ -193,7 +195,7 @@ pub fn load_seerr_key(url: &str) -> Option<String> {
     #[cfg(not(test))]
     {
         use security_framework::passwords;
-        match passwords::get_generic_password(KEYCHAIN_SERVICE, &seerr_account(url)) {
+        match get_migrating(&seerr_account(url)) {
             Ok(t) if !t.is_empty() => String::from_utf8(t).ok(),
             _ => load_fallback_at(&fallback_seerr_path()),
         }
@@ -248,7 +250,7 @@ pub fn load_seerr_login(url: &str) -> Option<String> {
     #[cfg(not(test))]
     {
         use security_framework::passwords;
-        match passwords::get_generic_password(KEYCHAIN_SERVICE, &seerr_login_account(url)) {
+        match get_migrating(&seerr_login_account(url)) {
             Ok(t) if !t.is_empty() => String::from_utf8(t).ok(),
             _ => load_fallback_at(&fallback_seerr_login_path()),
         }
@@ -376,5 +378,24 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
         delete_token("x");
         assert_eq!(load_fallback(), None);
+    }
+}
+
+/// Read from the current Keychain service; on a miss, take the item from the
+/// pre-rename service, re-store it under the new one and delete the old copy.
+#[cfg(not(test))]
+fn get_migrating(account: &str) -> Result<Vec<u8>, security_framework::base::Error> {
+    use security_framework::passwords;
+    match passwords::get_generic_password(KEYCHAIN_SERVICE, account) {
+        Ok(v) if !v.is_empty() => Ok(v),
+        current => match passwords::get_generic_password(LEGACY_KEYCHAIN_SERVICE, account) {
+            Ok(v) if !v.is_empty() => {
+                if passwords::set_generic_password(KEYCHAIN_SERVICE, account, &v).is_ok() {
+                    let _ = passwords::delete_generic_password(LEGACY_KEYCHAIN_SERVICE, account);
+                }
+                Ok(v)
+            }
+            _ => current,
+        },
     }
 }

@@ -13,7 +13,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     // Live stream opened by the current channel playback; closed on the next one / stop.
     let mut live_stream: Option<String> = None;
 
-    // Poster disk cache: ~/Library/Caches/JellyfinMac/posters
+    // Poster disk cache: ~/Library/Caches/Jellyfast/posters
     let poster_dir = crate::config::cache_dir().join("posters");
     let _ = std::fs::create_dir_all(&poster_dir);
 
@@ -244,12 +244,27 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                 url,
                                 item_id: full.id.clone(),
                                 title: full.name.clone(),
-                                subtitle: full.series_name.clone(),
+                                subtitle: if full.item_type == "Audio" {
+                                    let parts: Vec<&str> = [full.album_artist.as_deref(), full.album.as_deref()]
+                                        .into_iter()
+                                        .flatten()
+                                        .filter(|s| !s.is_empty())
+                                        .collect();
+                                    if parts.is_empty() { None } else { Some(parts.join(" · ")) }
+                                } else {
+                                    full.series_name.clone()
+                                },
                                 resume_secs,
                                 method,
                                 run_time_secs: crate::jellyfin::urls::secs_from_ticks(
                                     full.run_time_ticks.unwrap_or(0),
                                 ),
+                                image_key: Some(crate::ui::library::poster_key(&full.id)),
+                                media_kind: if full.item_type == "Audio" {
+                                    crate::app::messages::MediaKind::Audio
+                                } else {
+                                    crate::app::messages::MediaKind::Video
+                                },
                             }));
                         }
                         Err(e) => {
@@ -303,7 +318,9 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     }
                     Ok(c) => match c.search(&latest, 1).await {
                         Ok(page) => {
+                            let paths = page.results.iter().filter_map(|r| r.poster_path.clone()).collect();
                             let _ = main_tx.send(MainMsg::SeerrResults(page.results));
+                            fetch_seerr_posters(&c, &main_tx, paths, &poster_dir);
                         }
                         Err(e) => {
                             let _ = main_tx.send(MainMsg::SeerrError(e.to_string()));
@@ -333,7 +350,9 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 }
                 Ok(c) => match c.requests(20, 0).await {
                     Ok(v) => {
+                        let paths = v.iter().filter_map(|r| r.poster_path.clone()).collect();
                         let _ = main_tx.send(MainMsg::SeerrRequestList(v));
+                        fetch_seerr_posters(&c, &main_tx, paths, &poster_dir);
                     }
                     Err(e) => {
                         let _ = main_tx.send(MainMsg::SeerrError(e.to_string()));
@@ -403,7 +422,6 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     }
 }
 
-/// Build (or reuse) the Seerr client. Err = user-facing reason; no network I/O.
 /// Live TV: PlaybackInfo with an HLS-capable device profile, then play the
 /// returned TranscodingUrl (AVPlayer cannot play a raw MPEG-TS stream).
 async fn play_channel(
@@ -428,12 +446,14 @@ async fn play_channel(
                     c.report_start(&channel_id, 0, "Transcode").await;
                     let _ = main_tx.send(MainMsg::PlaybackReady(PlaybackStart {
                         url,
-                        item_id: channel_id,
+                        item_id: channel_id.clone(),
                         title: name,
                         subtitle: Some("Live".into()),
                         resume_secs: 0.0,
                         method: crate::transcode::decision::PlaybackMethod::ServerHls,
                         run_time_secs: 0.0,
+                        image_key: Some(crate::ui::library::poster_key(&channel_id)),
+                        media_kind: crate::app::messages::MediaKind::Video,
                     }));
                 }
                 None => {
@@ -450,6 +470,7 @@ async fn play_channel(
     }
 }
 
+/// Build (or reuse) the Seerr client. Err = user-facing reason; no network I/O.
 fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrClient, String> {
     if !cfg.settings.seerr_enabled {
         return Err("Seerr is turned off. Enable it in Settings to search and request.".into());
@@ -675,6 +696,37 @@ pub(crate) async fn fetch_posters(
             };
             if let Some(b) = bytes {
                 let _ = tx.send(MainMsg::PosterReady { key, bytes: b });
+            }
+        });
+    }
+}
+
+/// Fetch thumbnails for Seerr results through the user's Seerr server (never TMDB),
+/// with the same on-disk cache as library posters. Each arrives as `SeerrPoster`.
+pub(crate) fn fetch_seerr_posters(
+    c: &SeerrClient,
+    main_tx: &UnboundedSender<MainMsg>,
+    mut paths: Vec<String>,
+    poster_dir: &std::path::Path,
+) {
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
+    for path in paths.into_iter().take(40) {
+        let (c, tx, dir) = (c.clone(), main_tx.clone(), poster_dir.to_path_buf());
+        tokio::spawn(async move {
+            let file = dir.join(format!("seerr-{:016x}.img", sys_key(&path)));
+            let bytes = match tokio::fs::read(&file).await {
+                Ok(b) if !b.is_empty() => Some(b),
+                _ => match c.poster(&path).await {
+                    Ok(b) => {
+                        let _ = tokio::fs::write(&file, &b).await;
+                        Some(b)
+                    }
+                    Err(_) => None,
+                },
+            };
+            if let Some(bytes) = bytes {
+                let _ = tx.send(MainMsg::SeerrPoster { path, bytes });
             }
         });
     }
@@ -988,11 +1040,20 @@ mod tests {
         fn send(&self, c: UiCmd) {
             self.tx.send(c).unwrap();
         }
-        async fn next(&mut self) -> MainMsg {
+        async fn next_raw(&mut self) -> MainMsg {
             tokio::time::timeout(Duration::from_secs(10), self.rx.recv())
                 .await
                 .expect("timed out waiting for MainMsg")
                 .expect("main channel closed")
+        }
+        /// Next message, ignoring asynchronous Seerr thumbnail deliveries.
+        async fn next(&mut self) -> MainMsg {
+            loop {
+                match self.next_raw().await {
+                    MainMsg::SeerrPoster { .. } => continue,
+                    m => return m,
+                }
+            }
         }
         /// Next message, skipping asynchronous PosterReady notifications.
         async fn next_nonposter(&mut self) -> MainMsg {
@@ -1665,6 +1726,41 @@ mod tests {
             o => panic!("{:?}", o),
         }
         assert_eq!(m.find("GET", "/api/v1/search")[0].query["query"], "incep tion");
+    }
+
+    #[tokio::test]
+    async fn seerr_posters_come_through_the_server_and_are_cached() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrSearch { q: "incep".into() });
+        let mut got = std::collections::HashMap::new();
+        let mut results = false;
+        while !results || got.len() < 2 {
+            match h.next_raw().await {
+                MainMsg::SeerrResults(_) => results = true,
+                MainMsg::SeerrPoster { path, bytes } => {
+                    got.insert(path, bytes);
+                }
+                o => panic!("{:?}", o),
+            }
+        }
+        assert_eq!(got["/inc.jpg"], b"IMG/inc.jpg");
+        assert_eq!(got["/got.jpg"], b"IMG/got.jpg");
+        let reqs = m.find("GET", "/imageproxy/tmdb/t/p/w92/inc.jpg");
+        assert_eq!(reqs.len(), 1);
+        assert!(!reqs[0].headers.contains_key("x-api-key"), "poster fetch must not leak the key");
+        // Second search is served from the disk cache.
+        h.send(UiCmd::SeerrSearch { q: "incep".into() });
+        let (mut results, mut n) = (false, 0);
+        while !results || n < 2 {
+            match h.next_raw().await {
+                MainMsg::SeerrResults(_) => results = true,
+                MainMsg::SeerrPoster { .. } => n += 1,
+                o => panic!("{:?}", o),
+            }
+        }
+        assert_eq!(m.find("GET", "/imageproxy/tmdb/t/p/w92/inc.jpg").len(), 1);
     }
 
     #[tokio::test]

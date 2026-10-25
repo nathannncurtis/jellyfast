@@ -1,5 +1,5 @@
 //! ============================================================================
-//! Jellyfin macOS Client — Single-file baseline ("jellyfin-mac")
+//! Jellyfast — a native macOS client for Jellyfin
 //! ============================================================================
 //!
 //! Build:
@@ -30,8 +30,8 @@
 //!   (b) an API key (dashboard → API Keys). With an API key the client picks
 //!       the first user account for library browsing (documented limitation).
 //!   The last successful server/user is remembered in
-//!   ~/Library/Application Support/JellyfinMac/config.json; the token lives in
-//!   the Keychain (service "app.jellyfin.mac"). RUST_LOG=debug overrides the
+//!   ~/Library/Application Support/Jellyfast/config.json; the token lives in
+//!   the Keychain (service "to.nathancurtis.jellyfast"). RUST_LOG=debug overrides the
 //!   default `info` log filter.
 //!
 //! Player stack choice (and why):
@@ -88,7 +88,7 @@
 //! CARGO.TOML (pin exactly these; objc-ecosystem APIs are version-sensitive)
 //! ===========================================================================
 //! [package]
-//! name = "jellyfin-mac"
+//! name = "jellyfast"
 //! version = "0.1.0"
 //! edition = "2021"
 //!
@@ -167,6 +167,7 @@ fn main() {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,hyper=warn,reqwest=warn"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    config::migrate_legacy_dirs();
     let cfg = config::load_config();
     let (ui_tx, ui_rx) = unbounded_channel::<UiCmd>();
     let (main_tx, main_rx) = unbounded_channel::<MainMsg>();

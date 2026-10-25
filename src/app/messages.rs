@@ -114,6 +114,11 @@ pub enum MainMsg {
         title: String,
     },
     SeerrRequestList(Vec<SeerrRequestItem>),
+    /// Poster bytes for a TMDB-relative `poster_path`, fetched through the Seerr server.
+    SeerrPoster {
+        path: String,
+        bytes: Vec<u8>,
+    },
     /// Search/request/list failure, "already requested", or Seerr disabled/unconfigured.
     SeerrError(String),
     /// Outcome of `SaveSeerr` (ok=false: nothing was persisted).
@@ -132,6 +137,16 @@ pub struct PlaybackStart {
     pub resume_secs: f64,
     pub method: PlaybackMethod,
     pub run_time_secs: f64,
+    /// `poster_key` of the item's artwork (for the buffering backdrop), when it has some.
+    pub image_key: Option<u64>,
+    pub media_kind: MediaKind,
+}
+
+/// Whether playback shows the full-window video view or the now-playing bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Video,
+    Audio,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -154,6 +169,9 @@ pub struct Settings {
     /// account `seerr-login@<url>`); empty = API-key mode.
     #[serde(default)]
     pub seerr_username: String,
+    /// Show the playback-info panel (time, resolution, bitrate, method) over the video.
+    #[serde(default)]
+    pub show_stats: bool,
 }
 fn default_sub_lang() -> String {
     String::new()

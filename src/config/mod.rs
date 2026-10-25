@@ -2,8 +2,11 @@ use super::*;
 use std::fs;
 
 
-pub const APP_DIR_NAME: &str = "JellyfinMac";
-pub const KEYCHAIN_SERVICE: &str = "app.jellyfin.mac";
+pub const APP_DIR_NAME: &str = "Jellyfast";
+pub const KEYCHAIN_SERVICE: &str = "to.nathancurtis.jellyfast";
+/// Names used before the rename to Jellyfast; read once and migrated.
+pub const LEGACY_APP_DIR_NAME: &str = "JellyfinMac";
+pub const LEGACY_KEYCHAIN_SERVICE: &str = "app.jellyfin.mac";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Config {
@@ -47,6 +50,22 @@ pub fn config_dir() -> PathBuf {
         .join("Library")
         .join("Application Support")
         .join(APP_DIR_NAME)
+}
+
+/// Move `~/Library/{Application Support,Caches}/JellyfinMac` to the Jellyfast names
+/// when only the old directory exists. Best effort: failures leave the old data in place.
+pub fn migrate_legacy_dirs() {
+    #[cfg(test)]
+    if dir_override().is_some() {
+        return;
+    }
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+    for base in [home.join("Library").join("Application Support"), home.join("Library").join("Caches")] {
+        let (old, new) = (base.join(LEGACY_APP_DIR_NAME), base.join(APP_DIR_NAME));
+        if old.is_dir() && !new.exists() {
+            let _ = fs::rename(&old, &new);
+        }
+    }
 }
 
 pub fn cache_dir() -> PathBuf {
@@ -120,7 +139,7 @@ pub(crate) mod test_env {
         pub(crate) fn new() -> Self {
             let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let dir = std::env::temp_dir().join(format!(
-                "jellyfin-mac-test-{}-{}",
+                "jellyfast-test-{}-{}",
                 std::process::id(),
                 N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             ));
