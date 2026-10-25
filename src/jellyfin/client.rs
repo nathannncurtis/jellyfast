@@ -66,6 +66,9 @@ fn map_err(e: reqwest::Error) -> JFError {
     }
 }
 
+/// Fields requested for every home-screen list.
+const HOME_FIELDS: &str = "PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName";
+
 impl JellyfinClient {
     pub fn new(
         base: &str,
@@ -297,49 +300,34 @@ impl JellyfinClient {
         r.json().await.map_err(|e| JFError::Parse(e.to_string()))
     }
 
-    /// GET a JSON body with the session headers and the given query pairs.
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str, query: &[(&str, String)]) -> Result<T, JFError> {
-        let r = self
-            .http
-            .get(url)
-            .header("Authorization", self.auth_header())
-            .header("X-Emby-Token", &self.token)
-            .query(query)
-            .send()
-            .await
-            .map_err(map_err)?;
-        let r = check(r).await?;
-        r.json().await.map_err(|e| JFError::Parse(e.to_string()))
-    }
-
     /// The seasons of a series, in the server's order.
     pub async fn seasons(&self, series_id: &str) -> Result<Vec<Season>, JFError> {
-        let url = format!("{}/Shows/{}/Seasons", self.base, enc(series_id));
-        let page: ItemsPage<Season> = self.get_json(&url, &[("UserId", self.user_id.clone())]).await?;
+        let path = format!("/Shows/{}/Seasons", enc(series_id));
+        let page: ItemsPage<Season> = self.get_json(&path, &[("UserId", self.user_id.clone())]).await?;
         Ok(page.items)
     }
 
     /// The episodes of one season, in episode order, with their watched state.
     pub async fn season_episodes(&self, series_id: &str, season_id: &str) -> Result<Vec<Episode>, JFError> {
-        let url = format!("{}/Shows/{}/Episodes", self.base, enc(series_id));
+        let path = format!("/Shows/{}/Episodes", enc(series_id));
         let query = [
             ("UserId", self.user_id.clone()),
             ("seasonId", season_id.to_string()),
             ("Fields", "Overview".to_string()),
         ];
-        let page: ItemsPage<Episode> = self.get_json(&url, &query).await?;
+        let page: ItemsPage<Episode> = self.get_json(&path, &query).await?;
         Ok(page.items)
     }
 
     /// The episode the user should watch next in a series, if the server has one.
-    pub async fn next_up(&self, series_id: &str) -> Result<Option<Episode>, JFError> {
-        let url = format!("{}/Shows/NextUp", self.base);
+    pub async fn series_next_up(&self, series_id: &str) -> Result<Option<Episode>, JFError> {
+        let path = "/Shows/NextUp";
         let query = [
             ("UserId", self.user_id.clone()),
             ("SeriesId", series_id.to_string()),
             ("Limit", "1".to_string()),
         ];
-        let page: ItemsPage<Episode> = self.get_json(&url, &query).await?;
+        let page: ItemsPage<Episode> = self.get_json(path, &query).await?;
         Ok(page.items.into_iter().next())
     }
 
@@ -348,6 +336,84 @@ impl JellyfinClient {
         let r = self.http.get(url).timeout(Duration::from_secs(30)).send().await.map_err(map_err)?;
         let r = check(r).await?;
         r.bytes().await.map(|b| b.to_vec()).map_err(|e| JFError::Network(e.to_string()))
+    }
+
+    /// GET a JSON endpoint with the standard auth headers. `pairs` are raw
+    /// values; reqwest percent-encodes them.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        pairs: &[(&str, String)],
+    ) -> Result<T, JFError> {
+        let r = self
+            .http
+            .get(format!("{}{}", self.base, path))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .query(pairs)
+            .send()
+            .await
+            .map_err(map_err)?;
+        let r = check(r).await?;
+        r.json().await.map_err(|e| JFError::Parse(e.to_string()))
+    }
+
+    /// Continue Watching: in-progress movies and episodes, most recent first.
+    pub async fn resume_items(&self, limit: u32) -> Result<Vec<ListItem>, JFError> {
+        #[derive(Deserialize)]
+        struct R {
+            #[serde(rename = "Items", default)]
+            items: Vec<ListItem>,
+        }
+        let path = format!("/Users/{}/Items/Resume", enc(&self.user_id));
+        let pairs = [
+            ("Limit", limit.to_string()),
+            ("MediaTypes", "Video".to_string()),
+            ("Fields", HOME_FIELDS.to_string()),
+            ("ImageTypeLimit", "1".to_string()),
+        ];
+        let v: R = self.get_json(&path, &pairs).await?;
+        Ok(v.items)
+    }
+
+    /// Next Up: the next unwatched episode of each series in progress.
+    pub async fn next_up(&self, limit: u32) -> Result<Vec<ListItem>, JFError> {
+        #[derive(Deserialize)]
+        struct R {
+            #[serde(rename = "Items", default)]
+            items: Vec<ListItem>,
+        }
+        let pairs = [
+            ("UserId", self.user_id.clone()),
+            ("Limit", limit.to_string()),
+            ("Fields", HOME_FIELDS.to_string()),
+            ("ImageTypeLimit", "1".to_string()),
+        ];
+        let v: R = self.get_json("/Shows/NextUp", &pairs).await?;
+        Ok(v.items)
+    }
+
+    /// Recently added items inside one library (`parent_id` is a view id).
+    /// The endpoint answers with a bare array, not an `Items` envelope.
+    pub async fn latest_items(&self, parent_id: &str, limit: u32) -> Result<Vec<ListItem>, JFError> {
+        let path = format!("/Users/{}/Items/Latest", enc(&self.user_id));
+        let pairs = [
+            ("ParentId", parent_id.to_string()),
+            ("Limit", limit.to_string()),
+            ("Fields", HOME_FIELDS.to_string()),
+            ("ImageTypeLimit", "1".to_string()),
+        ];
+        self.get_json(&path, &pairs).await
+    }
+
+    /// Movie recommendation groups (similar to recent plays, liked people, ...).
+    pub async fn recommendations(&self, limit: u32) -> Result<Vec<RecommendationDto>, JFError> {
+        let pairs = [
+            ("UserId", self.user_id.clone()),
+            ("CategoryLimit", "5".to_string()),
+            ("ItemLimit", limit.to_string()),
+        ];
+        self.get_json("/Movies/Recommendations", &pairs).await
     }
 
     pub async fn livetv_channels(&self) -> Result<Vec<ListItem>, JFError> {
@@ -1236,6 +1302,93 @@ mod tests {
     // ------------------------------------------------------------------
     // Live TV
     // ------------------------------------------------------------------
+
+    const HOME_ITEMS_JSON: &str = r#"{"Items":[{"Id":"a1","Name":"Alpha","Type":"Episode","SeriesName":"Show"}],"TotalRecordCount":1}"#;
+
+    #[tokio::test]
+    async fn resume_items_path_query_auth_and_parse() {
+        let m = serve(|_| reply(200, HOME_ITEMS_JSON)).await;
+        let items = client(&m.base).resume_items(16).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].series_name.as_deref(), Some("Show"));
+        let r = m.last();
+        assert_eq!(r.method, "GET");
+        assert_eq!(r.path, format!("/Users/{}/Items/Resume", USER));
+        assert_eq!(r.qp("Limit"), Some("16"));
+        assert_eq!(r.qp("MediaTypes"), Some("Video"));
+        assert!(r.qp("Fields").unwrap().contains("UserData"));
+        assert_token_auth(&r);
+    }
+
+    #[tokio::test]
+    async fn next_up_sends_user_id_and_parses_items() {
+        let m = serve(|_| reply(200, HOME_ITEMS_JSON)).await;
+        let items = client(&m.base).next_up(12).await.unwrap();
+        assert_eq!(items[0].id, "a1");
+        let r = m.last();
+        assert_eq!(r.path, "/Shows/NextUp");
+        assert_eq!(r.qp("UserId"), Some(USER));
+        assert_eq!(r.qp("Limit"), Some("12"));
+        assert_token_auth(&r);
+    }
+
+    #[tokio::test]
+    async fn latest_items_sends_parent_and_parses_bare_array() {
+        let m = serve(|_| reply(200, r#"[{"Id":"l1","Name":"Newest","Type":"Movie"}]"#)).await;
+        let items = client(&m.base).latest_items("lib-7", 8).await.unwrap();
+        assert_eq!(items[0].name, "Newest");
+        let r = m.last();
+        assert_eq!(r.path, format!("/Users/{}/Items/Latest", USER));
+        assert_eq!(r.qp("ParentId"), Some("lib-7"));
+        assert_eq!(r.qp("Limit"), Some("8"));
+        assert_token_auth(&r);
+    }
+
+    #[tokio::test]
+    async fn recommendations_parse_groups_with_missing_fields() {
+        let body = r#"[
+            {"CategoryId":"c","RecommendationType":"SimilarToRecentlyPlayed","BaselineItemName":"Dune",
+             "Items":[{"Id":"r1","Name":"Arrival","Type":"Movie"}]},
+            {"Items":[]}
+        ]"#;
+        let m = serve(|_| reply(200, body)).await;
+        let groups = client(&m.base).recommendations(8).await.unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].baseline_name.as_deref(), Some("Dune"));
+        assert_eq!(groups[0].items[0].name, "Arrival");
+        assert!(groups[1].recommendation_type.is_none() && groups[1].items.is_empty());
+        let r = m.last();
+        assert_eq!(r.path, "/Movies/Recommendations");
+        assert_eq!(r.qp("UserId"), Some(USER));
+        assert_eq!(r.qp("ItemLimit"), Some("8"));
+        assert_eq!(r.qp("CategoryLimit"), Some("5"));
+        assert_token_auth(&r);
+    }
+
+    #[tokio::test]
+    async fn home_endpoints_map_http_errors() {
+        let m = serve(|_| status_only(401)).await;
+        let c = client(&m.base);
+        assert!(matches!(err(c.resume_items(4).await), JFError::Auth(_)));
+        assert!(matches!(err(c.next_up(4).await), JFError::Auth(_)));
+        assert!(matches!(err(c.latest_items("p", 4).await), JFError::Auth(_)));
+        assert!(matches!(err(c.recommendations(4).await), JFError::Auth(_)));
+
+        let m = serve(|_| status_only(500)).await;
+        let c = client(&m.base);
+        assert!(matches!(err(c.resume_items(4).await), JFError::Api(500, _)));
+        assert!(matches!(err(c.recommendations(4).await), JFError::Api(500, _)));
+    }
+
+    #[tokio::test]
+    async fn home_endpoints_map_bad_json_and_network_errors() {
+        let m = serve(|_| reply(200, "not json")).await;
+        assert!(matches!(err(client(&m.base).next_up(4).await), JFError::Parse(_)));
+        assert!(matches!(err(client(&m.base).latest_items("p", 4).await), JFError::Parse(_)));
+        let dead = refused_base();
+        assert!(matches!(err(client(&dead).resume_items(4).await), JFError::Network(_)));
+        assert!(matches!(err(client(&dead).recommendations(4).await), JFError::Network(_)));
+    }
 
     #[tokio::test]
     async fn livetv_channels_path_query_and_parse() {

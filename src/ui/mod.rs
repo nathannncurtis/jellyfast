@@ -7,3 +7,5 @@ pub mod shell;
 pub mod shortcuts;
 pub mod nowbar;
 pub mod detail;
+pub mod home;
+pub mod onboarding;

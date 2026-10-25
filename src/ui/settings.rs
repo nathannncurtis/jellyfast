@@ -88,6 +88,12 @@ pub(crate) unsafe fn build_settings_window() {
     row(&mut place, &mut top, "Server URL", url_f, 24., CTRL_W);
     ui.s_url = Ptr(url_f);
 
+    section(&mut place, &mut top, "Browsing", false);
+    let lay = popup(&["Separate libraries", "One big library"]);
+    row(&mut place, &mut top, "Sidebar", lay, 26., 200.);
+    help(&mut place, &mut top, "One big library shows Home, Browse, Search and Requests, with movies and shows mixed.");
+    ui.s_layout = Ptr(lay);
+
     section(&mut place, &mut top, "Playback", false);
     let q = popup(&["Original", "40 Mbps", "20 Mbps", "10 Mbps", "5 Mbps", "3 Mbps"]);
     row(&mut place, &mut top, "Preferred quality", q, 26., 160.);
@@ -228,6 +234,8 @@ pub(crate) unsafe fn settings_fill(cfg: &Config) {
         _ => 0,
     };
     let _: () = msg_send![ui.s_theme.get(), selectItemAtIndex: t_idx as NSInteger];
+    let l_idx = if cfg.layout_mode == Some(crate::config::LayoutMode::Unified) { 1isize } else { 0 };
+    let _: () = msg_send![ui.s_layout.get(), selectItemAtIndex: l_idx];
     let _: () = msg_send![ui.seerr.s_on.get(), setState: cfg.settings.seerr_enabled as NSInteger];
     set_text(ui.seerr.s_url.get(), &crate::jellyfin::urls::bare_url(&cfg.settings.seerr_url));
     // Secrets are never prefilled. A saved URL implies a stored credential

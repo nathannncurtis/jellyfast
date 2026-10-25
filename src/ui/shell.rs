@@ -169,6 +169,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(content_host, sc);
     autorel(sc);
     ui.lib_scroll = Ptr(sc);
+    crate::ui::home::build_scroll(content_host, grid_area);
 
     let grid_cls = *GRID_CLASS.get().unwrap();
     let grid: *mut Object = msg_send![grid_cls, alloc];
@@ -224,6 +225,9 @@ pub(crate) unsafe fn build_window_and_ui() {
 
     // --- Now-playing bar (audio), on top of the library ---
     crate::ui::nowbar::build(content_host, b);
+
+    // --- First-run onboarding card, above everything on the library side ---
+    crate::ui::onboarding::build(content_host, b);
 
     // --- Player host (AVKit) + chrome ---
     let pcls = *crate::ui::player::PLAYER_HOST_CLASS.get().unwrap();
@@ -546,6 +550,12 @@ pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, ta
 /// Refresh the selection pill on every library row from `ui.selected_view`.
 pub(crate) unsafe fn sidebar_refresh_selection() {
     let ui = UI.get_mut().unwrap();
+    if !ui.home.row.get().is_null() {
+        row_set_selected(ui.home.row.get(), ui.home.active);
+    }
+    if !ui.browse_row.get().is_null() {
+        row_set_selected(ui.browse_row.get(), ui.browse_active);
+    }
     for (i, (row, _)) in ui.rows.iter().enumerate() {
         row_set_selected(*row, ui.selected_view == Some(i));
     }
@@ -555,9 +565,11 @@ pub(crate) unsafe fn sidebar_refresh_selection() {
 /// Keeps the selection on the same library when it is still shown.
 pub(crate) unsafe fn apply_library_prefs() {
     let ui = UI.get_mut().unwrap();
+    // `visible_views` keeps Live TV only when it is shown, so no extra Live TV row is added.
     ui.views = crate::app::libraries::visible_views(&ui.all_views, &ui.cfg.library_order, &ui.cfg.hidden_libraries);
-    let user = ui.user_label.clone();
-    sidebar_rebuild(user);
+    let user = ui.user_name.clone();
+    let views = ui.views.clone();
+    sidebar_rebuild(user, &views, false);
     let ui = UI.get_mut().unwrap();
     ui.selected_view = ui
         .mode_stack
@@ -566,8 +578,44 @@ pub(crate) unsafe fn apply_library_prefs() {
     sidebar_refresh_selection();
 }
 
+/// Apply a layout choice (onboarding or Settings): save it, tell the worker, and
+/// rebuild the sidebar. A place the new layout no longer shows (a library in the
+/// unified layout, Browse in the separate one) falls back to Home.
+pub(crate) unsafe fn set_layout_mode(mode: crate::config::LayoutMode) {
+    use crate::config::LayoutMode;
+    let ui = UI.get_mut().unwrap();
+    let changed = ui.cfg.layout_mode != Some(mode);
+    ui.cfg.layout_mode = Some(mode);
+    crate::config::save_config(&ui.cfg);
+    let _ = ui.ui_tx.send(UiCmd::SetLayoutMode { mode });
+    if !changed {
+        return;
+    }
+    let user = ui.user_name.clone();
+    let views = ui.views.clone();
+    let has_live_tv = views.iter().any(|v| v.2.as_deref() == Some("livetv"));
+    sidebar_rebuild(user, &views, has_live_tv);
+    let lost_place = match mode {
+        LayoutMode::Unified => ui.selected_view.is_some(),
+        LayoutMode::Separate => ui.browse_active,
+    };
+    if lost_place {
+        crate::ui::home::enter();
+    } else {
+        sidebar_refresh_selection();
+    }
+}
+
+/// Sidebar "Search": put the caret in the search field.
+pub(crate) extern "C" fn focus_search(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: BOOL = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
+    }
+}
+
 /// Rebuild the sidebar rows from `ui.views`. Callers set `ui.views` first.
-pub(crate) unsafe fn sidebar_rebuild(user: String) {
+pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Option<String>)], has_live_tv: bool) {
     let ui = UI.get_mut().unwrap();
     let stack = ui.side_stack.get();
     // Drop everything built last time (header, rows, footer) so nothing piles up.
@@ -582,38 +630,69 @@ pub(crate) unsafe fn sidebar_rebuild(user: String) {
         let _: () = msg_send![v, removeFromSuperview];
     }
     let views: Vec<(String, String, Option<String>)> = ui.views.clone();
+    let unified = ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified);
+    ui.user_name = user.clone();
 
-    // Section header
-    let hdr_box: *mut Object = msg_send![class!(NSView), alloc];
-    let hdr_box: *mut Object = autorel(msg_send![hdr_box, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, 20.)]);
-    let hdr = label("Library", T_CAPTION_EM, C_TEXT3, ALIGN_LEFT);
-    set_frame(hdr, rect(SP2, 2., SIDEBAR_W - 2. * SP3 - SP2, 16.));
-    set_autoresize(hdr, RESIZE_W);
-    add_sub(hdr_box, hdr);
-    fix_height(hdr_box, 20.);
-    let _: () = msg_send![stack, addView: hdr_box inGravity: 1isize];
-    ui.side_dyn.push(hdr_box);
+    // Home sits above the library list.
+    let home_row = sidebar_row("Home", "house", sel!(homeSelected:), -1);
+    let _: () = msg_send![stack, addView: home_row inGravity: 1isize];
+    ui.side_dyn.push(home_row);
+    ui.home.row = Ptr(home_row);
+    row_set_selected(home_row, ui.home.active);
+    ui.browse_row = Ptr(nil());
 
-    for (i, (id, name, ct)) in views.iter().enumerate() {
-        let symbol_name = match ct.as_deref() {
-            Some("movies") => "film",
-            Some("tvshows") => "tv",
-            Some("music") => "music.note",
-            Some("livetv") => "antenna.radiowaves.left.and.right",
-            Some("boxsets") => "rectangle.stack",
-            _ => "square.stack",
-        };
-        let row = sidebar_row(name, symbol_name, sel!(viewSelected:), i as NSInteger);
-        let _: () = msg_send![stack, addView: row inGravity: 1isize];
-        ui.rows.push((row, id.clone()));
-        ui.side_dyn.push(row);
-        row_set_selected(row, ui.selected_view == Some(i));
+    if unified {
+        // One big library: Browse, Search and Requests replace the library list.
+        let browse = sidebar_row("Browse", "square.grid.2x2", sel!(browseSelected:), -1);
+        let _: () = msg_send![stack, addView: browse inGravity: 1isize];
+        ui.side_dyn.push(browse);
+        ui.browse_row = Ptr(browse);
+        row_set_selected(browse, ui.browse_active);
+        for (title, symbol_name, action) in [
+            ("Search", "magnifyingglass", sel!(focusSearch:)),
+            ("Requests", "tray.full", sel!(openRequests:)),
+        ] {
+            let r = sidebar_row(title, symbol_name, action, -1);
+            let _: () = msg_send![stack, addView: r inGravity: 1isize];
+            ui.side_dyn.push(r);
+        }
+    }
+    if !unified {
+        // Library list (separate layout): a header, then one row per library.
+        // Section header
+        let hdr_box: *mut Object = msg_send![class!(NSView), alloc];
+        let hdr_box: *mut Object = autorel(msg_send![hdr_box, initWithFrame: rect(0., 0., SIDEBAR_W - 2. * SP3, 20.)]);
+        let hdr = label("Library", T_CAPTION_EM, C_TEXT3, ALIGN_LEFT);
+        set_frame(hdr, rect(SP2, 2., SIDEBAR_W - 2. * SP3 - SP2, 16.));
+        set_autoresize(hdr, RESIZE_W);
+        add_sub(hdr_box, hdr);
+        fix_height(hdr_box, 20.);
+        let _: () = msg_send![stack, addView: hdr_box inGravity: 1isize];
+        ui.side_dyn.push(hdr_box);
+
+        for (i, (id, name, ct)) in views.iter().enumerate() {
+            let symbol_name = match ct.as_deref() {
+                Some("movies") => "film",
+                Some("tvshows") => "tv",
+                Some("music") => "music.note",
+                Some("livetv") => "antenna.radiowaves.left.and.right",
+                Some("boxsets") => "rectangle.stack",
+                _ => "square.stack",
+            };
+            let row = sidebar_row(name, symbol_name, sel!(viewSelected:), i as NSInteger);
+            let _: () = msg_send![stack, addView: row inGravity: 1isize];
+            ui.rows.push((row, id.clone()));
+            ui.side_dyn.push(row);
+            row_set_selected(row, ui.selected_view == Some(i));
+        }
     }
 
-    // Footer (bottom gravity): Request, hairline, user row.
-    let req = sidebar_row("Request…", "plus.magnifyingglass", sel!(openSeerr:), 0);
-    let _: () = msg_send![stack, addView: req inGravity: 3isize];
-    ui.side_dyn.push(req);
+    // Footer (bottom gravity): Request (separate layout only), hairline, user row.
+    if !unified {
+        let req = sidebar_row("Request…", "plus.magnifyingglass", sel!(openSeerr:), 0);
+        let _: () = msg_send![stack, addView: req inGravity: 3isize];
+        ui.side_dyn.push(req);
+    }
     let hl = hairline(rect(0., 0., SIDEBAR_W - 2. * SP3, 1.));
     fix_height(hl, 1.);
     let _: () = msg_send![stack, addView: hl inGravity: 3isize];
@@ -895,6 +974,7 @@ pub(crate) unsafe fn show_state(symbol_name: &str, title: &str, body: &str, retr
 /// Called when a load begins. `first` = a different view (skeleton), otherwise keep
 /// what is on screen and spin in the header.
 pub(crate) unsafe fn begin_load(first: bool) {
+    crate::ui::home::leave();
     let ui = UI.get_mut().unwrap();
     hide_state();
     if first || ui.items.is_empty() {

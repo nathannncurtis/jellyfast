@@ -89,6 +89,8 @@ pub struct ListItem {
     pub aspect: Option<f64>,
     #[serde(rename = "ImageTags", default)]
     pub image_tags: Option<ImageTags>,
+    #[serde(rename = "BackdropImageTags", default)]
+    pub backdrop_tags: Option<Vec<String>>,
     #[serde(rename = "RunTimeTicks", default)]
     pub run_time_ticks: Option<i64>,
 }
@@ -98,6 +100,20 @@ impl ListItem {
             .as_ref()
             .map(|t| t.primary.is_some())
             .unwrap_or(false)
+    }
+    /// Image type for a wide (16:9) card: Thumb, else Backdrop, else Primary
+    /// (cropped). `None` when the item has no artwork at all.
+    pub fn wide_art_kind(&self) -> Option<&'static str> {
+        let tags = self.image_tags.as_ref();
+        if tags.and_then(|t| t.thumb.as_ref()).is_some() {
+            Some("Thumb")
+        } else if self.backdrop_tags.as_ref().is_some_and(|b| !b.is_empty()) {
+            Some("Backdrop")
+        } else if tags.and_then(|t| t.primary.as_ref()).is_some() {
+            Some("Primary")
+        } else {
+            None
+        }
     }
     pub fn sub_label(&self) -> String {
         let mut s = String::new();
@@ -120,6 +136,8 @@ impl ListItem {
 pub struct ImageTags {
     #[serde(rename = "Primary", default)]
     pub primary: Option<String>,
+    #[serde(rename = "Thumb", default)]
+    pub thumb: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -339,5 +357,39 @@ mod season_model_tests {
     fn missing_items_envelope_is_empty() {
         let p: ItemsPage<Episode> = serde_json::from_str("{}").unwrap();
         assert!(p.items.is_empty());
+    }
+}
+
+/// One entry of GET /Movies/Recommendations: a titled group of suggestions.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RecommendationDto {
+    #[serde(rename = "Items", default)]
+    pub items: Vec<ListItem>,
+    /// e.g. "SimilarToRecentlyPlayed", "HasActorFromRecentlyPlayed".
+    #[serde(rename = "RecommendationType", default)]
+    pub recommendation_type: Option<String>,
+    /// The item or person the group was derived from.
+    #[serde(rename = "BaselineItemName", default)]
+    pub baseline_name: Option<String>,
+}
+
+#[cfg(test)]
+mod wide_art_tests {
+    use super::*;
+
+    fn item(tags: serde_json::Value, backdrops: serde_json::Value) -> ListItem {
+        serde_json::from_value(serde_json::json!({
+            "Id": "x", "Name": "n", "Type": "Episode",
+            "ImageTags": tags, "BackdropImageTags": backdrops
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn wide_art_prefers_thumb_then_backdrop_then_primary() {
+        assert_eq!(item(serde_json::json!({"Thumb": "t", "Primary": "p"}), serde_json::json!(["b"])).wide_art_kind(), Some("Thumb"));
+        assert_eq!(item(serde_json::json!({"Primary": "p"}), serde_json::json!(["b"])).wide_art_kind(), Some("Backdrop"));
+        assert_eq!(item(serde_json::json!({"Primary": "p"}), serde_json::json!([])).wide_art_kind(), Some("Primary"));
+        assert_eq!(item(serde_json::json!({}), serde_json::json!([])).wide_art_kind(), None);
     }
 }

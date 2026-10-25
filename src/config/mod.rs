@@ -8,6 +8,16 @@ pub const KEYCHAIN_SERVICE: &str = "to.nathancurtis.jellyfast";
 pub const LEGACY_APP_DIR_NAME: &str = "JellyfinMac";
 pub const LEGACY_KEYCHAIN_SERVICE: &str = "app.jellyfin.mac";
 
+/// How the sidebar is organised. `Separate` lists every library (the classic
+/// layout); `Unified` shows Home, Browse, Search and Requests with one mixed grid.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutMode {
+    #[default]
+    Separate,
+    Unified,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     #[serde(default)]
@@ -26,6 +36,9 @@ pub struct Config {
     pub window: Option<[f64; 4]>, // x, y, w, h
     #[serde(default)]
     pub volume: f64,
+    /// `None` until the first-run onboarding is answered; that is what shows it.
+    #[serde(default)]
+    pub layout_mode: Option<LayoutMode>,
     #[serde(default)]
     pub settings: Settings,
     /// "Remember me" on the login card. When true, the session token is kept in
@@ -59,6 +72,7 @@ impl Default for Config {
             remember_me: default_remember_me(),
             library_order: Vec::new(),
             hidden_libraries: Vec::new(),
+            layout_mode: None,
         }
     }
 }
@@ -260,6 +274,23 @@ mod tests {
         let l = load_config();
         assert_eq!(l.library_order, ["v2", "v1"]);
         assert_eq!(l.hidden_libraries, ["v3"]);
+    }
+
+    #[test]
+    fn layout_mode_defaults_to_unanswered_and_round_trips() {
+        let _e = TestEnv::new();
+        fs::create_dir_all(config_dir()).unwrap();
+        fs::write(config_path(), "{\"server_url\":\"http://a\"}").unwrap();
+        assert_eq!(load_config().layout_mode, None, "missing key means onboarding is still due");
+        fs::write(config_path(), "{\"layout_mode\":\"unified\"}").unwrap();
+        assert_eq!(load_config().layout_mode, Some(LayoutMode::Unified));
+        fs::write(config_path(), "{\"layout_mode\":\"separate\"}").unwrap();
+        assert_eq!(load_config().layout_mode, Some(LayoutMode::Separate));
+        let mut c = load_config();
+        c.layout_mode = Some(LayoutMode::Unified);
+        save_config(&c);
+        assert!(fs::read_to_string(config_path()).unwrap().contains("\"unified\""));
+        assert_eq!(load_config().layout_mode, Some(LayoutMode::Unified));
     }
 
     #[test]

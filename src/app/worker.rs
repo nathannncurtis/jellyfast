@@ -103,6 +103,36 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     }
                 }
             }
+            UiCmd::LoadBrowse => {
+                if let Some(c) = &client {
+                    // Movies and series together; no ParentId, so Jellyfin searches every library.
+                    let sort = sort_from_popup(&cfg);
+                    let q = crate::jellyfin::models::ItemQuery {
+                        types: Some("Movie,Series".into()),
+                        sort_by: sort.0,
+                        sort_order: sort.1,
+                        ..Default::default()
+                    };
+                    match c.items(&q).await {
+                        Ok(items) => {
+                            fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
+                            let _ = main_tx.send(MainMsg::ItemsLoaded {
+                                title: "Browse".into(),
+                                items,
+                                can_go_back: false,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
+                        }
+                    }
+                }
+            }
+            UiCmd::SetLayoutMode { mode } => {
+                // In-memory only: the UI wrote the config file already, and a second
+                // write from here could clobber fields the UI changed since startup.
+                cfg.layout_mode = Some(mode);
+            }
             UiCmd::Search { q } => {
                 // Debounce: wait, then keep only the newest search.
                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -203,7 +233,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     match c.seasons(&series_id).await {
                         Ok(seasons) => {
                             // Next Up only picks the starting season; without it the first one is shown.
-                            let next = c.next_up(&series_id).await.ok().flatten();
+                            let next = c.series_next_up(&series_id).await.ok().flatten();
                             let selected = default_season(&seasons, next.as_ref());
                             let seasons = seasons
                                 .into_iter()
@@ -422,6 +452,19 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 cfg.library_order = order;
                 cfg.hidden_libraries = hidden;
                 crate::config::save_config(&cfg);
+            }
+            UiCmd::LoadHome => {
+                if let Some(c) = &client {
+                    // Spawned so a slow Home load never blocks later commands.
+                    let (c, tx) = (c.clone(), main_tx.clone());
+                    let (dir, http) = (poster_dir.clone(), http_poster.clone());
+                    tokio::spawn(async move {
+                        let rows = crate::app::home::load_home(&c).await;
+                        // Rows first, so Home is usable at once; artwork follows as PosterReady.
+                        let _ = tx.send(MainMsg::HomeLoaded(rows.clone()));
+                        fetch_home_art(&c, &tx, &rows.rows, &dir, http.as_ref());
+                    });
+                }
             }
             UiCmd::SaveSettings { settings, reconnect, server_url } => {
                 seerr = None;
@@ -844,6 +887,39 @@ pub(crate) fn fetch_art(
     }
 }
 
+/// Fetch Home artwork after `HomeLoaded` has been sent. Poster rows get Primary
+/// art; wide rows (Continue Watching, Next Up) get Thumb, else Backdrop, else
+/// Primary. Each arrives as `PosterReady` under the key its card was built with.
+pub(crate) fn fetch_home_art(
+    c: &JellyfinClient,
+    main_tx: &UnboundedSender<MainMsg>,
+    rows: &[crate::app::messages::HomeRow],
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    let mut jobs: Vec<(u64, String)> = Vec::new();
+    for row in rows {
+        let wide = row.kind.is_wide();
+        for it in &row.items {
+            if jobs.len() >= 200 {
+                break;
+            }
+            let job = if wide {
+                it.wide_art_kind()
+                    .map(|kind| (crate::ui::home::wide_key(&it.id), build_art_url(&c.base, &it.id, kind, 600, &c.token)))
+            } else {
+                it.has_image().then(|| (sys_key(&it.id), build_image_url(&c.base, &it.id, &c.token, 400)))
+            };
+            // Cards repeat across rows (an episode in Continue Watching and Next Up).
+            if let Some(job) = job.filter(|j| seen.insert(j.0)) {
+                jobs.push(job);
+            }
+        }
+    }
+    fetch_art(jobs, main_tx, poster_dir, http);
+}
+
 /// Cast and crew shown on the detail page (the first this many of `People`).
 const MAX_PEOPLE: usize = 30;
 
@@ -1023,6 +1099,10 @@ mod tests {
         images: bool,
         items_status: Option<u16>,
         not_jellyfin: bool,
+        /// Home endpoints answering 500: "views", "resume", "nextup", "latest", "recs".
+        home_fail: Vec<String>,
+        /// Delay (ms) before answering the Resume endpoint.
+        resume_delay_ms: u64,
     }
 
     struct Mock {
@@ -1046,6 +1126,12 @@ mod tests {
         }
         fn stop(&self) {
             self.task.abort();
+        }
+    }
+
+    impl Req {
+        fn qp(&self, key: &str) -> Option<&str> {
+            self.query.get(key).map(String::as_str)
         }
     }
 
@@ -1121,6 +1207,10 @@ mod tests {
                         .collect();
                     let req = Req { method, path: pct_decode(path), query, headers, body };
                     log.lock().unwrap().push(req.clone());
+                    let delay = cfg.lock().unwrap().resume_delay_ms;
+                    if delay > 0 && req.path.ends_with("/Items/Resume") {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    }
                     let resp = route(&req, &cfg.lock().unwrap());
                     let reason = if resp.status < 300 { "OK" } else { "ERR" };
                     let head = format!(
@@ -1162,6 +1252,15 @@ mod tests {
         }])
     }
 
+    /// `ok()` unless the Home endpoint `key` is set to fail.
+    fn home_or(c: &MockCfg, key: &str, ok: impl FnOnce() -> Resp) -> Resp {
+        if c.home_fail.iter().any(|k| k == key) {
+            status(500)
+        } else {
+            ok()
+        }
+    }
+
     fn route(r: &Req, c: &MockCfg) -> Resp {
         let seg: Vec<&str> = r.path.trim_matches('/').split('/').collect();
         let token = r.headers.get("x-emby-token").map(String::as_str);
@@ -1195,11 +1294,33 @@ mod tests {
                 }
             }
             _ if !authed => status(401),
-            ("GET", ["Users", _, "Views"]) => json(serde_json::json!({"Items": [
+            ("GET", ["Users", _, "Views"]) => home_or(c, "views", || json(serde_json::json!({"Items": [
                 {"Id": "v-mov", "Name": "Movies", "CollectionType": "movies"},
                 {"Id": "v-tv", "Name": "Shows", "CollectionType": "tvshows"},
                 {"Id": "v-mus", "Name": "Music", "CollectionType": "music"},
-            ], "TotalRecordCount": 3})),
+            ], "TotalRecordCount": 3}))),
+            ("GET", ["Users", _, "Items", "Resume"]) => home_or(c, "resume", || json(serde_json::json!({"Items": [
+                item("e1", "Pilot", "Episode", false),
+            ]}))),
+            ("GET", ["Users", _, "Items", "Latest"]) => home_or(c, "latest", || {
+                let items = match r.query.get("ParentId").map(String::as_str) {
+                    Some("v-mov") => serde_json::json!([item("m1", "Movie One", "Movie", false), item("m2", "Movie Two", "Movie", false)]),
+                    Some("v-tv") => serde_json::json!([item("sr1", "Show One", "Series", false)]),
+                    _ => serde_json::json!([]),
+                };
+                json(items)
+            }),
+            ("GET", ["Shows", "NextUp"]) if !r.query.contains_key("SeriesId") => home_or(c, "nextup", || json(serde_json::json!({"Items": [
+                item("e2", "Second", "Episode", false),
+            ]}))),
+            ("GET", ["Movies", "Recommendations"]) => home_or(c, "recs", || json(serde_json::json!([
+                {"CategoryId": "c1", "RecommendationType": "SimilarToRecentlyPlayed", "BaselineItemName": "Movie One",
+                 "Items": [item("r1", "Recommended One", "Movie", false)]},
+                {"CategoryId": "c2", "RecommendationType": "HasLikedDirector", "BaselineItemName": "Nobody",
+                 "Items": []},
+                {"CategoryId": "c3", "RecommendationType": "HasActorFromRecentlyPlayed", "BaselineItemName": "Some Actor",
+                 "Items": [item("r2", "Actor Film", "Movie", false)]},
+            ]))),
             ("POST", ["Items", id, "PlaybackInfo"]) => json(serde_json::json!({
                 "PlaySessionId": "ps1",
                 "MediaSources": [{
@@ -1702,6 +1823,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_browse_asks_for_movies_and_series_everywhere() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::LoadBrowse);
+        let (title, _names, back) = items_of(h.next().await);
+        assert_eq!(title, "Browse");
+        assert!(!back);
+        let last = m.find("GET", "/Users/u1/Items").pop().unwrap();
+        assert_eq!(last.query.get("IncludeItemTypes").map(String::as_str), Some("Movie,Series"));
+        assert_eq!(last.query.get("Recursive").map(String::as_str), Some("true"));
+        assert!(!last.query.contains_key("ParentId"), "browse must not be scoped to one library");
+    }
+
+    #[tokio::test]
+    async fn load_browse_before_connect_is_ignored() {
+        let _e = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::LoadBrowse);
+        h.send(UiCmd::ProbeServer);
+        assert!(matches!(h.next().await, MainMsg::ServerDown));
+    }
+
+    #[tokio::test]
     async fn load_view_livetv_lists_channels() {
         let (_e, m, mut h) = connected().await;
         m.cfg.lock().unwrap().live = true;
@@ -1734,6 +1877,110 @@ mod tests {
             MainMsg::PlaybackError(e) => assert!(e.contains("Network problem"), "{e}"),
             o => panic!("{:?}", o),
         }
+    }
+
+    fn home_of(m: MainMsg) -> Vec<(String, Vec<String>)> {
+        match m {
+            MainMsg::HomeLoaded(h) => h
+                .rows
+                .into_iter()
+                .map(|r| (r.title, r.items.into_iter().map(|i| i.name).collect()))
+                .collect(),
+            other => panic!("expected HomeLoaded, got {other:?}"),
+        }
+    }
+
+    fn titles(rows: &[(String, Vec<String>)]) -> Vec<&str> {
+        rows.iter().map(|r| r.0.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn load_home_builds_every_row_in_order() {
+        let (_env, m, mut h) = connected().await;
+        h.send(UiCmd::LoadHome);
+        let rows = home_of(h.next_nonposter().await);
+        assert_eq!(
+            titles(&rows),
+            [
+                "Continue Watching",
+                "Next Up",
+                "Recently Added in Movies",
+                "Recently Added in Shows",
+                "Because you watched Movie One",
+                "More with Some Actor",
+            ]
+        );
+        assert_eq!(rows[0].1, ["Pilot"]);
+        assert_eq!(rows[1].1, ["Second"]);
+        assert_eq!(rows[2].1, ["Movie One", "Movie Two"]);
+        assert_eq!(rows[3].1, ["Show One"]);
+        assert_eq!(rows[4].1, ["Recommended One"]);
+        assert_eq!(rows[5].1, ["Actor Film"]);
+
+        // Every endpoint was called with the signed-in user and token auth.
+        let resume = m.find("GET", "/Users/u1/Items/Resume");
+        assert_eq!(resume.len(), 1);
+        assert_eq!(resume[0].qp("MediaTypes"), Some("Video"));
+        assert_eq!(resume[0].qp("Limit"), Some("16"));
+        assert_eq!(resume[0].headers.get("x-emby-token").map(String::as_str), Some("tok123"));
+        let next = m.find("GET", "/Shows/NextUp");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].qp("UserId"), Some("u1"));
+        let latest = m.find("GET", "/Users/u1/Items/Latest");
+        let mut parents: Vec<&str> = latest.iter().filter_map(|r| r.qp("ParentId")).collect();
+        parents.sort();
+        assert_eq!(parents, ["v-mov", "v-tv"], "music and live TV get no Latest row");
+        let recs = m.find("GET", "/Movies/Recommendations");
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].qp("UserId"), Some("u1"));
+    }
+
+    #[tokio::test]
+    async fn load_home_tolerates_partial_failures() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().home_fail = vec!["resume".into(), "latest".into()];
+        h.send(UiCmd::LoadHome);
+        let rows = home_of(h.next_nonposter().await);
+        assert_eq!(titles(&rows), ["Next Up", "Because you watched Movie One", "More with Some Actor"]);
+    }
+
+    #[tokio::test]
+    async fn load_home_without_views_keeps_the_other_rows() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().home_fail = vec!["views".into(), "nextup".into()];
+        h.send(UiCmd::LoadHome);
+        let rows = home_of(h.next_nonposter().await);
+        assert_eq!(titles(&rows), ["Continue Watching", "Because you watched Movie One", "More with Some Actor"]);
+    }
+
+    #[tokio::test]
+    async fn load_home_with_every_endpoint_failing_sends_no_rows() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().home_fail =
+            ["views", "resume", "nextup", "latest", "recs"].iter().map(|s| s.to_string()).collect();
+        h.send(UiCmd::LoadHome);
+        assert!(home_of(h.next_nonposter().await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_home_does_not_block_later_commands() {
+        let (_env, m, mut h) = connected().await;
+        m.cfg.lock().unwrap().resume_delay_ms = 1500;
+        h.send(UiCmd::LoadHome);
+        h.send(UiCmd::LoadView { view_id: "v".into(), name: "L".into(), collection_type: Some("movies".into()) });
+        // The view answer must arrive first, while Home is still pending.
+        let (title, _, _) = items_of(h.next_nonposter().await);
+        assert_eq!(title, "L");
+        let rows = home_of(h.next_nonposter().await);
+        assert!(!rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_home_before_connect_is_ignored() {
+        let _env = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::LoadHome);
+        assert!(h.drain_via_probe().await.is_empty());
     }
 
     #[tokio::test]

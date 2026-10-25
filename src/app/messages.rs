@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, LayoutMode};
 use crate::jellyfin::models::ListItem;
 use crate::seerr::models::{SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
@@ -69,6 +69,16 @@ pub enum UiCmd {
         item_id: String,
         played: bool,
     },
+    /// Unified Browse: every movie and show in one grid (`ItemsLoaded`, title "Browse").
+    LoadBrowse,
+    /// Layout chosen in onboarding or Settings. The UI already saved the config;
+    /// this only keeps the worker's copy in step.
+    SetLayoutMode {
+        mode: LayoutMode,
+    },
+    /// Fetch the Home screen rows (continue watching, next up, recently added,
+    /// recommendations). Answered with `MainMsg::HomeLoaded`.
+    LoadHome,
     SaveSettings {
         settings: Settings,
         reconnect: bool,
@@ -120,6 +130,8 @@ pub enum MainMsg {
     /// The resolved (scheme-complete) server base URL, sent after a connect or
     /// Settings URL change so the UI uses the same address the worker stored.
     ServerUrl(String),
+    /// Home screen rows, in display order. Empty rows are never included.
+    HomeLoaded(HomeRows),
     ItemsLoaded {
         title: String,
         items: Vec<ListItem>,
@@ -173,6 +185,35 @@ pub enum MainMsg {
         ok: bool,
         message: String,
     },
+}
+
+/// What a Home row shows; the UI picks its layout and "see all" target from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeRowKind {
+    ContinueWatching,
+    NextUp,
+    /// One library's newest items; the title names the library.
+    RecentlyAdded,
+    Recommended,
+}
+
+impl HomeRowKind {
+    /// Wide (16:9) cards with a progress bar; every other row uses posters.
+    pub fn is_wide(self) -> bool {
+        matches!(self, HomeRowKind::ContinueWatching | HomeRowKind::NextUp)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HomeRow {
+    pub title: String,
+    pub kind: HomeRowKind,
+    pub items: Vec<ListItem>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HomeRows {
+    pub rows: Vec<HomeRow>,
 }
 
 #[derive(Debug, Clone)]

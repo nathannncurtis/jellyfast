@@ -347,6 +347,8 @@ pub struct Ui {
     pub s_lib_show: Ptr,
     pub s_lib_up: Ptr,
     pub s_lib_down: Ptr,
+    /// Settings: sidebar layout popup (separate libraries / one big library).
+    pub s_layout: Ptr,
     pub seerr: crate::ui::seerr::SeerrUi,
     pub detail: crate::ui::detail::DetailUi,
     // Rust-side state
@@ -371,6 +373,16 @@ pub struct Ui {
     pub selected_view: Option<usize>,
     pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
+    /// Home screen rows from the latest `MainMsg::HomeLoaded`.
+    /// Home screen views (scroll, rows, cards, sidebar row).
+    pub home: crate::ui::home::HomeUi,
+    /// Unified-layout "Browse" sidebar row, and whether Browse is the screen showing.
+    pub browse_row: Ptr,
+    pub browse_active: bool,
+    /// First-run onboarding card (see ui/onboarding.rs).
+    pub onboard: crate::ui::onboarding::OnboardUi,
+    /// Account name for the sidebar footer, from the last `Connected`.
+    pub user_name: String,
     pub now: crate::ui::nowbar::NowBar,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
@@ -495,6 +507,13 @@ pub(crate) unsafe fn register_classes() {
             (sel!(goBack:), go_back as Extern0),
             (sel!(viewSelected:), view_selected as Extern0),
             (sel!(itemClicked:), item_clicked as Extern0),
+            (sel!(homeItemClicked:), home_item_clicked as Extern0),
+            (sel!(homeSelected:), crate::ui::home::home_selected as Extern0),
+            (sel!(browseSelected:), crate::ui::home::browse_selected as Extern0),
+            (sel!(focusSearch:), crate::ui::shell::focus_search as Extern0),
+            (sel!(openRequests:), crate::ui::seerr::open_requests as Extern0),
+            (sel!(onboardPick:), crate::ui::onboarding::onboard_pick as Extern0),
+            (sel!(onboardContinue:), crate::ui::onboarding::onboard_continue as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
             (sel!(markUnwatched:), mark_unwatched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
@@ -719,6 +738,12 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         // The worker resolves and stores the URL (see server_url below); the
         // keeping-session save never overwrites the worker-owned session fields.
         crate::config::save_config_keeping_session(&ui.cfg);
+        // Compare with the effective layout, so saving other settings never answers onboarding.
+        let lay: NSInteger = msg_send![ui.s_layout.get(), indexOfSelectedItem];
+        let layout = if lay == 1 { crate::config::LayoutMode::Unified } else { crate::config::LayoutMode::Separate };
+        if layout != ui.cfg.layout_mode.unwrap_or_default() {
+            crate::ui::shell::set_layout_mode(layout);
+        }
         apply_theme();
         // SaveSettings replaces the worker's whole Settings, so it goes first;
         // ui.cfg.settings carries the last *confirmed* Seerr values. SaveSeerr
@@ -784,6 +809,15 @@ pub(crate) extern "C" fn sign_out(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if ui.home.active {
+            crate::ui::home::reload();
+            return;
+        }
+        if ui.browse_active {
+            begin_load(false);
+            let _ = ui.ui_tx.send(UiCmd::LoadBrowse);
+            return;
+        }
         if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
             begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
@@ -793,6 +827,9 @@ pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if ui.home.active {
+            return;
+        }
         if ui.mode_stack.len() > 1 {
             ui.mode_stack.pop();
             if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
@@ -802,44 +839,62 @@ pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
         }
     }
 }
+/// Open library `idx` (an index into `ui.views`) and remember it as the last place.
+pub(crate) unsafe fn select_view(idx: usize) {
+    let ui = UI.get_mut().unwrap();
+    if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
+        ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
+        ui.selected_view = Some(idx);
+        ui.browse_active = false;
+        sidebar_refresh_selection();
+        ui.cfg.last_view = Some(id.clone());
+        crate::config::save_config_keeping_session(&ui.cfg);
+        begin_load(true);
+        let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+    }
+}
 pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Object) {
     crate::ui::detail::hide();
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
-        if let Some((id, name, ct)) = ui.views.get(tag as usize).cloned() {
-            ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
-            ui.selected_view = Some(tag as usize);
-            sidebar_refresh_selection();
-            ui.cfg.last_view = Some(id.clone());
-            crate::config::save_config_keeping_session(&ui.cfg);
-            begin_load(true);
-            let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-        }
+        select_view(tag as usize);
     }
 }
 pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
-        let it = match ui.items.get(tag as usize) {
-            Some(i) => i.clone(),
-            None => return,
-        };
-        set_busy(true);
-        match it.item_type.as_str() {
-            "Movie" | "Series" => {
-                let _ = ui.ui_tx.send(UiCmd::OpenDetail { item_id: it.id.clone() });
-            }
-            "MusicAlbum" => {
-                let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
-            }
-            "LiveTvChannel" => {
-                let _ = ui.ui_tx.send(UiCmd::PlayChannel { channel_id: it.id.clone(), name: it.name.clone() });
-            }
-            _ => {
-                let _ = ui.ui_tx.send(UiCmd::Play { item_id: it.id.clone() });
-            }
+        if let Some(it) = ui.items.get(tag as usize).cloned() {
+            activate(it);
+        }
+    }
+}
+pub(crate) extern "C" fn home_item_clicked(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let tag: NSInteger = msg_send![sender, tag];
+        if let Some(it) = ui.home.flat.get(tag as usize).cloned() {
+            activate(it);
+        }
+    }
+}
+/// Open a movie or series page, or play, list tracks or tune a channel.
+unsafe fn activate(it: ListItem) {
+    let ui = UI.get_mut().unwrap();
+    set_busy(true);
+    match it.item_type.as_str() {
+        "Movie" | "Series" => {
+            let _ = ui.ui_tx.send(UiCmd::OpenDetail { item_id: it.id.clone() });
+        }
+        "MusicAlbum" => {
+            let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
+        }
+        "LiveTvChannel" => {
+            let _ = ui.ui_tx.send(UiCmd::PlayChannel { channel_id: it.id.clone(), name: it.name.clone() });
+        }
+        _ => {
+            let _ = ui.ui_tx.send(UiCmd::Play { item_id: it.id.clone() });
         }
     }
 }
@@ -1152,6 +1207,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         s_lib_show: Ptr(nil()),
         s_lib_up: Ptr(nil()),
         s_lib_down: Ptr(nil()),
+        s_layout: Ptr(nil()),
         seerr: crate::ui::seerr::SeerrUi::new(),
         detail: crate::ui::detail::DetailUi::new(),
         rows: vec![],
@@ -1175,6 +1231,11 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         selected_view: None,
         side_dyn: vec![],
         cur_title: String::new(),
+        home: crate::ui::home::HomeUi::new(),
+        browse_row: Ptr(nil()),
+        browse_active: false,
+        onboard: crate::ui::onboarding::OnboardUi::new(),
+        user_name: String::new(),
         now: crate::ui::nowbar::NowBar::new(),
         tint_cache: HashMap::new(),
     };

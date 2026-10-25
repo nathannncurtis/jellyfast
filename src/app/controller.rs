@@ -42,19 +42,26 @@ pub(crate) fn handle_main(msg: MainMsg) {
                 ui.user_label = user_name;
                 apply_library_prefs();
                 show_login_or_library(true);
-                // Land on the last-used library, or the first one.
-                let idx = ui
-                    .cfg
-                    .last_view
-                    .as_ref()
-                    .and_then(|id| ui.views.iter().position(|v| &v.0 == id))
-                    .unwrap_or(0);
-                if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
-                    ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
-                    ui.selected_view = Some(idx);
-                    sidebar_refresh_selection();
-                    begin_load(true);
-                    let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+                // Restore the last place: a remembered library if it still exists
+                // (separate layout only), Browse if that was the last place (unified
+                // layout), otherwise Home. Home also requests its rows.
+                let unified = ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified);
+                let last = ui.cfg.last_view.clone();
+                let lib = if unified {
+                    None
+                } else {
+                    last.as_deref().and_then(|id| ui.views.iter().position(|v| v.0 == id))
+                };
+                match lib {
+                    Some(idx) => select_view(idx),
+                    None if unified && last.as_deref() == Some(crate::ui::home::BROWSE_ID) => {
+                        crate::ui::home::enter_browse()
+                    }
+                    None => crate::ui::home::enter(),
+                }
+                // First successful login with no layout chosen yet: ask how to browse.
+                if ui.cfg.layout_mode.is_none() {
+                    crate::ui::onboarding::show();
                 }
             }
         }
@@ -65,8 +72,12 @@ pub(crate) fn handle_main(msg: MainMsg) {
             login_error(&e);
             show_login_or_library(false);
         },
+        MainMsg::HomeLoaded(home) => unsafe {
+            crate::ui::home::set_rows(home.rows);
+        },
         MainMsg::ItemsLoaded { title, items, can_go_back } => unsafe {
             crate::ui::detail::hide();
+            crate::ui::home::leave();
             let ui = UI.get_mut().unwrap();
             ui.items = items.clone();
             ui.cur_title = title.clone();

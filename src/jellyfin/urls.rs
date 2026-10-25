@@ -168,7 +168,8 @@ pub fn build_image_url(base: &str, item_id: &str, token: &str, max_w: u32) -> St
     build_art_url(base, item_id, "Primary", max_w, token)
 }
 
-/// Artwork of any kind: `Primary` (poster or person photo), `Backdrop`, ...
+/// Artwork of any kind: `Primary` (poster or person photo), `Thumb`, `Backdrop`, ...
+/// The image index is optional on the server and defaults to the first image.
 pub fn build_art_url(base: &str, item_id: &str, kind: &str, max_w: u32, token: &str) -> String {
     format!(
         "{}/Items/{}/Images/{}?{}",

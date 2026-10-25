@@ -104,9 +104,17 @@ fn steps() -> Vec<Step> {
         ("connected (views + livetv)", s_connected, 100),
         ("connected again (sidebar rebuild)", s_connected, 100),
         ("login connect syncs server url", s_login_url_sync, 50),
+        ("onboarding: sheet after first login", s_onboard_show, 150),
+        ("onboarding: pick one big library", s_onboard_pick, 100),
+        ("unified: browse grid", s_unified_browse, 150),
+        ("unified: sidebar actions and Home", s_unified_actions, 100),
+        ("unified: login restores Browse", s_unified_login, 100),
+        ("settings: layout back to separate", s_layout_settings, 100),
+        ("connected: Home wins over a remembered library", s_connected_library, 100),
         ("items: movies", s_items_movies, 100),
         ("worker->UI path (WORKER_TX)", s_worker_path, 400),
         ("worker->UI path check", s_worker_check, 50),
+        ("home rows stored", s_home_rows, 50),
         ("audit: sidebar (long names)", s_audit_sidebar, 150),
         ("posters (png, jpeg, garbage)", s_posters, 100),
         ("audit: grid (long titles)", s_audit_grid, 200),
@@ -158,6 +166,12 @@ fn steps() -> Vec<Step> {
         ("seerr: settings save while disabled", s_seerr_settings_off, 700),
         ("seerr: settings API-key mode", s_seerr_settings_key, 700),
         ("seerr: wrap up", s_seerr_end, 50),
+        ("home: open from sidebar", s_home_open, 100),
+        ("home: rows with long titles and posters", s_home_fake, 150),
+        ("audit: home (long titles)", s_audit_home, 200),
+        ("home: card clicks", s_home_clicks, 50),
+        ("home: empty state, then rows again", s_home_empty, 100),
+        ("home: back to a library", s_home_leave, 100),
         ("settings: open+cancel", s_settings_cancel, 600),
         ("settings: open+save", s_settings_save, 600),
         ("libraries: sidebar order + hidden, settings controls", s_library_prefs, 300),
@@ -205,7 +219,8 @@ fn item(id: &str, name: &str, ty: &str, played: bool, pos: i64, run: i64) -> Lis
         episode: Some(2),
         user_data: Some(UserData { played, position_ticks: pos }),
         aspect: Some(0.667),
-        image_tags: Some(ImageTags { primary: Some("tag".into()) }),
+        image_tags: Some(ImageTags { primary: Some("tag".into()), thumb: None }),
+        backdrop_tags: None,
         run_time_ticks: Some(run),
     }
 }
@@ -407,10 +422,9 @@ unsafe fn collect_text_windowrects(v: *mut Object, out: &mut Vec<(*mut Object, N
         collect_text_windowrects(c, out);
     }
 }
-unsafe fn audit_global_overlap(win: *mut Object, issues: &mut Vec<String>) {
-    let content: *mut Object = msg_send![win, contentView];
+unsafe fn audit_global_overlap_in(root: *mut Object, issues: &mut Vec<String>) {
     let mut items = vec![];
-    collect_text_windowrects(content, &mut items);
+    collect_text_windowrects(root, &mut items);
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
             let ((va, a), (vb, b)) = (items[i], items[j]);
@@ -546,7 +560,10 @@ fn audit(tag: &str) {
             let content: *mut Object = msg_send![w, contentView];
             let before = issues.len();
             audit_view(content, &mut issues);
-            audit_global_overlap(w, &mut issues);
+            // While the card is up, only its own text is compared globally: the
+            // Home screen behind it is dimmed on purpose.
+            let root = if w == ui.win.get() && crate::ui::onboarding::visible() { ui.onboard.host.get() } else { content };
+            audit_global_overlap_in(root, &mut issues);
             let is_main = w == ui.win.get();
             if is_main {
                 audit_traffic(w, &mut issues);
@@ -649,6 +666,8 @@ fn s_connect_error() {
     handle_main(MainMsg::ConnectError("Bad password".into()));
 }
 fn s_connected() {
+    // No remembered place: Home is the landing screen.
+    unsafe { UI.get_mut().unwrap().cfg.last_view = None };
     handle_main(MainMsg::Connected {
         user_name: "tester".into(),
         views: vec![
@@ -666,12 +685,40 @@ fn s_connected() {
             let h: BOOL = msg_send![ui.login_card.get(), isHidden];
             h == YES
         });
-        state_check("auto-selected first library", ui.mode_stack.len() == 1 && ui.mode_stack[0].0 == "v1");
-        state_check("selected_view set", ui.selected_view == Some(0));
+        state_check("home is the default landing", ui.home.active && ui.selected_view.is_none());
+        state_check("home scroll shown, library grid hidden", visible(ui.home.scroll.get()) && !visible(ui.lib_scroll.get()));
+        state_check("Home sidebar row selected on launch", row_selected(ui.home.row.get()));
+        state_check("no library row selected on launch", selected_rows() == 0);
         state_check("window is opaque", { let o: BOOL = msg_send![ui.win.get(), isOpaque]; o == YES });
         state_check("library canvas draws background", { let o: BOOL = msg_send![ui.lib_scroll.get(), drawsBackground]; o == YES });
         state_check("login backdrop hidden once connected", { let o: BOOL = msg_send![ui.bgfx.get(), isHidden]; o == YES });
-        state_check("auto-select sent LoadView", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == "v1")));
+        let cmds = take_cmds();
+        state_check("no LoadView when landing on Home", !cmds.iter().any(|c| matches!(c, UiCmd::LoadView { .. })));
+        state_check("connect sent LoadHome", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
+    }
+}
+fn s_connected_library() {
+    // A library was the last place: login restores it instead of Home.
+    unsafe { UI.get_mut().unwrap().cfg.last_view = Some("v2".into()) };
+    handle_main(MainMsg::Connected {
+        user_name: "tester".into(),
+        views: vec![
+            ("v1".into(), "Movies".into(), Some("movies".into())),
+            ("v2".into(), "Shows".into(), Some("tvshows".into())),
+            ("v3".into(), "Music".into(), Some("music".into())),
+            ("v4".into(), "Live TV".into(), Some("livetv".into())),
+            ("v5".into(), "Misc".into(), None),
+        ],
+        has_live_tv: true,
+    });
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("login over remembered library: Home inactive", !ui.home.active);
+        state_check("login over remembered library: library selected", ui.selected_view == Some(1));
+        state_check("login over remembered library: Home row not selected", !row_selected(ui.home.row.get()));
+        let cmds = take_cmds();
+        state_check("login over remembered library: LoadView sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadView { .. })));
+        state_check("login over remembered library: no LoadHome", !cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
     }
 }
 fn s_login_url_sync() {
@@ -698,6 +745,24 @@ fn s_worker_check() {
         state_check("worker msg delivered", ui.cur_title == "ViaWorker" && ui.items.len() == 3);
     }
     send_items("Movies", items_of("Movie", 12), false);
+}
+fn s_home_rows() {
+    handle_main(MainMsg::HomeLoaded(HomeRows {
+        rows: vec![
+            HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: items_of("Movie", 2) },
+            HomeRow { title: "Recently Added in Movies".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 3) },
+        ],
+    }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check(
+            "home rows stored in order",
+            ui.home.rows.len() == 2
+                && ui.home.rows[0].title == "Continue Watching"
+                && ui.home.rows[0].items.len() == 2
+                && ui.home.rows[1].kind == HomeRowKind::RecentlyAdded,
+        );
+    }
 }
 fn s_items_movies() {
     send_items("Movies", items_of("Movie", 12), false);
@@ -796,6 +861,14 @@ fn s_hover() {
         }
     }
 }
+fn row_selected(row: *mut Object) -> bool {
+    unsafe {
+        let rb: *mut Object = msg_send![row, subviews];
+        let bg: *mut Object = msg_send![rb, objectAtIndex: 0usize];
+        let t: BOOL = msg_send![bg, isTransparent];
+        t == NO
+    }
+}
 fn selected_rows() -> usize {
     unsafe {
         let ui = UI.get().unwrap();
@@ -817,7 +890,7 @@ fn s_sidebar_click() {
         state_check("5 library rows (livetv already present)", rows.len() == 5);
         // arranged: search field, "Library" header, then JRSidebarRow rows
         let arr: *mut Object = msg_send![ui.side_stack.get(), arrangedSubviews];
-        let third: *mut Object = msg_send![arr, objectAtIndex: 2usize];
+        let third: *mut Object = msg_send![arr, objectAtIndex: 3usize]; // search, Home, Library header, first library
         let cls = objc::runtime::Class::get("JRSidebarRow").unwrap();
         let k: BOOL = msg_send![third, isKindOfClass: cls];
         state_check("first library row is a JRSidebarRow", k == YES);
@@ -827,7 +900,6 @@ fn s_sidebar_click() {
             "sidebar stack leaves the title bar band free",
             sf.origin.y + sf.size.h <= sb.size.h - crate::ui::theme::TITLEBAR_H + 0.5,
         );
-        state_check("one row selected after auto-select", selected_rows() == 1);
         for (i, _) in rows.iter().enumerate() {
             act(sel!(viewSelected:), tagged_button(i as isize));
             state_check("exactly one row selected after click", selected_rows() == 1);
@@ -1368,6 +1440,121 @@ fn s_server_idle() {
     handle_main(MainMsg::ServerDown);
     handle_main(MainMsg::ServerUp);
 }
+const HOME_LONG: &str = "A Remarkably Long Title That Keeps Going Well Past Any Reasonable Card Width Ever Made";
+/// Fake Home rows: every kind, long names, one progress card per wide row.
+fn home_fake_rows() -> Vec<HomeRow> {
+    let long = |mut v: Vec<ListItem>| {
+        for (i, it) in v.iter_mut().enumerate() {
+            it.name = format!("{} {}", i, HOME_LONG);
+        }
+        v
+    };
+    vec![
+        HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: long(items_of("Episode", 6)) },
+        HomeRow { title: "Next Up".into(), kind: HomeRowKind::NextUp, items: items_of("Episode", 4) },
+        HomeRow { title: format!("Recently Added in {}", HOME_LONG), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 9) },
+        HomeRow { title: format!("Because you watched {}", HOME_LONG), kind: HomeRowKind::Recommended, items: long(items_of("Movie", 12)) },
+        HomeRow { title: "Recently Added in Shows".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Series", 3) },
+    ]
+}
+fn s_home_open() {
+    unsafe { act(sel!(homeSelected:), nil()) };
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("home: sidebar opens Home", ui.home.active);
+        state_check("home: library grid hidden", !visible(ui.lib_scroll.get()));
+        state_check("home: Home scroll shown", visible(ui.home.scroll.get()));
+        state_check("home: header reads Home", read_field(ui.header_title.get()) == "Home");
+        state_check("home: sort popup hidden", !visible(ui.sort_popup.get()));
+        state_check("home: Home row selected", row_selected(ui.home.row.get()));
+        state_check("home: no library row selected", selected_rows() == 0);
+        state_check("home: remembered as last place", ui.cfg.last_view.as_deref() == Some("home"));
+    }
+    state_check("home: asks the worker for rows", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadHome)));
+}
+fn s_home_fake() {
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows() }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("home: five rows built", ui.home.views.len() == 5);
+        let total: usize = ui.home.rows.iter().map(|r| r.items.len()).sum();
+        state_check("home: one card per item", ui.home.flat.len() == total && total == 34);
+        let cw = &ui.home.views[0].cells[0];
+        state_check("home: continue watching uses wide cards", frame_of(cw.container).size.w == crate::ui::home::WIDE_W);
+        state_check("home: continue watching shows progress", cw.prog_frac > 0.49);
+        let rec = &ui.home.views[2].cells[0];
+        state_check("home: recently added uses poster cards", frame_of(rec.container).size.w == crate::ui::home::POSTER_W);
+        state_check("home: scroll visible while rows are on screen", visible(ui.home.scroll.get()));
+    }
+    // Art for two cards: one wide (its own key), one poster.
+    let png = image_bytes(0, 200, 300, 90);
+    state_check("home: wide card uses the wide art key", unsafe { UI.get().unwrap().home.views[0].cells[0].key } == crate::ui::home::wide_key("Episode-0"));
+    state_check("home: wide and poster keys differ for one item", crate::ui::home::wide_key("Movie-0") != poster_key("Movie-0"));
+    handle_main(MainMsg::PosterReady { key: crate::ui::home::wide_key("Episode-0"), bytes: png.clone() });
+    handle_main(MainMsg::PosterReady { key: poster_key("Movie-0"), bytes: png });
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("home: poster hides placeholder on a wide card", crate::ui::shell::is_hidden(ui.home.views[0].cells[0].glyph));
+        state_check("home: poster hides placeholder on a poster card", crate::ui::shell::is_hidden(ui.home.views[2].cells[0].glyph));
+        state_check("home: card without artwork keeps placeholder", !crate::ui::shell::is_hidden(ui.home.views[4].cells[2].glyph));
+    }
+}
+fn s_audit_home() {
+    audit_both("home");
+}
+fn s_home_clicks() {
+    let (first, series) = unsafe {
+        let ui = UI.get().unwrap();
+        (
+            ui.home.flat[0].id.clone(),
+            ui.home.flat.iter().position(|i| i.item_type == "Series").expect("a series card"),
+        )
+    };
+    unsafe { act(sel!(homeItemClicked:), tagged_button(0)) };
+    state_check("home: card click plays the item", take_cmds().iter().any(|c| matches!(c, UiCmd::Play { item_id } if *item_id == first)));
+    let sid = unsafe { UI.get().unwrap().home.flat[series].id.clone() };
+    unsafe { act(sel!(homeItemClicked:), tagged_button(series as isize)) };
+    state_check(
+        "home: series card opens its episodes",
+        take_cmds().iter().any(|c| matches!(c, UiCmd::Episodes { series_id, .. } if *series_id == sid)),
+    );
+    unsafe {
+        state_check("home: still on Home after a card click", UI.get().unwrap().home.active);
+    }
+}
+fn s_home_empty() {
+    handle_main(MainMsg::HomeLoaded(HomeRows::default()));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("home: empty rows clear the cards", ui.home.views.is_empty());
+        state_check("home: empty state shown", visible(ui.state_host.get()));
+        state_check("home: empty title", read_field(ui.status_label.get()) == "Nothing here yet");
+    }
+    audit_both("home empty");
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows() }));
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("home: rows back, state hidden", !visible(ui.state_host.get()) && ui.home.views.len() == 5);
+    }
+    // Reopening Home keeps it as the remembered place and asks for fresh rows.
+    unsafe { act(sel!(homeSelected:), nil()) };
+    unsafe {
+        state_check("home: reopen keeps Home remembered", UI.get().unwrap().cfg.last_view.as_deref() == Some("home"));
+    }
+    state_check("home: reopen asks for rows", take_cmds().iter().any(|c| matches!(c, UiCmd::LoadHome)));
+}
+fn s_home_leave() {
+    unsafe { act(sel!(viewSelected:), tagged_button(0)) };
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("library: Home left", !ui.home.active);
+        state_check("library: grid back", visible(ui.lib_scroll.get()));
+        state_check("library: Home scroll hidden", !visible(ui.home.scroll.get()));
+        state_check("library: first library selected", ui.selected_view == Some(0));
+        state_check("library: Home row deselected", !row_selected(ui.home.row.get()));
+    }
+    take_cmds();
+}
 fn s_settings_cancel() {
     let mut cfg = Config::default();
     cfg.server_url = Some("http://example:8096".into());
@@ -1527,6 +1714,120 @@ unsafe fn pick(i: isize) {
     let ui = UI.get_mut().unwrap();
     let _: () = msg_send![ui.s_lib_pop.get(), selectItemAtIndex: i];
     act(sel!(libSelected:), nil());
+}
+// ---- onboarding and the unified layout -------------------------------------
+fn s_onboard_show() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("onboarding: card up after first login", crate::ui::onboarding::visible());
+        state_check("onboarding: no layout saved yet", ui.cfg.layout_mode.is_none());
+        state_check("onboarding: Home is underneath", ui.home.active);
+        state_check("onboarding: separate highlighted by default", ui.onboard.picked == 0);
+        state_check("onboarding: library rows are the default sidebar", ui.rows.len() == 5);
+    }
+    audit_both("onboarding");
+}
+fn s_onboard_pick() {
+    unsafe {
+        act(sel!(onboardPick:), tagged_button(1));
+        state_check("onboarding: one big library highlighted", UI.get().unwrap().onboard.picked == 1);
+        act(sel!(onboardContinue:), nil());
+        let ui = UI.get().unwrap();
+        state_check("onboarding: card closed on Continue", !crate::ui::onboarding::visible());
+        state_check("onboarding: one big library saved", ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified));
+        state_check("unified: no library rows", ui.rows.is_empty());
+        state_check("unified: Browse row present", !ui.browse_row.get().is_null());
+        state_check("unified: Home still on screen", ui.home.active);
+        let cmds = take_cmds();
+        state_check(
+            "unified: worker told the layout",
+            cmds.iter().any(|c| matches!(c, UiCmd::SetLayoutMode { mode: crate::config::LayoutMode::Unified })),
+        );
+    }
+}
+fn s_unified_browse() {
+    unsafe {
+        act(sel!(browseSelected:), nil());
+        let ui = UI.get().unwrap();
+        state_check("browse: screen is Browse", ui.browse_active && !ui.home.active && ui.selected_view.is_none());
+        state_check("browse: header reads Browse", read_field(ui.header_title.get()) == "Browse");
+        state_check("browse: Browse row selected", row_selected(ui.browse_row.get()));
+        state_check("browse: Home row not selected", !row_selected(ui.home.row.get()));
+        state_check("browse: library grid shown", visible(ui.lib_scroll.get()) && !visible(ui.home.scroll.get()));
+        let cmds = take_cmds();
+        state_check("browse: LoadBrowse sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadBrowse)));
+        state_check("browse: no LoadView", !cmds.iter().any(|c| matches!(c, UiCmd::LoadView { .. })));
+        state_check("browse: remembered as last place", ui.cfg.last_view.as_deref() == Some("browse"));
+    }
+    // Movies and shows arrive mixed, the way the worker sends them.
+    let mut mixed = items_of("Movie", 6);
+    mixed.extend(items_of("Series", 4));
+    send_items("Browse", mixed, false);
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("browse: grid holds movies and shows", ui.items.len() == 10);
+        state_check("browse: title stays Browse", ui.cur_title == "Browse");
+    }
+    audit_both("unified browse");
+}
+fn s_unified_actions() {
+    unsafe {
+        act(sel!(focusSearch:), nil());
+        let ui = UI.get().unwrap();
+        let fr: *mut Object = msg_send![ui.win.get(), firstResponder];
+        let editing: *mut Object = msg_send![ui.search.get(), currentEditor];
+        state_check("unified: Search focuses the search field", fr == ui.search.get() || !editing.is_null());
+        act(sel!(openRequests:), nil());
+        state_check("unified: Requests opens My requests", ui.seerr.requests_mode);
+        let _ = take_cmds();
+        // Back to the search tab, so later Seerr steps start from their usual state.
+        let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 0isize];
+        act(sel!(seerrTab:), ui.seerr.tabs.get());
+        let _: () = msg_send![ui.seerr.win.get(), orderOut: nil()];
+        act(sel!(homeSelected:), nil());
+        let ui = UI.get().unwrap();
+        state_check("unified: Home is back", ui.home.active && !ui.browse_active);
+        state_check("unified: Browse row not selected", !row_selected(ui.browse_row.get()));
+        let cmds = take_cmds();
+        state_check("unified: LoadHome sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
+    }
+}
+fn s_unified_login() {
+    // Browse was the last place: a login in the unified layout returns to it.
+    unsafe { UI.get_mut().unwrap().cfg.last_view = Some("browse".into()) };
+    let views = unsafe { UI.get().unwrap().views.clone() };
+    handle_main(MainMsg::Connected { user_name: "tester".into(), views, has_live_tv: true });
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("unified login: Browse restored", ui.browse_active && !ui.home.active);
+        let cmds = take_cmds();
+        state_check("unified login: LoadBrowse sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadBrowse)));
+    }
+    unsafe { act(sel!(homeSelected:), nil()) };
+}
+fn s_layout_settings() {
+    // Settings can switch the layout back; saving then rebuilds the library rows.
+    let mut cfg = Config::default();
+    cfg.server_url = Some("http://example:8096".into());
+    cfg.layout_mode = Some(crate::config::LayoutMode::Unified);
+    handle_main(MainMsg::SettingsSnapshot(Box::new(cfg)));
+    unsafe {
+        let ui = UI.get().unwrap();
+        let idx: NSInteger = msg_send![ui.s_layout.get(), indexOfSelectedItem];
+        state_check("settings: shows one big library", idx == 1);
+        let _: () = msg_send![ui.s_layout.get(), selectItemAtIndex: 0isize];
+        act(sel!(saveSettings:), nil());
+        let ui = UI.get().unwrap();
+        state_check("settings: separate saved", ui.cfg.layout_mode == Some(crate::config::LayoutMode::Separate));
+        state_check("settings: library rows are back", ui.rows.len() == 5);
+        state_check("settings: Browse row removed", ui.browse_row.get().is_null());
+        state_check("settings: Home still the place", ui.home.active);
+        let cmds = take_cmds();
+        state_check(
+            "settings: worker told the layout",
+            cmds.iter().any(|c| matches!(c, UiCmd::SetLayoutMode { mode: crate::config::LayoutMode::Separate })),
+        );
+    }
 }
 fn s_play_start() {
     handle_main(playback(0.0, 6.0));
