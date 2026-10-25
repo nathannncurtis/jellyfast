@@ -335,6 +335,7 @@ pub struct Ui {
     pub login_err: Ptr,
     pub login_spin: Ptr,
     pub login_toggle: Ptr,
+    pub login_remember: Ptr,
     pub settings_win: Ptr,
     pub s_url: Ptr,
     pub s_sub_lang: Ptr,
@@ -691,7 +692,7 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
         if url_changed {
             ui.cfg.server_url = Some(new_url);
         }
-        crate::config::save_config(&ui.cfg);
+        crate::config::save_config_keeping_session(&ui.cfg);
         apply_theme();
         // SaveSettings replaces the worker's whole Settings, so it goes first;
         // ui.cfg.settings carries the last *confirmed* Seerr values. SaveSeerr
@@ -782,7 +783,7 @@ pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Ob
             ui.selected_view = Some(tag as usize);
             sidebar_refresh_selection();
             ui.cfg.last_view = Some(id.clone());
-            crate::config::save_config(&ui.cfg);
+            crate::config::save_config_keeping_session(&ui.cfg);
             begin_load(true);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
         }
@@ -869,11 +870,13 @@ pub(crate) extern "C" fn connect_clicked(_t: &mut Object, _c: Sel, _s: *mut Obje
         let _: () = msg_send![ui.login_btn.get(), setEnabled: NO];
         set_text(ui.login_btn.get(), "Connecting…");
         login_status(&format!("Connecting to {}…", host_of(&url)));
+        let remember_state: isize = msg_send![ui.login_remember.get(), state];
         let _ = ui.ui_tx.send(UiCmd::Connect {
             url,
             username: user,
             password: if pass.is_empty() { None } else { Some(pass) },
             api_key: if key.is_empty() { None } else { Some(key) },
+            remember: remember_state == 1, // NSControlStateValueOn
         });
     }
 }
@@ -957,7 +960,7 @@ pub(crate) extern "C" fn app_should_terminate(
                 ticks: crate::jellyfin::urls::ticks_from_secs(pn.last_secs),
             });
         }
-        crate::config::save_config(&ui.cfg);
+        crate::config::save_config_keeping_session(&ui.cfg);
         1 // NSTerminateNow (0 would cancel the quit)
     }
 }
@@ -1108,6 +1111,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         login_err: Ptr(nil()),
         login_spin: Ptr(nil()),
         login_toggle: Ptr(nil()),
+        login_remember: Ptr(nil()),
         settings_win: Ptr(nil()),
         s_url: Ptr(nil()),
         s_sub_lang: Ptr(nil()),

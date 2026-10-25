@@ -8,7 +8,7 @@ pub const KEYCHAIN_SERVICE: &str = "to.nathancurtis.jellyfast";
 pub const LEGACY_APP_DIR_NAME: &str = "JellyfinMac";
 pub const LEGACY_KEYCHAIN_SERVICE: &str = "app.jellyfin.mac";
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     #[serde(default)]
     pub server_url: Option<String>,
@@ -28,6 +28,31 @@ pub struct Config {
     pub volume: f64,
     #[serde(default)]
     pub settings: Settings,
+    /// "Remember me" on the login card. When true, the session token is kept in
+    /// the Keychain and the app signs in on launch; when false nothing persists.
+    #[serde(default = "default_remember_me")]
+    pub remember_me: bool,
+}
+
+fn default_remember_me() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            server_url: None,
+            username: None,
+            user_id: None,
+            device_id: String::new(),
+            last_view: None,
+            last_item_id: None,
+            window: None,
+            volume: 0.0,
+            settings: Settings::default(),
+            remember_me: default_remember_me(),
+        }
+    }
 }
 
 /// Test seam: tests point the app dirs at a temp directory and serialize
@@ -106,6 +131,23 @@ pub fn save_config(cfg: &Config) {
         }
     }
     tracing::debug!("config saved");
+}
+
+/// Save a UI-side snapshot of the config without clobbering the session fields.
+///
+/// The UI holds its own copy loaded at launch, while the worker writes
+/// `server_url`, `user_id`, `username` and `remember_me` when a login succeeds.
+/// Writing the stale snapshot back (on quit, last-view change, settings save)
+/// erased the session, so the next launch had nothing to auto-connect with.
+/// The worker is the only writer of these fields, so take them from disk.
+pub fn save_config_keeping_session(cfg: &Config) {
+    let disk = load_config();
+    let mut merged = cfg.clone();
+    merged.server_url = disk.server_url;
+    merged.username = disk.username;
+    merged.user_id = disk.user_id;
+    merged.remember_me = disk.remember_me;
+    save_config(&merged);
 }
 
 fn generate_device_id() -> String {
@@ -201,5 +243,73 @@ mod tests {
         let e = TestEnv::new();
         assert!(config_dir().starts_with(&e.dir));
         assert!(cache_dir().starts_with(&e.dir));
+    }
+}
+
+#[cfg(test)]
+mod remember_me_tests {
+    use super::test_env::TestEnv;
+    use super::*;
+
+    #[test]
+    fn remember_me_defaults_to_on_for_fresh_and_legacy_configs() {
+        let _e = TestEnv::new();
+        assert!(load_config().remember_me, "fresh install");
+        assert!(Config::default().remember_me);
+        // A config written before the option existed has no key at all.
+        fs::create_dir_all(config_dir()).unwrap();
+        fs::write(config_path(), r#"{"server_url":"http://x:1","user_id":"u"}"#).unwrap();
+        let c = load_config();
+        assert!(c.remember_me);
+        assert_eq!(c.server_url.as_deref(), Some("http://x:1"));
+    }
+
+    #[test]
+    fn remember_me_false_round_trips() {
+        let _e = TestEnv::new();
+        let mut c = load_config();
+        c.remember_me = false;
+        save_config(&c);
+        assert!(!load_config().remember_me);
+    }
+
+    #[test]
+    fn ui_snapshot_save_keeps_session_written_by_worker() {
+        let _e = TestEnv::new();
+        // UI copy taken at launch, before any login.
+        let ui_snapshot = load_config();
+        // Worker signs in and persists the session.
+        let mut worker_cfg = ui_snapshot.clone();
+        worker_cfg.server_url = Some("http://srv:8096".into());
+        worker_cfg.user_id = Some("u1".into());
+        worker_cfg.username = Some("alice".into());
+        save_config(&worker_cfg);
+        // UI quits with its stale copy (last_view changed, session fields empty).
+        let mut ui = ui_snapshot;
+        ui.last_view = Some("v-mov".into());
+        save_config_keeping_session(&ui);
+        let l = load_config();
+        assert_eq!(l.server_url.as_deref(), Some("http://srv:8096"));
+        assert_eq!(l.user_id.as_deref(), Some("u1"));
+        assert_eq!(l.username.as_deref(), Some("alice"));
+        assert_eq!(l.last_view.as_deref(), Some("v-mov"));
+    }
+
+    #[test]
+    fn ui_snapshot_save_does_not_resurrect_a_cleared_session() {
+        let _e = TestEnv::new();
+        let mut signed_in = load_config();
+        signed_in.server_url = Some("http://srv:8096".into());
+        signed_in.user_id = Some("u1".into());
+        save_config(&signed_in);
+        // UI still holds the signed-in copy after the worker signed out.
+        let ui = signed_in.clone();
+        let mut cleared = load_config();
+        cleared.server_url = None;
+        cleared.user_id = None;
+        save_config(&cleared);
+        save_config_keeping_session(&ui);
+        let l = load_config();
+        assert!(l.server_url.is_none() && l.user_id.is_none());
     }
 }

@@ -39,6 +39,7 @@ impl H {
                 url: l.url.clone(),
                 username: l.user.clone(),
                 password: Some(l.pass.clone()),
+                remember: true,
                 api_key: None,
             })
             .unwrap();

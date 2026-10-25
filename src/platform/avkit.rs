@@ -312,7 +312,7 @@ pub(crate) unsafe fn bump_volume(d: f64) {
     let mut cfg = ui.cfg.clone();
     cfg.volume = nv as f64;
     ui.cfg = cfg;
-    crate::config::save_config(&ui.cfg);
+    crate::config::save_config_keeping_session(&ui.cfg);
 }
 pub(crate) extern "C" fn vol_up(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {

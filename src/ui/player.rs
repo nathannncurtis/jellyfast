@@ -258,7 +258,7 @@ pub(crate) extern "C" fn toggle_info(_t: &mut Object, _c: Sel, _s: *mut Object) 
     unsafe {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.show_stats = !ui.cfg.settings.show_stats;
-        crate::config::save_config(&ui.cfg);
+        crate::config::save_config_keeping_session(&ui.cfg);
         apply_info_visibility();
     }
 }

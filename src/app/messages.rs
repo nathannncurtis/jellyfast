@@ -17,6 +17,8 @@ pub enum UiCmd {
         username: String,
         password: Option<String>,
         api_key: Option<String>,
+        /// "Remember me": keep the session token in the Keychain and sign in on launch.
+        remember: bool,
     },
     LoadView {
         view_id: String,
