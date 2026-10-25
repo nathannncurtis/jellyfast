@@ -9,3 +9,4 @@ pub mod nowbar;
 pub mod detail;
 pub mod home;
 pub mod onboarding;
+pub mod playerbar;

@@ -228,6 +228,41 @@ pub struct PlaybackStart {
     /// `poster_key` of the item's artwork (for the buffering backdrop), when it has some.
     pub image_key: Option<u64>,
     pub media_kind: MediaKind,
+    /// Episodes: the show's name. `None` for movies, audio and live TV.
+    pub series_name: Option<String>,
+    /// Episodes: season number (`ParentIndexNumber`).
+    pub season_number: Option<u32>,
+    /// Episodes: episode number (`IndexNumber`).
+    pub episode_number: Option<u32>,
+    /// Movies: production year (`ProductionYear`).
+    pub production_year: Option<u32>,
+}
+
+impl PlaybackStart {
+    /// The line under the title in the player's upper-left corner.
+    /// Episodes: "Series Name · S1 E2". Movies: the year. Anything else keeps `subtitle`.
+    pub fn header_subtitle(&self) -> Option<String> {
+        if let Some(series) = self.series_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(episode_line(series, self.season_number, self.episode_number));
+        }
+        if self.media_kind == MediaKind::Video {
+            if let Some(year) = self.production_year {
+                return Some(year.to_string());
+            }
+        }
+        self.subtitle.clone()
+    }
+}
+
+/// "Series Name · S1 E2"; when a season or episode number is missing, only the known parts appear.
+pub fn episode_line(series: &str, season: Option<u32>, episode: Option<u32>) -> String {
+    let code = match (season, episode) {
+        (Some(s), Some(e)) => format!("S{} E{}", s, e),
+        (Some(s), None) => format!("S{}", s),
+        (None, Some(e)) => format!("E{}", e),
+        (None, None) => String::new(),
+    };
+    if code.is_empty() { series.to_string() } else { format!("{} · {}", series, code) }
 }
 
 /// Whether playback shows the full-window video view or the now-playing bar.
@@ -337,5 +372,46 @@ mod tests {
         let j = serde_json::to_string(&s).unwrap();
         assert!(j.contains("seerr_url") );
         assert!(!j.contains("api_key"));
+    }
+
+    fn start(series: Option<&str>, season: Option<u32>, episode: Option<u32>, year: Option<u32>, kind: MediaKind) -> PlaybackStart {
+        PlaybackStart {
+            url: String::new(),
+            item_id: "x".into(),
+            title: "Pilot".into(),
+            subtitle: Some("fallback".into()),
+            resume_secs: 0.0,
+            method: crate::transcode::decision::PlaybackMethod::DirectPlay,
+            run_time_secs: 0.0,
+            image_key: None,
+            media_kind: kind,
+            series_name: series.map(str::to_string),
+            season_number: season,
+            episode_number: episode,
+            production_year: year,
+        }
+    }
+
+    #[test]
+    fn episode_line_formats_season_and_episode() {
+        assert_eq!(episode_line("Show", Some(1), Some(2)), "Show · S1 E2");
+        assert_eq!(episode_line("Show", Some(12), Some(105)), "Show · S12 E105");
+        assert_eq!(episode_line("Show", Some(3), None), "Show · S3");
+        assert_eq!(episode_line("Show", None, Some(4)), "Show · E4");
+        assert_eq!(episode_line("Show", None, None), "Show");
+    }
+
+    #[test]
+    fn header_subtitle_for_episode_movie_and_other() {
+        let ep = start(Some("Show"), Some(1), Some(2), Some(2019), MediaKind::Video);
+        assert_eq!(ep.header_subtitle().as_deref(), Some("Show · S1 E2"));
+        let blank = start(Some("  "), Some(1), Some(2), None, MediaKind::Video);
+        assert_eq!(blank.header_subtitle().as_deref(), Some("fallback"));
+        let movie = start(None, None, None, Some(1999), MediaKind::Video);
+        assert_eq!(movie.header_subtitle().as_deref(), Some("1999"));
+        let undated = start(None, None, None, None, MediaKind::Video);
+        assert_eq!(undated.header_subtitle().as_deref(), Some("fallback"));
+        let audio = start(None, None, None, Some(2001), MediaKind::Audio);
+        assert_eq!(audio.header_subtitle().as_deref(), Some("fallback"));
     }
 }

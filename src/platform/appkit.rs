@@ -384,6 +384,7 @@ pub struct Ui {
     /// Account name for the sidebar footer, from the last `Connected`.
     pub user_name: String,
     pub now: crate::ui::nowbar::NowBar,
+    pub pbar: crate::ui::playerbar::PlayerBar,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
 unsafe impl Send for Ui {}
@@ -543,6 +544,11 @@ pub(crate) unsafe fn register_classes() {
             (sel!(focusPrevious:), crate::ui::shortcuts::focus_previous as Extern0),
             (sel!(seerrShowTab:), crate::ui::shortcuts::seerr_show_tab as Extern0),
             (sel!(showShortcuts:), crate::ui::shortcuts::show_shortcuts as Extern0),
+            (sel!(showSubtitleMenu:), crate::ui::playerbar::show_sub_menu as Extern0),
+            (sel!(showAudioMenu:), crate::ui::playerbar::show_audio_menu as Extern0),
+            (sel!(showSpeedMenu:), crate::ui::playerbar::show_speed_menu as Extern0),
+            (sel!(pickTrack:), crate::ui::playerbar::pick_track as Extern0),
+            (sel!(togglePiP:), crate::ui::playerbar::toggle_pip as Extern0),
         ] {
             d.add_method(s, f);
         }
@@ -559,6 +565,7 @@ pub(crate) unsafe fn register_classes() {
     register_header_class();
     crate::ui::detail::register_detail_classes();
     crate::ui::player::register_player_classes();
+    crate::ui::playerbar::register_playerbar_classes();
     crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
     {
@@ -652,6 +659,10 @@ pub(crate) unsafe fn update_chip() {
 pub(crate) extern "C" fn fullscreen(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if offscreen_mode() {
+            ui.pbar.full_presses += 1;
+            return;
+        }
         let _: () = msg_send![ui.win.get(), toggleFullScreen: nil()];
     }
 }
@@ -1237,6 +1248,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         onboard: crate::ui::onboarding::OnboardUi::new(),
         user_name: String::new(),
         now: crate::ui::nowbar::NowBar::new(),
+        pbar: crate::ui::playerbar::PlayerBar::new(),
         tint_cache: HashMap::new(),
     };
     PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
@@ -1308,6 +1320,20 @@ unsafe impl objc::Encode for NSEdgeInsets {
 unsafe impl objc::Encode for CMTime {
     fn encode() -> objc::Encoding {
         unsafe { objc::Encoding::from_str("{?=qiIq}") }
+    }
+}
+/// CMTimeRange: start then duration, each a CMTime (returned by NSValue's CMTimeRangeValue).
+/// Note: this 48-byte struct comes back through plain msg_send, which is correct on arm64. An x86_64 build
+/// would need objc_msgSend_stret for the large-struct return.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CMTimeRange {
+    pub start: CMTime,
+    pub duration: CMTime,
+}
+unsafe impl objc::Encode for CMTimeRange {
+    fn encode() -> objc::Encoding {
+        unsafe { objc::Encoding::from_str("{?={?=qiIq}{?=qiIq}}") }
     }
 }
 

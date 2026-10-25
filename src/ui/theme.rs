@@ -34,6 +34,8 @@ pub const CELL_TEXT_H: f64 = 44.;
 pub const SIDEBAR_ROW_H: f64 = 28.;
 pub const NOW_BAR_H: f64 = 72.;
 pub const PLAYER_BAR_H: f64 = 52.;
+/// Custom transport bar at the bottom of the video player (scrubber row + button row).
+pub const PLAYER_CTRL_H: f64 = 128.;
 pub const HEADER_H: f64 = 44.;
 
 // ---- Radii -----------------------------------------------------------------
@@ -86,6 +88,8 @@ pub const T_CALLOUT: TypeStyle = TypeStyle { size: 12., weight: Weight::Regular,
 pub const T_CAPTION: TypeStyle = TypeStyle { size: 11., weight: Weight::Regular, mono: false };
 pub const T_CAPTION_EM: TypeStyle = TypeStyle { size: 11., weight: Weight::Semibold, mono: false };
 pub const T_MONO: TypeStyle = TypeStyle { size: 11., weight: Weight::Medium, mono: true };
+/// Elapsed / remaining clock on the video transport bar (10-foot sizing).
+pub const T_PLAYER_TIME: TypeStyle = TypeStyle { size: 14., weight: Weight::Medium, mono: true };
 
 /// NSTextAlignment values differ by architecture (NSText.h): Intel keeps the
 /// classic Right = 1 / Center = 2, Apple silicon uses the iOS values.

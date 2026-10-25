@@ -176,11 +176,18 @@ fn steps() -> Vec<Step> {
         ("settings: open+save", s_settings_save, 600),
         ("libraries: sidebar order + hidden, settings controls", s_library_prefs, 300),
         ("playback: start", s_play_start, 2500),
-        ("playback: chrome", s_play_chrome, 100),
+        // The start-up fade-in of the bars runs for M_FAST (0.12 s) and alphaValue reads
+        // mid-animation, so the delay after the chrome step must clear it before the bar checks.
+        ("playback: chrome", s_play_chrome, 400),
+        ("player bar: layout + audit", s_player_bar, 100),
+        ("player bar: buttons, menus, hover", s_player_bar_buttons, 300),
+        ("player bar: auto-hide arm", s_pb_hide_arm, 600),
+        ("player bar: auto-hide check", s_pb_hide_check, 50),
         ("playback: controls", s_play_controls, 300),
         ("playback: subtitle/audio cycle", s_play_cycle, 2300),
         ("playback: toast hides itself", s_toast_hidden, 50),
         ("audit: player (long title, toast, info)", s_audit_player, 200),
+        ("player header: episode, long names", s_player_header, 200),
         ("playback: speed", s_play_speed, 300),
         ("playback: server down/up/error", s_play_net, 500),
         ("playback: replace item", s_play_start, 1500),
@@ -288,6 +295,10 @@ fn playback(resume: f64, run: f64) -> MainMsg {
         run_time_secs: run,
         image_key: Some(poster_key("Movie-0")),
         media_kind: MediaKind::Video,
+        series_name: None,
+        season_number: None,
+        episode_number: None,
+        production_year: None,
     })
 }
 fn state_check(what: &str, ok: bool) {
@@ -1844,7 +1855,7 @@ fn s_play_chrome() {
         let name: *mut Object = msg_send![ap, name];
         state_check("player chrome is dark", to_str(name) == "NSAppearanceNameDarkAqua");
         let cs: isize = msg_send![ui.avview.get(), controlsStyle];
-        state_check("AVKit controls are floating", cs == 2);
+        state_check("AVKit controls are off (controlsStyle none)", cs == 0);
         state_check("toast hidden when empty", !player::toast_visible());
         let ip: BOOL = msg_send![ui.info_panel.get(), isHidden];
         state_check("playback info hidden by default", ip == YES);
@@ -1880,6 +1891,10 @@ fn s_audit_player() {
         run_time_secs: 6.0,
         image_key: None,
         media_kind: MediaKind::Video,
+        series_name: None,
+        season_number: None,
+        episode_number: None,
+        production_year: None,
     }));
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -1894,6 +1909,149 @@ fn s_audit_player() {
         crate::ui::player::apply_info_visibility();
         crate::ui::player::toast("Subtitles: Off", Some("captions.bubble"), false);
         audit("player/toast-short");
+    }
+}
+fn s_player_bar() {
+    unsafe {
+        crate::ui::player::show_bars_instant();
+        let ui = UI.get_mut().unwrap();
+        let bar = ui.pbar.bar.get();
+        state_check("player bar built", !bar.is_null());
+        let host = bounds_of(ui.player_host.get());
+        let f = frame_of(bar);
+        state_check("player bar spans the full width", f.origin.x.abs() < 0.5 && (f.size.w - host.size.w).abs() < 0.5);
+        state_check("player bar sits at the bottom", f.origin.y.abs() < 0.5 && (f.size.h - crate::ui::theme::PLAYER_CTRL_H).abs() < 0.5);
+        let cs: isize = msg_send![ui.avview.get(), controlsStyle];
+        state_check("controlsStyle is none (0)", cs == 0);
+        state_check("player bar shown at start", ui.bar_shown && crate::ui::playerbar::visible());
+        state_check("player bar: elapsed and remaining filled",
+            read_field(ui.pbar.elapsed.get()).contains(':') && read_field(ui.pbar.remain.get()).starts_with('-'));
+    }
+    audit_both("player bar");
+}
+fn s_player_bar_buttons() {
+    use crate::ui::playerbar as pb;
+    unsafe {
+        crate::ui::player::show_bars_instant();
+        let (play, back, fwd, mute, subs, audio, speed, pip, full) = {
+            let p = &UI.get().unwrap().pbar;
+            (p.play, p.back, p.fwd, p.mute, p.subs, p.audio, p.speed, p.pip, p.full)
+        };
+        // Every button is wired to its action on the controller.
+        for (b, sel, name) in [
+            (play, sel!(playPause:), "play"),
+            (back, sel!(seekBack:), "back 10s"),
+            (fwd, sel!(seekFwd:), "forward 10s"),
+            (mute, sel!(mute:), "mute"),
+            (subs, sel!(showSubtitleMenu:), "subtitles"),
+            (audio, sel!(showAudioMenu:), "audio"),
+            (speed, sel!(showSpeedMenu:), "speed"),
+            (pip, sel!(togglePiP:), "picture in picture"),
+            (full, sel!(fullscreen:), "full screen"),
+        ] {
+            let a: objc::runtime::Sel = msg_send![b.get(), action];
+            state_check(&format!("button {} wired", name), a == sel);
+        }
+        // PiP and full screen are fired too (off-screen they only count the press).
+        act(sel!(togglePiP:), pip.get());
+        state_check("pip button fires its action", UI.get().unwrap().pbar.pip_presses == 1);
+        act(sel!(fullscreen:), full.get());
+        state_check("full screen button fires its action", UI.get().unwrap().pbar.full_presses == 1);
+        // Play/pause: one press flips the rate, the next flips it back.
+        let r0: f32 = msg_send![UI.get().unwrap().player.get(), rate];
+        act(sel!(playPause:), play.get());
+        let r1: f32 = msg_send![UI.get().unwrap().player.get(), rate];
+        state_check("play button toggles playback", (r0 > 0.0) != (r1 > 0.0));
+        act(sel!(playPause:), play.get());
+        // Mute toggles.
+        let m0: BOOL = msg_send![UI.get().unwrap().player.get(), isMuted];
+        act(sel!(mute:), mute.get());
+        let m1: BOOL = msg_send![UI.get().unwrap().player.get(), isMuted];
+        state_check("mute button toggles mute", m0 != m1);
+        act(sel!(mute:), mute.get());
+        // Back and forward run without touching anything else.
+        act(sel!(seekFwd:), fwd.get());
+        act(sel!(seekBack:), back.get());
+        // Subtitle and audio menus list Off plus every track.
+        act(sel!(showSubtitleMenu:), subs.get());
+        let want_subs = UI.get().unwrap().sub_opts.len() + 1;
+        state_check("subtitle menu lists Off and each track", UI.get().unwrap().pbar.last_menu_items == want_subs);
+        act(sel!(showAudioMenu:), audio.get());
+        let want_audio = UI.get().unwrap().audio_opts.len() + 1;
+        state_check("audio menu lists Off and each track", UI.get().unwrap().pbar.last_menu_items == want_audio);
+        if !UI.get().unwrap().sub_opts.is_empty() {
+            act(sel!(pickTrack:), tagged_button(0));
+            state_check("subtitle menu item Off selects no track", UI.get().unwrap().sel_sub == 0);
+        }
+        // Speed menu: six rates, and a picked rate reaches the player.
+        act(sel!(showSpeedMenu:), speed.get());
+        state_check("speed menu lists six rates", UI.get().unwrap().pbar.last_menu_items == 6);
+        act(sel!(setSpeed:), tagged_button(150));
+        let d: f32 = msg_send![UI.get().unwrap().player.get(), defaultRate];
+        state_check("speed pick sets the default rate", (d - 1.5).abs() < 0.01);
+        act(sel!(setSpeed:), tagged_button(100));
+        // Volume slider drives the player.
+        let vol = UI.get().unwrap().pbar.vol.get();
+        let _: () = msg_send![vol, setDoubleValue: 0.4f64];
+        act(sel!(jrNowVolume:), vol);
+        let v: f32 = msg_send![UI.get().unwrap().player.get(), volume];
+        state_check("player bar volume drives the player", (v - 0.4).abs() < 0.01);
+        let _: () = msg_send![vol, setDoubleValue: 1.0f64];
+        act(sel!(jrNowVolume:), vol);
+        // Hover tooltip shows the time under the pointer and goes away again.
+        pb::set_hover(Some(0.5));
+        let tip = UI.get().unwrap().pbar.tip.get();
+        let th: BOOL = msg_send![tip, isHidden];
+        state_check("hover tooltip shows", th == NO && read_field(UI.get().unwrap().pbar.tip_label.get()).contains(':'));
+        pb::set_hover(None);
+        let th: BOOL = msg_send![tip, isHidden];
+        state_check("hover tooltip hides", th == YES);
+        // Scrubber seek moves the played fraction.
+        pb::seek_frac(0.25);
+        state_check("scrubber seek sets the fraction", (UI.get().unwrap().pbar.frac - 0.25).abs() < 1e-6);
+        act(sel!(playPause:), play.get());
+        act(sel!(playPause:), play.get());
+    }
+}
+/// Deterministic idle test: the idle age is set directly instead of waiting on the wall clock.
+fn s_pb_hide_arm() {
+    unsafe {
+        let _ = pb_seek_start();
+        crate::ui::player::show_bars_instant();
+        state_check("auto-hide: bar shown on activity", UI.get().unwrap().bar_shown);
+        // Just under the timeout: still shown.
+        crate::ui::player::set_idle_age(2.0);
+        crate::ui::player::hide_bars_if_idle();
+        state_check("auto-hide: still shown before 2.5 s", UI.get().unwrap().bar_shown);
+        // Past the timeout while playing: hides (the fade finishes during the next delay).
+        crate::ui::player::set_idle_age(2.6);
+        crate::ui::player::hide_bars_if_idle();
+    }
+}
+unsafe fn pb_seek_start() -> bool {
+    let ui = UI.get().unwrap();
+    if ui.playing.is_none() {
+        return false;
+    }
+    let tm = crate::platform::appkit::CMTimeMakeWithSeconds(0.0, 600);
+    let _: () = msg_send![ui.player.get(), seekToTime: tm];
+    let _: () = msg_send![ui.player.get(), setRate: 1.0f32];
+    true
+}
+fn show_bars_now() {
+    unsafe { crate::ui::player::show_bars() }
+}
+fn s_pb_hide_check() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("auto-hide: video still playing during idle", ui.playing.as_ref().map(|p| !p.paused).unwrap_or(false));
+        state_check("auto-hide: top bar hidden after 2.5 s idle", !ui.bar_shown);
+        state_check("auto-hide: player bar faded out", !crate::ui::playerbar::visible());
+        let ta: f64 = msg_send![ui.top_bar.get(), alphaValue];
+        state_check("auto-hide: top bar alpha 0", ta < 0.05);
+        // Pointer movement brings both back.
+        show_bars_now();
+        state_check("show on mouse move: bars back", ui.bar_shown);
     }
 }
 fn s_play_controls() {
@@ -1921,6 +2079,57 @@ fn s_play_cycle() {
             state_check("toast visible after cycling", crate::ui::player::toast_visible());
         }
     }
+}
+const LONG_SERIES: &str = "The Extraordinarily Long Series Name That Keeps Going Season After Season Forever";
+fn s_player_header() {
+    // Episode with a long show name and a long episode title: title on top, "Series · S12 E105" under it.
+    handle_main(MainMsg::PlaybackReady(PlaybackStart {
+        url: video_url(),
+        item_id: "ep-long".into(),
+        title: LONG.into(),
+        subtitle: Some(LONG_SERIES.into()),
+        resume_secs: 0.0,
+        method: PlaybackMethod::DirectPlay,
+        run_time_secs: 6.0,
+        image_key: None,
+        media_kind: MediaKind::Video,
+        series_name: Some(LONG_SERIES.into()),
+        season_number: Some(12),
+        episode_number: Some(105),
+        production_year: Some(2001),
+    }));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let t = read_field(ui.top_title.get());
+        let s = read_field(ui.top_sub.get());
+        state_check("episode header: title is the episode name", t == LONG);
+        state_check("episode header: series line", s == format!("{} · S12 E105", LONG_SERIES));
+        let bar: *mut Object = msg_send![ui.top_title.get(), superview];
+        state_check("episode header sits in the top bar (fades with it)", bar == ui.top_bar.get());
+    }
+    audit_both("player header (episode)");
+    // Movie: the year goes under the title.
+    handle_main(MainMsg::PlaybackReady(PlaybackStart {
+        url: video_url(),
+        item_id: "movie-hdr".into(),
+        title: "Fake Movie".into(),
+        subtitle: None,
+        resume_secs: 0.0,
+        method: PlaybackMethod::DirectPlay,
+        run_time_secs: 6.0,
+        image_key: None,
+        media_kind: MediaKind::Video,
+        series_name: None,
+        season_number: None,
+        episode_number: None,
+        production_year: Some(1999),
+    }));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("movie header: title", read_field(ui.top_title.get()) == "Fake Movie");
+        state_check("movie header: year", read_field(ui.top_sub.get()) == "1999");
+    }
+    audit_both("player header (movie)");
 }
 fn s_play_speed() {
     unsafe {
@@ -1958,6 +2167,10 @@ fn audio_start(title: &str, artist: &str) -> MainMsg {
         run_time_secs: 6.0,
         image_key: Some(poster_key("Audio-0")),
         media_kind: MediaKind::Audio,
+        series_name: None,
+        season_number: None,
+        episode_number: None,
+        production_year: None,
     })
 }
 fn s_audio_start() {
