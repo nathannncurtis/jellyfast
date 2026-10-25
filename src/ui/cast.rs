@@ -15,11 +15,9 @@ use objc::runtime::{Object, Sel, BOOL, NO, YES};
 use objc::{sel, sel_impl};
 use std::time::{Duration, Instant};
 
-const BAR_W: f64 = 640.;
-const BAR_H: f64 = 60.;
-/// Bottom strip of the window: the remote bar sits in it and the library side stops above it.
-pub const STRIP_H: f64 = 84.;
-const BAR_Y: f64 = 12.;
+/// Bottom strip of the window, full width under the sidebar and the content: the remote bar
+/// fills it and the library side stops above it.
+pub const STRIP_H: f64 = 64.;
 /// The remote bar re-reads the session this often while it is up.
 const POLL_EVERY: Duration = Duration::from_millis(2000);
 
@@ -334,55 +332,66 @@ unsafe fn find_button(v: *mut Object, depth: u32) -> *mut Object {
 
 // ---- the remote bar -------------------------------------------------------------------------------
 
-/// Builds the remote bar on top of the window content (hidden until a cast starts).
 pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
     let ui = UI.get_mut().unwrap();
-    let w = BAR_W.min(b.size.w - 2. * EDGE);
+    // Full-width strip under the sidebar and the content, like a now-playing bar that spans the window.
     let bar = vev(MAT_HUD, BLEND_WITHIN);
-    let _: () = msg_send![bar, setFrame: rect((b.size.w - w) / 2., BAR_Y, w, BAR_H)];
-    set_autoresize(bar, MARGIN_MINX | MARGIN_MAXX | MARGIN_MAXY);
+    let _: () = msg_send![bar, setFrame: rect(0., 0., b.size.w, STRIP_H)];
+    set_autoresize(bar, RESIZE_W | MARGIN_MAXY);
     let _: () = msg_send![bar, setAppearance: crate::ui::player::dark_appearance()];
-    set_corner(layer_of(bar), BAR_H / 2.);
-    let _: () = msg_send![layer_of(bar), setMasksToBounds: YES];
     set_hidden(bar, true);
     add_sub(content, bar);
     ui.cast.bar = Ptr(bar);
 
+    // Hairline along the top edge of the strip.
+    let rule: *mut Object = msg_send![class!(NSView), alloc];
+    let rule: *mut Object = autorel(msg_send![rule, initWithFrame: rect(0., STRIP_H - 1., b.size.w, 1.)]);
+    let _: () = msg_send![rule, setWantsLayer: YES];
+    let sep: *mut Object = msg_send![color(C_ON_MEDIA), colorWithAlphaComponent: 0.12f64];
+    let cg: *mut Object = msg_send![sep, CGColor];
+    let _: () = msg_send![layer_of(rule), setBackgroundColor: cg];
+    set_autoresize(rule, RESIZE_W | MARGIN_MINY);
+    add_sub(bar, rule);
+
+    // Left: what is playing and where. Middle: controls. Right: scrubber, clock, dismiss.
     let title = label("", T_BODY_EM, C_ON_MEDIA, ALIGN_LEFT);
-    set_frame(title, rect(SP4, 30., 212., 18.));
+    set_frame(title, rect(SP4, 34., 240., 18.));
     add_sub(bar, title);
     ui.cast.title = Ptr(title);
     let device = label("", T_CAPTION, C_ON_MEDIA2, ALIGN_LEFT);
-    set_frame(device, rect(SP4, 12., 212., 14.));
+    set_frame(device, rect(SP4, 16., 240., 14.));
     add_sub(bar, device);
     ui.cast.device = Ptr(device);
 
     let play = crate::ui::playerbar::ctl_button(bar, "play.fill", 18., "Play / Pause", sel!(jrCastPlayPause:));
-    set_frame(play, rect(236., 14., 32., 32.));
+    set_frame(play, rect(280., 16., 32., 32.));
     ui.cast.play = Ptr(play);
     let stop = crate::ui::playerbar::ctl_button(bar, "stop.fill", 14., "Stop on the device", sel!(jrCastStop:));
-    set_frame(stop, rect(272., 14., 32., 32.));
+    set_frame(stop, rect(320., 16., 32., 32.));
     ui.cast.stop = Ptr(stop);
 
     let s: *mut Object = msg_send![class!(NSSlider), alloc];
-    let s: *mut Object = msg_send![s, initWithFrame: rect(316., 25., 170., 16.)];
+    let s: *mut Object = msg_send![s, initWithFrame: rect(368., 24., (b.size.w - 368. - 148.).max(120.), 16.)];
     let _: () = msg_send![s, setMinValue: 0.0f64];
     let _: () = msg_send![s, setMaxValue: 1.0f64];
     let _: () = msg_send![s, setContinuous: NO];
     let _: () = msg_send![s, setTarget: ui.ctl.get()];
     let _: () = msg_send![s, setAction: sel!(jrCastScrub:)];
     let _: () = msg_send![s, setToolTip: ns("Seek on the device")];
+    set_autoresize(s, RESIZE_W);
     autorel(s);
     add_sub(bar, s);
     ui.cast.scrub = Ptr(s);
 
     let time = label("", T_MONO, C_ON_MEDIA2, ALIGN_RIGHT);
-    set_frame(time, rect(490., 21., 84., 16.));
+    set_frame(time, rect(b.size.w - 136., 24., 84., 16.));
+    set_autoresize(time, MARGIN_MINX);
     add_sub(bar, time);
     ui.cast.time = Ptr(time);
 
     let close = crate::ui::playerbar::ctl_button(bar, "xmark", 11., "Hide", sel!(jrCastClose:));
-    set_frame(close, rect(w - 40., 18., 24., 24.));
+    set_frame(close, rect(b.size.w - 40., 20., 24., 24.));
+    set_autoresize(close, MARGIN_MINX);
     ui.cast.close = Ptr(close);
 }
 
@@ -402,8 +411,9 @@ unsafe fn apply_remote() {
         for v in [ui.cast.play.get(), ui.cast.stop.get(), ui.cast.scrub.get(), ui.cast.time.get()] {
             set_hidden(v, true);
         }
-        set_frame(title, rect(SP4, 30., BAR_W - 2. * SP4 - 40., 18.));
-        set_frame(device, rect(SP4, 12., BAR_W - 2. * SP4 - 40., 14.));
+        let w = bounds_of(ui.cast.bar.get()).size.w;
+        set_frame(title, rect(SP4, 34., w - SP4 - 56., 18.));
+        set_frame(device, rect(SP4, 16., w - SP4 - 56., 14.));
         set_text(title, &crate::ui::shell::clip_msg(&m, 110));
         set_text(device, "Press × to dismiss");
         layout();
@@ -416,8 +426,8 @@ unsafe fn apply_remote() {
     for v in [ui.cast.play.get(), ui.cast.stop.get(), ui.cast.scrub.get(), ui.cast.time.get()] {
         set_hidden(v, false);
     }
-    set_frame(title, rect(SP4, 30., 212., 18.));
-    set_frame(device, rect(SP4, 12., 212., 14.));
+    set_frame(title, rect(SP4, 34., 240., 18.));
+    set_frame(device, rect(SP4, 16., 240., 14.));
     let title_text = match (&r.title, r.online) {
         (Some(t), _) => t.clone(),
         (None, true) => "Nothing playing".to_string(),

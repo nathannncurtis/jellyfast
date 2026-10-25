@@ -363,6 +363,10 @@ fn strip_no_overlap(what: &str) {
             &format!("{}: remote bar is inside the window", what),
             bar.origin.x >= 0.0 && bar.origin.x + bar.size.w <= cb.size.w + 0.5 && bar.origin.y >= 0.0,
         );
+        state_check(
+            &format!("{}: remote strip spans the full window width", what),
+            bar.origin.x.abs() < 0.5 && (bar.size.w - cb.size.w).abs() < 0.5,
+        );
     }
 }
 
