@@ -169,6 +169,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(content_host, sc);
     autorel(sc);
     ui.lib_scroll = Ptr(sc);
+    crate::ui::home::build_scroll(content_host, grid_area);
 
     let grid_cls = *GRID_CLASS.get().unwrap();
     let grid: *mut Object = msg_send![grid_cls, alloc];
@@ -617,6 +618,9 @@ pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, ta
 /// Refresh the selection pill on every library row from `ui.selected_view`.
 pub(crate) unsafe fn sidebar_refresh_selection() {
     let ui = UI.get_mut().unwrap();
+    if !ui.home.row.get().is_null() {
+        row_set_selected(ui.home.row.get(), ui.home.active);
+    }
     for (i, (row, _)) in ui.rows.iter().enumerate() {
         row_set_selected(*row, ui.selected_view == Some(i));
     }
@@ -641,6 +645,13 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
         ui.views.push(("livetv".into(), "Live TV".into(), Some("livetv".into())));
     }
     let views: Vec<(String, String, Option<String>)> = ui.views.clone();
+
+    // Home sits above the library list.
+    let home_row = sidebar_row("Home", "house", sel!(homeSelected:), -1);
+    let _: () = msg_send![stack, addView: home_row inGravity: 1isize];
+    ui.side_dyn.push(home_row);
+    ui.home.row = Ptr(home_row);
+    row_set_selected(home_row, ui.home.active);
 
     // Section header
     let hdr_box: *mut Object = msg_send![class!(NSView), alloc];
@@ -954,6 +965,7 @@ pub(crate) unsafe fn show_state(symbol_name: &str, title: &str, body: &str, retr
 /// Called when a load begins. `first` = a different view (skeleton), otherwise keep
 /// what is on screen and spin in the header.
 pub(crate) unsafe fn begin_load(first: bool) {
+    crate::ui::home::leave();
     let ui = UI.get_mut().unwrap();
     hide_state();
     if first || ui.items.is_empty() {

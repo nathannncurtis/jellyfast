@@ -36,31 +36,35 @@ pub(crate) fn handle_main(msg: MainMsg) {
                 ui.views = views.clone();
                 sidebar_rebuild(user_name, &views, has_live_tv);
                 show_login_or_library(true);
-                // Land on the last-used library, or the first one.
-                let idx = ui
+                // Land on the remembered place: its library if it still exists, else Home.
+                let remembered = ui
                     .cfg
                     .last_view
                     .as_ref()
-                    .and_then(|id| ui.views.iter().position(|v| &v.0 == id))
-                    .unwrap_or(0);
-                if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
-                    ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
-                    ui.selected_view = Some(idx);
-                    sidebar_refresh_selection();
-                    begin_load(true);
-                    let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+                    .and_then(|id| ui.views.iter().position(|v| &v.0 == id));
+                match remembered {
+                    Some(idx) => {
+                        let (id, name, ct) = ui.views[idx].clone();
+                        ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
+                        ui.selected_view = Some(idx);
+                        sidebar_refresh_selection();
+                        begin_load(true);
+                        let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+                        let _ = ui.ui_tx.send(UiCmd::LoadHome);
+                    }
+                    None => crate::ui::home::enter(), // also requests the Home rows
                 }
-                let _ = ui.ui_tx.send(UiCmd::LoadHome);
             }
         }
         MainMsg::ConnectError(e) => unsafe {
             login_error(&e);
             show_login_or_library(false);
         },
-        MainMsg::HomeLoaded(home) => {
-            UI.get_mut().unwrap().home_rows = home.rows;
-        }
+        MainMsg::HomeLoaded(home) => unsafe {
+            crate::ui::home::set_rows(home.rows);
+        },
         MainMsg::ItemsLoaded { title, items, can_go_back } => unsafe {
+            crate::ui::home::leave();
             let ui = UI.get_mut().unwrap();
             ui.items = items.clone();
             ui.cur_title = title.clone();

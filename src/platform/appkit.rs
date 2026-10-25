@@ -362,6 +362,8 @@ pub struct Ui {
     pub cur_title: String,
     /// Home screen rows from the latest `MainMsg::HomeLoaded`.
     pub home_rows: Vec<crate::app::messages::HomeRow>,
+    /// Home screen views (scroll, rows, cards, sidebar row).
+    pub home: crate::ui::home::HomeUi,
     pub now: crate::ui::nowbar::NowBar,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
@@ -486,6 +488,8 @@ pub(crate) unsafe fn register_classes() {
             (sel!(goBack:), go_back as Extern0),
             (sel!(viewSelected:), view_selected as Extern0),
             (sel!(itemClicked:), item_clicked as Extern0),
+            (sel!(homeItemClicked:), home_item_clicked as Extern0),
+            (sel!(homeSelected:), crate::ui::home::home_selected as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
             (sel!(markUnwatched:), mark_unwatched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
@@ -757,6 +761,10 @@ pub(crate) extern "C" fn sign_out(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if ui.home.active {
+            crate::ui::home::reload();
+            return;
+        }
         if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
             begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
@@ -766,6 +774,9 @@ pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
 pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        if ui.home.active {
+            return;
+        }
         if ui.mode_stack.len() > 1 {
             ui.mode_stack.pop();
             if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
@@ -794,24 +805,36 @@ pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Obj
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
-        let it = match ui.items.get(tag as usize) {
-            Some(i) => i.clone(),
-            None => return,
-        };
-        set_busy(true);
-        match it.item_type.as_str() {
-            "Series" => {
-                let _ = ui.ui_tx.send(UiCmd::Episodes { series_id: it.id.clone(), series_name: it.name.clone() });
-            }
-            "MusicAlbum" => {
-                let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
-            }
-            "LiveTvChannel" => {
-                let _ = ui.ui_tx.send(UiCmd::PlayChannel { channel_id: it.id.clone(), name: it.name.clone() });
-            }
-            _ => {
-                let _ = ui.ui_tx.send(UiCmd::Play { item_id: it.id.clone() });
-            }
+        if let Some(it) = ui.items.get(tag as usize).cloned() {
+            activate(it);
+        }
+    }
+}
+pub(crate) extern "C" fn home_item_clicked(_t: &mut Object, _c: Sel, sender: *mut Object) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let tag: NSInteger = msg_send![sender, tag];
+        if let Some(it) = ui.home.flat.get(tag as usize).cloned() {
+            activate(it);
+        }
+    }
+}
+/// Play an item, or open its episodes/tracks/channel for containers.
+unsafe fn activate(it: ListItem) {
+    let ui = UI.get_mut().unwrap();
+    set_busy(true);
+    match it.item_type.as_str() {
+        "Series" => {
+            let _ = ui.ui_tx.send(UiCmd::Episodes { series_id: it.id.clone(), series_name: it.name.clone() });
+        }
+        "MusicAlbum" => {
+            let _ = ui.ui_tx.send(UiCmd::Tracks { album_id: it.id.clone(), album_name: it.name.clone() });
+        }
+        "LiveTvChannel" => {
+            let _ = ui.ui_tx.send(UiCmd::PlayChannel { channel_id: it.id.clone(), name: it.name.clone() });
+        }
+        _ => {
+            let _ = ui.ui_tx.send(UiCmd::Play { item_id: it.id.clone() });
         }
     }
 }
@@ -1135,6 +1158,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         side_dyn: vec![],
         cur_title: String::new(),
         home_rows: Vec::new(),
+        home: crate::ui::home::HomeUi::new(),
         now: crate::ui::nowbar::NowBar::new(),
         tint_cache: HashMap::new(),
     };

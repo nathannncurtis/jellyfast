@@ -368,8 +368,12 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 if let Some(c) = &client {
                     // Spawned so a slow Home load never blocks later commands.
                     let (c, tx) = (c.clone(), main_tx.clone());
+                    let (dir, http) = (poster_dir.clone(), http_poster.clone());
                     tokio::spawn(async move {
                         let rows = crate::app::home::load_home(&c).await;
+                        // Poster results arrive as PosterReady and fill cells built from the cache.
+                        let items: Vec<crate::jellyfin::models::ListItem> = rows.rows.iter().flat_map(|r| r.items.iter().cloned()).collect();
+                        fetch_posters(&c, &tx, &items, &dir, http.as_ref()).await;
                         let _ = tx.send(MainMsg::HomeLoaded(rows));
                     });
                 }
