@@ -186,7 +186,7 @@ pub(crate) unsafe fn symbol_image(name: &str, point_size: CGFloat) -> *mut Objec
     }
     // Resize via symbol configuration (SF Symbols scale cleanly).
     let cfg: *mut Object = msg_send![class!(NSImageSymbolConfiguration),
-        configurationWithPointSize: point_size weight: 2i64];
+        configurationWithPointSize: point_size weight: 0.0f64];
     let scaled: *mut Object = msg_send![img, imageWithSymbolConfiguration: cfg];
     if scaled.is_null() {
         img
@@ -269,6 +269,8 @@ pub struct Ui {
     pub settings_win: Ptr,
     pub s_url: Ptr,
     pub s_sub_lang: Ptr,
+    pub s_audio_lang: Ptr,
+    pub retry_pending: bool,
     pub s_quality: Ptr,
     pub s_theme: Ptr,
     pub s_searx_on: Ptr,
@@ -316,6 +318,10 @@ impl UiSlot {
     }
 }
 pub static UI: UiSlot = UiSlot(std::cell::UnsafeCell::new(None));
+/// Pump object pointer, readable from any thread (set in bootstrap).
+pub static PUMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Sender worker-side code uses; main.rs forwards it to the UI and kicks the pump.
+pub static WORKER_TX: OnceLock<UnboundedSender<MainMsg>> = OnceLock::new();
 pub static MAIN_RX: OnceLock<Mutex<UnboundedReceiver<MainMsg>>> = OnceLock::new();
 pub static GRID_CLASS: OnceLock<&'static Class> = OnceLock::new();
 pub(crate) static CELL_CLASS: OnceLock<&'static Class> = OnceLock::new();
@@ -327,12 +333,16 @@ pub(crate) static CELL_CLASS: OnceLock<&'static Class> = OnceLock::new();
 // the `block` crate for no benefit). Box is reconstructed exactly once.
 pub fn on_main(f: impl FnOnce() + Send + 'static) {
     unsafe {
-        let ui = UI.get_mut().expect("ui");
+        let pump = PUMP.load(std::sync::atomic::Ordering::SeqCst) as *mut Object;
+        if pump.is_null() {
+            return;
+        }
         let b: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
-        let p = Box::into_raw(Box::new(b)) as *mut Object;
-        #[allow(deprecated)]
-        let _: () = msg_send![ui.pump.get(), performSelectorOnMainThread: sel!(jrCall:)
-            withObject: p waitUntilDone: NO];
+        let p = Box::into_raw(Box::new(b)) as *mut c_void;
+        // Foundation retains the argument, so it must be a real object: wrap in NSValue.
+        let v: *mut Object = msg_send![class!(NSValue), valueWithPointer: p as *const c_void];
+        let _: () = msg_send![pump, performSelectorOnMainThread: sel!(jrCall:)
+            withObject: v waitUntilDone: NO];
     }
 }
 
@@ -341,7 +351,8 @@ pub(crate) extern "C" fn pump_call(_this: &mut Object, _cmd: Sel, boxed: *mut Ob
         if boxed.is_null() {
             return;
         }
-        let b = Box::from_raw(boxed as *mut Box<dyn FnOnce() + Send>);
+        let p: *mut c_void = msg_send![boxed, pointerValue];
+        let b = Box::from_raw(p as *mut Box<dyn FnOnce() + Send>);
         b();
     }
 }
@@ -402,7 +413,6 @@ pub(crate) unsafe fn register_classes() {
             (sel!(connectClicked:), connect_clicked as Extern0),
             (sel!(saveSettings:), save_settings as Extern0),
             (sel!(cancelSettings:), cancel_settings as Extern0),
-            (sel!(jrSheetDidEnd:), jr_sheet_did_end as Extern0),
             (sel!(sortChanged:), sort_changed as Extern0),
             (sel!(controlTextDidChange:), text_changed as Extern0),
             (sel!(jrTick:), tick as Extern0),
@@ -454,6 +464,9 @@ pub(crate) unsafe fn update_chip() {
         Some(p) => p,
         None => return,
     };
+    if ui.pitem.get().is_null() {
+        return; // item being swapped (KVO can fire mid-replace)
+    }
     let mut s = String::new();
     let tcs: NSInteger = msg_send![ui.player.get(), timeControlStatus];
     if tcs == 1 {
@@ -514,10 +527,11 @@ pub(crate) extern "C" fn show_settings(_t: &mut Object, _c: Sel, _s: *mut Object
 }
 pub(crate) unsafe fn show_settings_sheet() {
     let ui = UI.get_mut().unwrap();
-    #[allow(deprecated)]
-    let _: () = msg_send![ui.win.get(), beginSheet: ui.settings_win.get()
-        modalForWindow: ui.win.get() modalDelegate: ui.ctl.get()
-        didEndSelector: sel!(jrSheetDidEnd:) contextInfo: nil()];
+    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
+    if !attached.is_null() {
+        return;
+    }
+    let _: () = msg_send![ui.win.get(), beginSheet: ui.settings_win.get() completionHandler: nil()];
 }
 pub(crate) extern "C" fn cancel_settings(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
@@ -526,15 +540,17 @@ pub(crate) extern "C" fn cancel_settings(_t: &mut Object, _c: Sel, _s: *mut Obje
 }
 pub(crate) unsafe fn close_settings() {
     let ui = UI.get_mut().unwrap();
-    let _: () = msg_send![ui.settings_win.get(), orderOut: nil()];
-    let _: () = msg_send![ui.win.get(), endSheet: ui.settings_win.get()];
+    let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
+    if !attached.is_null() {
+        let _: () = msg_send![ui.win.get(), endSheet: ui.settings_win.get()];
+    }
 }
 pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let mut s = ui.cfg.settings.clone();
         s.subtitle_lang = read_field(ui.s_sub_lang.get());
-        s.audio_lang = read_field(ui.s_audio_lang_placeholder());
+        s.audio_lang = read_field(ui.s_audio_lang.get());
         let q: NSInteger = msg_send![ui.s_quality.get(), indexOfSelectedItem];
         s.max_bitrate_kbps = [0u64, 40_000, 20_000, 10_000, 5_000, 3_000][q.clamp(0, 5) as usize];
         let th: NSInteger = msg_send![ui.s_theme.get(), indexOfSelectedItem];
@@ -565,11 +581,6 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
 // Helper used above to keep the settings struct access symmetric; keeps
 // the audio-lang field lookup in one place.
 
-impl Ui {
-    unsafe fn s_audio_lang_placeholder(&self) -> *mut Object {
-        self.s_sub_lang.get() // replaced below by real field pointer
-    }
-}
 pub(crate) extern "C" fn sign_out(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -655,8 +666,10 @@ pub(crate) extern "C" fn open_in_web(_t: &mut Object, _c: Sel, sender: *mut Obje
         if let Some(base) = ui.cfg.server_url.clone() {
             let url = crate::jellyfin::urls::build_web_item_url(&base, &id);
             let u: *mut Object = msg_send![class!(NSURL), URLWithString: ns(&url)];
-            let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-            let _: BOOL = msg_send![ws, openURL: u];
+            if !u.is_null() {
+                let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+                let _: BOOL = msg_send![ws, openURL: u];
+            }
         }
     }
 }
@@ -700,11 +713,16 @@ pub(crate) extern "C" fn text_changed(_t: &mut Object, _c: Sel, note: *mut Objec
         let obj: *mut Object = msg_send![note, object];
         if obj == ui.search.get() {
             let q = read_field(ui.search.get());
-            let _ = ui.ui_tx.send(UiCmd::Search { q });
+            if q.trim().is_empty() {
+                if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
+                    let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+                }
+            } else {
+                let _ = ui.ui_tx.send(UiCmd::Search { q });
+            }
         }
     }
 }
-pub(crate) extern "C" fn jr_sheet_did_end(_t: &mut Object, _c: Sel, _s: *mut Object) { unsafe {} }
 
 // ---- App delegate callbacks --------------------------------------------
 pub(crate) extern "C" fn app_did_finish_launch(_t: &mut Object, _c: Sel, _n: *mut Object) {
@@ -716,7 +734,10 @@ pub(crate) extern "C" fn app_did_finish_launch(_t: &mut Object, _c: Sel, _n: *mu
         if ui.cfg.server_url.is_some() {
             set_text(ui.login_err.get(), "Connecting to your server…");
         }
-        let _ = ui.ui_tx.send(UiCmd::QuitSaving); // no-op: worker treats as marker? (see note)
+        crate::app::controller::drain_main(); // anything queued before launch
+        if crate::app::selftest::enabled() {
+            crate::app::selftest::start();
+        }
         // NOTE: QuitSaving is not sent on launch in practice — removed below.
     }
 }
@@ -732,7 +753,7 @@ pub(crate) extern "C" fn app_should_terminate(
         // Clean shutdown: persist window frame + any final state.
         let ui = match UI.get_mut() {
             Some(u) => u,
-            None => return 0,
+            None => return 1,
         };
         let f: NSRect = msg_send![ui.win.get(), frame];
         ui.cfg.window = Some([f.origin.x, f.origin.y, f.size.w, f.size.h]);
@@ -743,7 +764,7 @@ pub(crate) extern "C" fn app_should_terminate(
             });
         }
         crate::config::save_config(&ui.cfg);
-        0 // NSApplicationTerminateReplyTerminateNow
+        1 // NSTerminateNow (0 would cancel the quit)
     }
 }
 
@@ -790,8 +811,8 @@ pub(crate) unsafe fn vev(material: i64, blending: i64) -> *mut Object {
 // Materials / blending modes (AppKit enum values, stable since 10.10):
 pub(crate) const MAT_SIDEBAR: i64 = 7;
 pub(crate) const MAT_POPOVER: i64 = 6;
-pub(crate) const MAT_HUD: i64 = 11;
-pub(crate) const MAT_UNDER_WINDOW: i64 = 15;
+pub(crate) const MAT_HUD: i64 = 13;
+pub(crate) const MAT_UNDER_WINDOW: i64 = 21;
 pub(crate) const BLEND_BEHIND: i64 = 0;
 pub(crate) const BLEND_WITHIN: i64 = 1;
 pub(crate) const RESIZE_W: NSUInteger = 2;
@@ -890,6 +911,8 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         settings_win: Ptr(nil()),
         s_url: Ptr(nil()),
         s_sub_lang: Ptr(nil()),
+        s_audio_lang: Ptr(nil()),
+        retry_pending: false,
         s_quality: Ptr(nil()),
         s_theme: Ptr(nil()),
         s_searx_on: Ptr(nil()),
@@ -909,6 +932,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         mode_stack: vec![],
         cur_title: String::new(),
     };
+    PUMP.store(pump as usize, std::sync::atomic::Ordering::SeqCst);
     let _ = UI.set(ui);
 }
 
@@ -965,10 +989,14 @@ pub fn open_searx_prompt() {
                     crate::jellyfin::urls::enc(&q)
                 );
                 let u: *mut Object = msg_send![class!(NSURL), URLWithString: ns(&url)];
-                let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-                let _: BOOL = msg_send![ws, openURL: u];
+                if !u.is_null() {
+                    let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+                    let _: BOOL = msg_send![ws, openURL: u];
+                }
             }
         }
+        let _: () = msg_send![input, release];
+        let _: () = msg_send![alert, release];
     }
 }
 pub(crate) fn set_chip_in_login(msg: &str, _err: bool) {

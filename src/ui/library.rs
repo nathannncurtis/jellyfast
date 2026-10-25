@@ -24,12 +24,15 @@ pub fn grid_set_items(items: &[ListItem]) {
         let ui = UI.get_mut().unwrap();
         let grid = ui.grid.get();
         // Tear down old cells (remove releases them; see safety model).
-        let old = ui.grid_data.take();
-        if let Some(d) = old {
+        // Keep the same GridData box (the grid's ivar points at it); swap its cells.
+        let mut gd = ui.grid_data.take().unwrap_or_else(|| Box::new(GridData { cells: vec![] }));
+        {
+            let d = &mut *gd;
             for c in &d.cells {
+                free_cell_data(c.container);
                 let _: () = msg_send![c.container, removeFromSuperview];
             }
-            // Box drops here; contained raw pointers are dead by convention.
+            d.cells.clear();
         }
         let mut cells = Vec::with_capacity(items.len());
         for (i, it) in items.iter().enumerate() {
@@ -118,7 +121,7 @@ pub fn grid_set_items(items: &[ListItem]) {
             let ta: *mut Object = msg_send![class!(NSTrackingArea), alloc];
             let ta: *mut Object = msg_send![ta,
                 initWithRect: rect(0., 0., cw, cw * 1.5)
-                options: (16usize | 2usize) owner: container userInfo: nil()];
+                options: (0x01usize | 0x80usize | 0x200usize) owner: container userInfo: nil()];
             let _: () = msg_send![container, addTrackingArea: ta];
             autorel(ta);
             let _: () = msg_send![ui.grid.get(), addSubview: container];
@@ -135,8 +138,18 @@ pub fn grid_set_items(items: &[ListItem]) {
                 meta: it.clone(),
             });
         }
-        ui.grid_data = Some(Box::new(GridData { cells }));
+        gd.cells = cells;
+        ui.grid_data = Some(gd);
         let _: () = msg_send![grid, setNeedsLayout: YES];
+    }
+}
+
+/// Free the per-cell hover box and null the ivar (cell may outlive removal briefly).
+unsafe fn free_cell_data(container: *mut Object) {
+    let cd = *(*container).get_ivar::<*mut c_void>("jrCell") as *mut CellData;
+    if !cd.is_null() {
+        drop(Box::from_raw(cd));
+        (*container).set_ivar::<*mut c_void>("jrCell", std::ptr::null_mut());
     }
 }
 

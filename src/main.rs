@@ -176,7 +176,31 @@ fn main() {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    rt.spawn(app::worker::worker(ui_rx, main_tx.clone(), cfg.clone()));
+    // Worker results arrive on `worker_tx`; the forwarder moves them into the main
+    // queue and kicks the main-thread pump so the UI drains them promptly.
+    let (worker_tx, mut worker_rx) = unbounded_channel::<MainMsg>();
+    let _ = platform::appkit::WORKER_TX.set(worker_tx.clone());
+    {
+        let main_tx = main_tx.clone();
+        rt.spawn(async move {
+            while let Some(m) = worker_rx.recv().await {
+                if main_tx.send(m).is_ok() {
+                    platform::appkit::on_main(app::controller::drain_main);
+                }
+            }
+        });
+    }
+    if app::selftest::enabled() {
+        // Self-test: no worker / network; outgoing UiCmds are only logged.
+        let mut ui_rx = ui_rx;
+        rt.spawn(async move {
+            while let Some(c) = ui_rx.recv().await {
+                println!("[selftest]   UiCmd -> {:?}", c);
+            }
+        });
+    } else {
+        rt.spawn(app::worker::worker(ui_rx, worker_tx.clone(), cfg.clone()));
+    }
 
     // Register the main-thread receiver the pump drains.
     platform::appkit::install_main_rx(main_rx);

@@ -48,7 +48,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
             set_text(ui.header_title.get(), &title);
             let _: BOOL = msg_send![ui.back_btn.get(), setHidden: (!can_go_back) as BOOL];
             set_hidden(ui.spinner.get(), true);
-            set_hidden(ui.status_label.get(), items.is_empty());
+            set_hidden(ui.status_label.get(), !items.is_empty());
             if items.is_empty() {
                 set_text(ui.status_label.get(), "Nothing here.");
             }

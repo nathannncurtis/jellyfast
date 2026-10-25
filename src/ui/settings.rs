@@ -22,7 +22,7 @@ pub(crate) unsafe fn build_settings_window() {
     let ui = UI.get_mut().unwrap();
     let w: *mut Object = msg_send![class!(NSWindow), alloc];
     let w: *mut Object = msg_send![w,
-        initWithContentRect: rect(0., 0., 460., 430.)
+        initWithContentRect: rect(0., 0., 460., 490.)
         styleMask: (1 | 2) as NSUInteger backing: 2usize defer: NO];
     let _: () = msg_send![w, setTitle: ns("Settings")];
     let _: () = msg_send![w, setReleasedWhenClosed: NO];
@@ -43,6 +43,8 @@ pub(crate) unsafe fn build_settings_window() {
     ui.s_url = Ptr(url_f);
     let sub_f = mk(84.0, "Preferred subtitle language (e.g. eng, empty = off)", "eng");
     ui.s_sub_lang = Ptr(sub_f);
+    let audio_f = mk(324.0, "Preferred audio language (e.g. eng, empty = default)", "eng");
+    ui.s_audio_lang = Ptr(audio_f);
     let searx_f = mk(204.0, "SearXNG instance URL", "https://searx.example.com");
     ui.s_searx_url = Ptr(searx_f);
 
@@ -98,6 +100,7 @@ pub(crate) unsafe fn settings_fill(cfg: &Config) {
         set_text(ui.s_url.get(), u);
     }
     set_text(ui.s_sub_lang.get(), &cfg.settings.subtitle_lang);
+    set_text(ui.s_audio_lang.get(), &cfg.settings.audio_lang);
     let q_idx = match cfg.settings.max_bitrate_kbps {
         0 => 0usize,
         40_000 => 1,
