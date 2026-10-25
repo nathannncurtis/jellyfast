@@ -503,10 +503,20 @@ pub(crate) unsafe fn register_classes() {
             (sel!(jrNowSkip:), crate::ui::nowbar::skip as Extern0),
             (sel!(jrNowScrub:), crate::ui::nowbar::scrub as Extern0),
             (sel!(jrNowVolume:), crate::ui::nowbar::volume as Extern0),
+            (sel!(focusSearch:), crate::ui::shortcuts::focus_search as Extern0),
+            (sel!(openSelected:), crate::ui::shortcuts::open_selected as Extern0),
+            (sel!(focusNext:), crate::ui::shortcuts::focus_next as Extern0),
+            (sel!(focusPrevious:), crate::ui::shortcuts::focus_previous as Extern0),
+            (sel!(seerrShowTab:), crate::ui::shortcuts::seerr_show_tab as Extern0),
+            (sel!(showShortcuts:), crate::ui::shortcuts::show_shortcuts as Extern0),
         ] {
             d.add_method(s, f);
         }
         d.add_method(sel!(observeValueForKeyPath:ofObject:change:context:), kvo as KvoFn);
+        d.add_method(
+            sel!(validateMenuItem:),
+            crate::ui::shortcuts::validate_menu_item as extern "C" fn(&mut Object, Sel, *mut Object) -> BOOL,
+        );
         d.register();
     }
     crate::ui::seerr::register_seerr_classes();
