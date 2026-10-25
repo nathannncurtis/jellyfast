@@ -132,9 +132,11 @@ pub struct SeerrUser {
     pub display_name: String,
 }
 
-/// TMDB image URL for a poster path (w342 is plenty for a grid cell).
-pub fn poster_url(path: &str) -> String {
-    format!("https://image.tmdb.org/t/p/w342{}", path)
+/// Poster URL on the user's own Seerr server (its image proxy), never TMDB directly.
+/// `w92` is plenty for a 40x60 thumbnail, even at 2x.
+pub fn poster_url(base: &str, path: &str) -> String {
+    let slash = if path.starts_with('/') { "" } else { "/" };
+    format!("{}/imageproxy/tmdb/t/p/w92{}{}", base.trim_end_matches('/'), slash, path)
 }
 
 pub(crate) fn year_of(date: Option<&str>) -> Option<u16> {

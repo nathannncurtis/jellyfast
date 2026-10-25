@@ -114,6 +114,11 @@ pub enum MainMsg {
         title: String,
     },
     SeerrRequestList(Vec<SeerrRequestItem>),
+    /// Poster bytes for a TMDB-relative `poster_path`, fetched through the Seerr server.
+    SeerrPoster {
+        path: String,
+        bytes: Vec<u8>,
+    },
     /// Search/request/list failure, "already requested", or Seerr disabled/unconfigured.
     SeerrError(String),
     /// Outcome of `SaveSeerr` (ok=false: nothing was persisted).
