@@ -127,6 +127,10 @@ fn steps() -> Vec<Step> {
         ("items: many (grid scroll)", s_items_many, 100),
         ("resize window (many)", s_resize, 200),
         ("item clicks", s_item_clicks, 50),
+        ("shortcuts: menu keys, no duplicates", s_shortcuts_menu, 50),
+        ("shortcuts: text fields keep plain keys", s_shortcuts_text, 50),
+        ("shortcuts: grid focus (Tab, Return enabled)", s_shortcuts_grid, 50),
+        ("shortcuts: help window", s_shortcuts_help, 150),
         ("sort/search/refresh/back", s_nav_actions, 50),
         ("mark watched / open web", s_misc_actions, 50),
         ("stop when not playing", s_stop_idle, 50),
@@ -1015,6 +1019,82 @@ fn s_nav_actions() {
         act(sel!(refresh:), nil());
         act(sel!(goBack:), nil());
         act(sel!(signOut:), nil());
+    }
+}
+fn s_shortcuts_menu() {
+    use crate::ui::shortcuts::{item_enabled, menu_key_problems, CMD};
+    let problems = unsafe { menu_key_problems() };
+    for p in &problems {
+        log(&format!("  shortcut problem: {}", p));
+    }
+    state_check("every menu action has a shortcut (or is exempt), none duplicated", problems.is_empty());
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("idle: playback keys are greyed out", ui.playing.is_none()
+            && !item_enabled("playPause:", 0, 0)
+            && !item_enabled("seekBack:", 0, 0)
+            && !item_enabled("mute:", 0, 0));
+        state_check("⌘F, library ⌘1 and ⌘/ stay enabled", item_enabled("focusSearch:", 0, CMD)
+            && item_enabled("viewSelected:", 0, CMD)
+            && item_enabled("showShortcuts:", 0, CMD));
+    }
+}
+fn s_shortcuts_text() {
+    use crate::ui::shortcuts::{item_enabled, CMD};
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let win = ui.win.get();
+        let _: BOOL = msg_send![win, makeFirstResponder: ui.search.get()];
+        let fr: *mut Object = msg_send![win, firstResponder];
+        let is_text: BOOL = msg_send![fr, isKindOfClass: class!(NSText)];
+        state_check("search field is editing text", is_text == YES);
+        state_check("plain Space/arrows/M/C/A/F/Tab/Return yield to typing", !item_enabled("playPause:", 0, 0)
+            && !item_enabled("seekBack:", 0, 0)
+            && !item_enabled("volUp:", 0, 0)
+            && !item_enabled("mute:", 0, 0)
+            && !item_enabled("fullscreen:", 0, 0)
+            && !item_enabled("focusNext:", 0, 0)
+            && !item_enabled("openSelected:", 0, 0));
+        state_check("⌘ shortcuts still work while typing", item_enabled("focusSearch:", 0, CMD)
+            && item_enabled("refresh:", 0, CMD));
+        let _: BOOL = msg_send![win, makeFirstResponder: nil()];
+        let fr2: *mut Object = msg_send![win, firstResponder];
+        let is_text2: BOOL = msg_send![fr2, isKindOfClass: class!(NSText)];
+        state_check("focus released from the text field", is_text2 == NO);
+    }
+}
+fn s_shortcuts_grid() {
+    use crate::ui::library::kb_focus_index;
+    use crate::ui::shortcuts::item_enabled;
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let n = ui.grid_data.as_ref().map_or(0, |g| g.cells.len());
+        state_check("grid has cells for keyboard focus", n > 0);
+        state_check("Return is not taken without a focused cell", kb_focus_index().is_none()
+            && !item_enabled("openSelected:", 0, 0));
+        act(sel!(focusNext:), nil());
+        state_check("Tab focuses the first cell", kb_focus_index() == Some(0));
+        if n > 1 {
+            act(sel!(focusNext:), nil());
+            state_check("Tab advances", kb_focus_index() == Some(1));
+            act(sel!(focusPrevious:), nil());
+            state_check("Shift-Tab goes back", kb_focus_index() == Some(0));
+        }
+        state_check("Return is enabled on the focused cell", item_enabled("openSelected:", 0, 0));
+        act(sel!(focusPrevious:), nil());
+        state_check("Shift-Tab wraps to the last cell", kb_focus_index() == Some(n - 1));
+        act(sel!(focusNext:), nil());
+        state_check("Tab wraps to the first cell", kb_focus_index() == Some(0));
+    }
+}
+fn s_shortcuts_help() {
+    use crate::ui::shortcuts::{hide_shortcuts_window, shortcuts_window_visible};
+    unsafe {
+        act(sel!(showShortcuts:), nil());
+        state_check("⌘/ opens the Keyboard Shortcuts window", shortcuts_window_visible());
+        audit("shortcuts-help");
+        hide_shortcuts_window();
+        state_check("help window closes", !shortcuts_window_visible());
     }
 }
 fn s_misc_actions() {

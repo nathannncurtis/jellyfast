@@ -5,7 +5,7 @@ use crate::platform::appkit::*;
 use crate::ui::theme::*;
 use objc::class;
 use objc::msg_send;
-use objc::runtime::{Object, Sel, NO, YES};
+use objc::runtime::{Object, Sel, BOOL, NO, YES};
 use objc::{sel, sel_impl};
 use std::os::raw::c_void;
 
@@ -90,6 +90,7 @@ unsafe fn palette_symbol(name: &str, pt: f64, colors: &[*mut Object]) -> *mut Ob
 pub fn grid_set_items(items: &[ListItem]) {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        KB_FOCUS.store(-1, std::sync::atomic::Ordering::Relaxed);
         let grid = ui.grid.get();
         let scale: f64 = msg_send![ui.win.get(), backingScaleFactor];
         // Keep the same GridData box (the grid's ivar points at it); swap its cells.
@@ -669,4 +670,54 @@ mod tests {
         assert!((grid_ratio(&[li("Episode", None)]) - 9. / 16.).abs() < 1e-9);
         assert_eq!(grid_ratio(&[]), POSTER_ASPECT);
     }
+}
+
+// ---- Keyboard focus in the poster grid (Tab / ⇧Tab move, Return opens) ----
+/// Index of the keyboard-focused grid cell, or -1. Main thread only.
+static KB_FOCUS: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(-1);
+
+pub(crate) fn kb_focus_index() -> Option<usize> {
+    let i = KB_FOCUS.load(std::sync::atomic::Ordering::Relaxed);
+    if i < 0 { None } else { Some(i as usize) }
+}
+
+/// Move the keyboard focus to the next (delta > 0) or previous cell, wrapping around.
+pub(crate) unsafe fn kb_move(delta: isize) {
+    let ui = UI.get_mut().unwrap();
+    let gd = match ui.grid_data.as_ref() {
+        Some(g) if !g.cells.is_empty() => g,
+        _ => return,
+    };
+    let n = gd.cells.len() as isize;
+    let cur = KB_FOCUS.load(std::sync::atomic::Ordering::Relaxed);
+    let next = if cur < 0 || cur >= n {
+        if delta >= 0 { 0 } else { n - 1 }
+    } else {
+        (cur + delta).rem_euclid(n)
+    };
+    let cells: Vec<*mut Object> = gd.cells.iter().map(|c| c.container).collect();
+    if cur >= 0 && cur < n {
+        let prev = cells[cur as usize];
+        hover(&mut *prev, false);
+    }
+    let c = cells[next as usize];
+    hover(&mut *c, true);
+    let b: NSRect = msg_send![c, bounds];
+    let _: BOOL = msg_send![c, scrollRectToVisible: b];
+    KB_FOCUS.store(next, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Open the keyboard-focused cell exactly as a click on it would.
+pub(crate) unsafe fn kb_open() {
+    let ui = UI.get_mut().unwrap();
+    let i = KB_FOCUS.load(std::sync::atomic::Ordering::Relaxed);
+    let btn = match ui.grid_data.as_ref() {
+        Some(g) if i >= 0 && (i as usize) < g.cells.len() => g.cells[i as usize].btn,
+        _ => return,
+    };
+    if btn.is_null() {
+        return;
+    }
+    let ctl = ui.ctl.get();
+    crate::platform::appkit::item_clicked(&mut *ctl, sel!(itemClicked:), btn);
 }

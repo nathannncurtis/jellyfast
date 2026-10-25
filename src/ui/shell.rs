@@ -417,95 +417,9 @@ pub(crate) unsafe fn apply_theme() {
     let _: () = msg_send![ui.app.get(), setAppearance: appearance];
 }
 
+/// Native menu bar, generated from `ui::shortcuts::SHORTCUTS`.
 pub(crate) unsafe fn build_menus() {
-    let ui = UI.get_mut().unwrap();
-    let main_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let main_menu: *mut Object = msg_send![main_menu, initWithTitle: ns("MainMenu")];
-    let _: () = msg_send![ui.app.get(), setMainMenu: main_menu];
-    autorel(main_menu);
-
-    // App menu
-    let app_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let app_item: *mut Object = msg_send![app_item,
-        initWithTitle: ns("Jellyfast") action: nil() keyEquivalent: ns("")];
-    let app_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let app_menu: *mut Object = msg_send![app_menu, initWithTitle: ns("Jellyfast")];
-    let _: () = msg_send![app_item, setSubmenu: app_menu];
-    let _: () = msg_send![main_menu, addItem: app_item];
-    autorel(app_item);
-    let about: *mut Object = menu_item("About Jellyfast", sel!(showAbout:), "");
-    let _: () = msg_send![about, setTarget: ui.ctl.get()];
-    let _: () = msg_send![app_menu, addItem: about];
-    let _: () = msg_send![app_menu, addItem: separator()];
-    let settings_i: *mut Object = menu_item("Settings…", sel!(showSettings:), ",");
-    let _: () = msg_send![settings_i, setTarget: ui.ctl.get()];
-    let _: () = msg_send![app_menu, addItem: settings_i];
-    let _: () = msg_send![app_menu, addItem: separator()];
-    let quit: *mut Object = menu_item("Quit Jellyfast", sel!(terminate:), "q");
-    let _: () = msg_send![app_menu, addItem: quit];
-
-    // Controls menu (playback is fully operable from the keyboard here).
-    let ctl_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let ctl_item: *mut Object = msg_send![ctl_item,
-        initWithTitle: ns("Controls") action: nil() keyEquivalent: ns("")];
-    let ctl_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let ctl_menu: *mut Object = msg_send![ctl_menu, initWithTitle: ns("Controls")];
-    let _: () = msg_send![ctl_item, setSubmenu: ctl_menu];
-    let _: () = msg_send![main_menu, addItem: ctl_item];
-    autorel(ctl_item);
-    let add = |menu: *mut Object, title: &str, action: Sel, key: &str, mask: NSUInteger, tag: NSInteger| unsafe {
-        let it: *mut Object = menu_item(title, action, key);
-        let _: () = msg_send![it, setTarget: ui.ctl.get()];
-        let _: () = msg_send![it, setKeyEquivalentModifierMask: mask];
-        let _: () = msg_send![it, setTag: tag];
-        let _: () = msg_send![menu, addItem: it];
-    };
-    const CMD: NSUInteger = 1 << 20;
-    const ALT: NSUInteger = 1 << 19;
-    const CTRL_CMD: NSUInteger = (1 << 18) | (1 << 20);
-    add(ctl_menu, "Play / Pause", sel!(playPause:), " ", 0usize, 0);
-    add(ctl_menu, "Stop", sel!(stopPlayback:), ".", CMD, 0);
-    add(ctl_menu, "Show Playback Info", sel!(togglePlaybackInfo:), "i", CMD, 0);
-    {
-        let n: NSInteger = msg_send![ctl_menu, numberOfItems];
-        let it: *mut Object = msg_send![ctl_menu, itemAtIndex: n - 1];
-        ui.info_item = Ptr(it);
-        let _: () = msg_send![it, setState: ui.cfg.settings.show_stats as isize];
-    }
-    add(ctl_menu, "Back 10s", sel!(seekBack:), "\u{F702}", CMD, 0);
-    add(ctl_menu, "Forward 10s", sel!(seekFwd:), "\u{F703}", CMD, 0);
-    add(ctl_menu, "Volume Up", sel!(volUp:), "\u{F700}", CMD, 0);
-    add(ctl_menu, "Volume Down", sel!(volDown:), "\u{F701}", CMD, 0);
-    add(ctl_menu, "Mute", sel!(mute:), "m", ALT, 0);
-    add(ctl_menu, "Next Subtitle Track", sel!(subCycle:), "s", ALT, 0);
-    add(ctl_menu, "Next Audio Track", sel!(audioCycle:), "a", ALT, 0);
-    add(ctl_menu, "Enter / Exit Full Screen", sel!(fullscreen:), "f", CTRL_CMD, 0);
-    // Speed submenu
-    let speed_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let speed_item: *mut Object = msg_send![speed_item,
-        initWithTitle: ns("Playback Speed") action: nil() keyEquivalent: ns("")];
-    let speed_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let speed_menu: *mut Object = msg_send![speed_menu, initWithTitle: ns("Playback Speed")];
-    let _: () = msg_send![speed_item, setSubmenu: speed_menu];
-    let _: () = msg_send![ctl_menu, addItem: speed_item];
-    autorel(speed_item);
-    for (label, tag) in [("0.5×", 50), ("0.75×", 75), ("1×", 100), ("1.25×", 125), ("1.5×", 150), ("2×", 200)] {
-        add(speed_menu, label, sel!(setSpeed:), "", 0usize, tag);
-    }
-
-    // Go menu
-    let go_item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-    let go_item: *mut Object = msg_send![go_item,
-        initWithTitle: ns("Go") action: nil() keyEquivalent: ns("")];
-    let go_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let go_menu: *mut Object = msg_send![go_menu, initWithTitle: ns("Go")];
-    let _: () = msg_send![go_item, setSubmenu: go_menu];
-    let _: () = msg_send![main_menu, addItem: go_item];
-    autorel(go_item);
-    add(go_menu, "Refresh", sel!(refresh:), "r", CMD, 0);
-    add(go_menu, "Back", sel!(goBack:), "[", CMD, 0);
-    add(go_menu, "Sign Out", sel!(signOut:), "l", ALT, 0);
-    add(go_menu, "Request Something New…", sel!(openSeerr:), "k", ALT, 0);
+    crate::ui::shortcuts::build_menus_from_table();
 }
 
 pub(crate) unsafe fn separator() -> *mut Object {
