@@ -71,6 +71,10 @@ pub(crate) extern "C" fn tick(_this: &mut Object, _cmd: Sel, _t: *mut Object) {
         if ui.playing.is_none() || ui.pitem.get().is_null() {
             return;
         }
+        crate::ui::nowbar::update(); // every tick (0.25 s while the bar shows)
+        if !crate::ui::nowbar::slow_due() {
+            return;
+        }
         update_chip();
         crate::ui::player::hide_bars_if_idle();
         ensure_media_groups();
@@ -255,6 +259,7 @@ pub fn stop_playback_ui() {
         crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
         set_hidden(ui.player_host.get(), true);
         set_hidden(ui.content_host.get(), false);
+        crate::ui::nowbar::hide();
         crate::ui::player::toast("", None, false);
         crate::ui::player::backdrop_hide();
         let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: NO];
@@ -449,20 +454,36 @@ pub fn start_playback(ps: &PlaybackStart) {
         } else {
             let _: () = msg_send![ui.win.get(), setTitle: ns(&ps.title)];
         }
-        let content: *mut Object = msg_send![ui.win.get(), contentView];
-        crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
-        set_hidden(ui.content_host.get(), true);
-        set_hidden(ui.player_host.get(), false);
-        let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.avview.get()];
-        crate::ui::player::toast("", None, false);
-        ui.bar_shown = false;
-        crate::ui::player::show_bars();
-        crate::ui::player::apply_info_visibility();
-        {
-            use crate::ui::theme::*;
-            let poster = ps.image_key.and_then(|k| ui.poster_cache.get(&k).copied()).unwrap_or(nil());
-            let tint: *mut Object = msg_send![class!(NSColor), colorWithWhite: 0.13f64 alpha: 1.0f64];
-            crate::ui::player::backdrop_show(tint, poster);
+        if ps.media_kind == MediaKind::Audio {
+            // Audio: same AVPlayer, no video view. The library stays up with the bar below it.
+            let content: *mut Object = msg_send![ui.win.get(), contentView];
+            if !is_hidden(ui.player_host.get()) {
+                // Coming from video: swap the player view out.
+                crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
+                set_hidden(ui.player_host.get(), true);
+                set_hidden(ui.content_host.get(), false);
+                crate::ui::player::backdrop_hide();
+            }
+            crate::ui::player::toast("", None, false);
+            let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: NO];
+            crate::ui::nowbar::show(ps);
+        } else {
+            crate::ui::nowbar::hide();
+            let content: *mut Object = msg_send![ui.win.get(), contentView];
+            crate::ui::theme::crossfade(content, crate::ui::theme::M_EMPH);
+            set_hidden(ui.content_host.get(), true);
+            set_hidden(ui.player_host.get(), false);
+            let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.avview.get()];
+            crate::ui::player::toast("", None, false);
+            ui.bar_shown = false;
+            crate::ui::player::show_bars();
+            crate::ui::player::apply_info_visibility();
+            {
+                use crate::ui::theme::*;
+                let poster = ps.image_key.and_then(|k| ui.poster_cache.get(&k).copied()).unwrap_or(nil());
+                let tint: *mut Object = msg_send![class!(NSColor), colorWithWhite: 0.13f64 alpha: 1.0f64];
+                crate::ui::player::backdrop_show(tint, poster);
+            }
         }
         if ps.resume_secs > 1.0 {
             let tm = CMTimeMakeWithSeconds(ps.resume_secs, 600);

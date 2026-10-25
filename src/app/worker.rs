@@ -239,7 +239,16 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                 url,
                                 item_id: full.id.clone(),
                                 title: full.name.clone(),
-                                subtitle: full.series_name.clone(),
+                                subtitle: if full.item_type == "Audio" {
+                                    let parts: Vec<&str> = [full.album_artist.as_deref(), full.album.as_deref()]
+                                        .into_iter()
+                                        .flatten()
+                                        .filter(|s| !s.is_empty())
+                                        .collect();
+                                    if parts.is_empty() { None } else { Some(parts.join(" · ")) }
+                                } else {
+                                    full.series_name.clone()
+                                },
                                 resume_secs,
                                 method,
                                 run_time_secs: crate::jellyfin::urls::secs_from_ticks(

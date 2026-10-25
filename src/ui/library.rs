@@ -490,6 +490,75 @@ pub fn poster_key(item_id: &str) -> u64 {
     h.finish()
 }
 
+/// RGB (0..1) to hue/saturation/brightness (all 0..1).
+pub fn rgb_to_hsb(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let mx = r.max(g).max(b);
+    let mn = r.min(g).min(b);
+    let d = mx - mn;
+    let s = if mx <= 0.0 { 0.0 } else { d / mx };
+    let h = if d <= 1e-9 {
+        0.0
+    } else if mx == r {
+        ((g - b) / d).rem_euclid(6.0) / 6.0
+    } else if mx == g {
+        ((b - r) / d + 2.0) / 6.0
+    } else {
+        ((r - g) / d + 4.0) / 6.0
+    };
+    (h, s, mx)
+}
+
+/// Artwork tint from the average colour: saturation 0.25..0.60, brightness 0.22..0.34;
+/// greyscale art (saturation < 0.08) gives hue 0, saturation 0, brightness 0.20.
+pub fn tint_clamp(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let (h, s, br) = rgb_to_hsb(r, g, b);
+    if s < 0.08 {
+        return (0.0, 0.0, 0.20);
+    }
+    (h, s.clamp(0.25, 0.60), br.clamp(0.22, 0.34))
+}
+
+/// Average an 8x8 sample grid of the encoded image and clamp it to a tint (h, s, b).
+unsafe fn artwork_tint(bytes: &[u8]) -> Option<(f64, f64, f64)> {
+    let data: *mut Object = msg_send![class!(NSData),
+        dataWithBytes: bytes.as_ptr() length: bytes.len() as NSUInteger];
+    let rep: *mut Object = msg_send![class!(NSBitmapImageRep), imageRepWithData: data];
+    if rep.is_null() {
+        return None;
+    }
+    let w: NSInteger = msg_send![rep, pixelsWide];
+    let h: NSInteger = msg_send![rep, pixelsHigh];
+    if w < 1 || h < 1 {
+        return None;
+    }
+    let srgb: *mut Object = msg_send![class!(NSColorSpace), sRGBColorSpace];
+    let (mut r, mut g, mut b, mut n) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for iy in 0..8 {
+        for ix in 0..8 {
+            let x = ((ix * 2 + 1) * w / 16).min(w - 1);
+            let y = ((iy * 2 + 1) * h / 16).min(h - 1);
+            let c: *mut Object = msg_send![rep, colorAtX: x y: y];
+            if c.is_null() {
+                continue;
+            }
+            let c: *mut Object = msg_send![c, colorUsingColorSpace: srgb];
+            if c.is_null() {
+                continue;
+            }
+            let (cr, cg, cb): (f64, f64, f64) =
+                (msg_send![c, redComponent], msg_send![c, greenComponent], msg_send![c, blueComponent]);
+            r += cr;
+            g += cg;
+            b += cb;
+            n += 1.0;
+        }
+    }
+    if n < 1.0 {
+        return None;
+    }
+    Some(tint_clamp(r / n, g / n, b / n))
+}
+
 pub fn poster_ready(key: u64, bytes: &[u8]) {
     unsafe {
         let ui = match UI.get_mut() {
@@ -513,6 +582,10 @@ pub fn poster_ready(key: u64, bytes: &[u8]) {
         if let Some(old) = ui.poster_cache.insert(key, img) {
             release_obj(old);
         }
+        if let Some(t) = artwork_tint(bytes) {
+            ui.tint_cache.insert(key, t);
+        }
+        crate::ui::nowbar::artwork_arrived(key);
         // Update any visible cells with this key.
         if let Some(d) = ui.grid_data.as_mut() {
             for c in d.cells.iter_mut() {
@@ -538,6 +611,42 @@ mod tests {
             assert!(w - used < m.cols as f64 + 1.0, "{w}: slack {}", w - used);
             assert_eq!(m.cell_h, m.poster_h + CELL_TEXT_H);
         }
+    }
+    #[test]
+    fn tint_greyscale_is_flat_dark() {
+        for v in [0.0, 0.3, 0.5, 1.0] {
+            assert_eq!(tint_clamp(v, v, v), (0.0, 0.0, 0.20));
+        }
+        // Nearly grey (saturation < 0.08) counts as greyscale too.
+        assert_eq!(tint_clamp(0.50, 0.51, 0.52), (0.0, 0.0, 0.20));
+    }
+    #[test]
+    fn tint_stays_within_bounds() {
+        let mut seen = 0;
+        for r in 0..=10 {
+            for g in 0..=10 {
+                for b in 0..=10 {
+                    let (h, s, br) = tint_clamp(r as f64 / 10., g as f64 / 10., b as f64 / 10.);
+                    assert!((0.0..=1.0).contains(&h), "hue {h}");
+                    if s == 0.0 {
+                        assert_eq!((h, br), (0.0, 0.20));
+                    } else {
+                        assert!((0.25..=0.60).contains(&s), "sat {s}");
+                        assert!((0.22..=0.34).contains(&br), "bri {br}");
+                        seen += 1;
+                    }
+                }
+            }
+        }
+        assert!(seen > 500);
+    }
+    #[test]
+    fn tint_keeps_hue() {
+        let (h, s, b) = tint_clamp(0.9, 0.1, 0.1); // saturated red
+        assert!(h < 0.01 || h > 0.99);
+        assert_eq!((s, b), (0.60, 0.34));
+        let (h, _, _) = tint_clamp(0.1, 0.1, 0.9); // blue
+        assert!((h - 2. / 3.).abs() < 0.01);
     }
     #[test]
     fn metrics_min_width_one_column() {

@@ -158,6 +158,9 @@ fn steps() -> Vec<Step> {
         ("playback: server down/up/error", s_play_net, 500),
         ("playback: replace item", s_play_start, 1500),
         ("playback: stop", s_play_stop, 200),
+        ("audio: start (now-playing bar)", s_audio_start, 1500),
+        ("audio: bar layout + audit", s_audio_bar, 100),
+        ("audio: stop", s_audio_stop, 200),
         ("fullscreen toggle x2", s_fullscreen, 2500),
         ("playback: run to end (auto mark watched)", s_play_to_end, 8000),
         ("signed out", s_signed_out, 100),
@@ -1161,6 +1164,92 @@ fn s_play_stop() {
         let ui = UI.get().unwrap();
         state_check("playing cleared", ui.playing.is_none());
         act(sel!(stopPlayback:), nil()); // double stop
+    }
+}
+fn audio_start(title: &str, artist: &str) -> MainMsg {
+    MainMsg::PlaybackReady(PlaybackStart {
+        url: video_url(), // the video asset has an audio track; the Audio kind never shows the picture
+        item_id: "track-1".into(),
+        title: title.into(),
+        subtitle: Some(artist.into()),
+        resume_secs: 0.0,
+        method: PlaybackMethod::DirectPlay,
+        run_time_secs: 6.0,
+        image_key: Some(poster_key("Audio-0")),
+        media_kind: MediaKind::Audio,
+    })
+}
+fn s_audio_start() {
+    // Colourful artwork so the tint wash is a real colour.
+    handle_main(MainMsg::PosterReady { key: poster_key("Audio-0"), bytes: image_bytes(0, 120, 120, 200) });
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("tint extracted for artwork", ui.tint_cache.contains_key(&poster_key("Audio-0")));
+        let (_, s, b) = ui.tint_cache[&poster_key("Audio-0")];
+        state_check("tint within clamp", (0.25..=0.60).contains(&s) && (0.22..=0.34).contains(&b));
+        state_check("bar hidden before audio", !crate::ui::nowbar::visible());
+        let f: NSRect = msg_send![ui.lib_scroll.get(), frame];
+        state_check("lib_scroll y == 0 before audio", f.origin.y == 0.0);
+    }
+    handle_main(audio_start(
+        &format!("{} {}", "A Remarkably Long Track Title That Cannot Possibly Fit", LONG),
+        &format!("{} · {}", "An Artist Name Which Is Also Extremely Long Indeed", LONG),
+    ));
+}
+fn s_audio_bar() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("audio: playing set", ui.playing.is_some());
+        let ph: BOOL = msg_send![ui.player_host.get(), isHidden];
+        state_check("audio: player_host stays hidden", ph == YES);
+        let ch: BOOL = msg_send![ui.content_host.get(), isHidden];
+        state_check("audio: content_host stays visible", ch == NO);
+        let bh: BOOL = msg_send![ui.now.bar.get(), isHidden];
+        state_check("audio: bar visible", bh == NO && crate::ui::nowbar::visible());
+        let f: NSRect = msg_send![ui.lib_scroll.get(), frame];
+        state_check("audio: lib_scroll origin y == NOW_BAR_H", f.origin.y == crate::ui::theme::NOW_BAR_H);
+        let bf: NSRect = msg_send![ui.now.bar.get(), frame];
+        state_check("audio: bar at the bottom of the content area",
+            bf.origin.y == 0.0 && bf.origin.x == crate::ui::theme::SIDEBAR_W && bf.size.h == crate::ui::theme::NOW_BAR_H);
+        let iv: f64 = msg_send![ui.timer.get(), timeInterval];
+        state_check("audio: 0.25 s tick while visible", (iv - 0.25).abs() < 1e-6);
+        state_check("audio: title filled", read_field(ui.now.title.get()).contains("Remarkably"));
+        state_check("audio: elapsed/remaining filled",
+            read_field(ui.now.elapsed.get()).contains(':') && read_field(ui.now.remain.get()).starts_with('-'));
+        // transport + sliders
+        act(sel!(jrNowSkip:), nil());
+        act(sel!(jrNowRestart:), nil());
+        let _: () = msg_send![ui.now.scrub.get(), setDoubleValue: 0.5f64];
+        act(sel!(jrNowScrub:), ui.now.scrub.get());
+        let _: () = msg_send![ui.now.vol.get(), setDoubleValue: 0.4f64];
+        act(sel!(jrNowVolume:), ui.now.vol.get());
+        let v: f32 = msg_send![ui.player.get(), volume];
+        state_check("audio: volume slider drives the player", (v - 0.4).abs() < 0.01);
+        let _: () = msg_send![ui.now.vol.get(), setDoubleValue: 1.0f64];
+        act(sel!(jrNowVolume:), ui.now.vol.get());
+        act(sel!(playPause:), nil());
+        update_now_bar();
+        act(sel!(playPause:), nil());
+    }
+    audit_both("now playing");
+    // Short strings too.
+    handle_main(audio_start("Song", "Artist · Album"));
+    audit("now playing/short");
+}
+fn update_now_bar() {
+    unsafe { crate::ui::nowbar::update() }
+}
+fn s_audio_stop() {
+    unsafe {
+        act(sel!(stopPlayback:), nil());
+        let ui = UI.get().unwrap();
+        state_check("audio: playing cleared", ui.playing.is_none());
+        let bh: BOOL = msg_send![ui.now.bar.get(), isHidden];
+        state_check("audio: bar hidden after stop", bh == YES && !crate::ui::nowbar::visible());
+        let f: NSRect = msg_send![ui.lib_scroll.get(), frame];
+        state_check("audio: lib_scroll origin y restored to 0", f.origin.y == 0.0);
+        let iv: f64 = msg_send![ui.timer.get(), timeInterval];
+        state_check("audio: 1 s tick restored", (iv - 1.0).abs() < 1e-6);
     }
 }
 fn s_fullscreen() {
