@@ -63,7 +63,7 @@ impl JellyfinClient {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
-            .user_agent("JellyfinMac/0.1.0")
+            .user_agent("Jellyfast/0.1.0")
             .build()
             .map_err(|e| JFError::Network(e.to_string()))?;
         Ok(Self { http, base, token, user_id, device_id: device_id.to_string() })
@@ -71,7 +71,7 @@ impl JellyfinClient {
 
     fn auth_header(&self) -> String {
         format!(
-            "MediaBrowser Client=\"JellyfinMac\", Device=\"Mac\", DeviceId=\"{}\", Version=\"0.1.0\"",
+            "MediaBrowser Client=\"Jellyfast\", Device=\"Mac\", DeviceId=\"{}\", Version=\"0.1.0\"",
             enc(&self.device_id)
         )
     }
@@ -120,7 +120,7 @@ impl JellyfinClient {
             .header(
                 "Authorization",
                 format!(
-                    "MediaBrowser Client=\"JellyfinMac\", Device=\"Mac\", DeviceId=\"{}\", Version=\"0.1.0\"",
+                    "MediaBrowser Client=\"Jellyfast\", Device=\"Mac\", DeviceId=\"{}\", Version=\"0.1.0\"",
                     enc(device_id)
                 ),
             )
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(r.header("X-Emby-Token"), Some(TOKEN), "X-Emby-Token");
         let auth = r.header("Authorization").expect("Authorization header missing");
         assert!(auth.starts_with("MediaBrowser "), "bad scheme: {auth}");
-        assert!(auth.contains("Client=\"JellyfinMac\""), "{auth}");
+        assert!(auth.contains("Client=\"Jellyfast\""), "{auth}");
         assert!(auth.contains(&format!("DeviceId=\"{}\"", DEVICE)), "DeviceId wrong: {auth}");
     }
 

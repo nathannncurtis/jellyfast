@@ -386,8 +386,8 @@ pub(crate) unsafe fn add_arranged(stack: *mut Object, v: *mut Object, _top: CGFl
 
 pub(crate) unsafe fn apply_theme() {
     let ui = UI.get_mut().unwrap();
-    // Self-test only: JELLYFIN_MAC_APPEARANCE=light|dark pins the appearance for screenshots.
-    let forced = if crate::app::selftest::enabled() { std::env::var("JELLYFIN_MAC_APPEARANCE").ok() } else { None };
+    // Self-test only: JELLYFAST_APPEARANCE=light|dark pins the appearance for screenshots.
+    let forced = if crate::app::selftest::enabled() { std::env::var("JELLYFAST_APPEARANCE").ok() } else { None };
     let theme = forced.unwrap_or_else(|| ui.cfg.settings.theme.clone());
     let appearance: *mut Object = match theme.as_str() {
         "light" => {
@@ -421,7 +421,8 @@ pub(crate) unsafe fn build_menus() {
     let _: () = msg_send![app_item, setSubmenu: app_menu];
     let _: () = msg_send![main_menu, addItem: app_item];
     autorel(app_item);
-    let about: *mut Object = menu_item("About Jellyfast", sel!(orderFrontStandardAboutPanel:), "");
+    let about: *mut Object = menu_item("About Jellyfast", sel!(showAbout:), "");
+    let _: () = msg_send![about, setTarget: ui.ctl.get()];
     let _: () = msg_send![app_menu, addItem: about];
     let _: () = msg_send![app_menu, addItem: separator()];
     let settings_i: *mut Object = menu_item("Settings…", sel!(showSettings:), ",");

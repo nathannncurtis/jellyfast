@@ -87,10 +87,10 @@ extern "C" {}
 // ---- Self-test isolation ---------------------------------------------------------------------
 /// In self-test mode windows open far outside every screen and the app never takes
 /// focus, so a headless run is invisible to whoever is at the machine.
-/// `JELLYFIN_MAC_SELFTEST_ONSCREEN=1` opts out (for screenshot runs on a visible window).
+/// `JELLYFAST_SELFTEST_ONSCREEN=1` opts out (for screenshot runs on a visible window).
 pub fn offscreen_mode() -> bool {
     crate::app::selftest::enabled()
-        && std::env::var("JELLYFIN_MAC_SELFTEST_ONSCREEN").map(|v| v != "1").unwrap_or(true)
+        && std::env::var("JELLYFAST_SELFTEST_ONSCREEN").map(|v| v != "1").unwrap_or(true)
 }
 /// Right edge of the union of all screens.
 pub unsafe fn screens_max_x() -> f64 {
@@ -477,6 +477,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(signOut:), sign_out as Extern0),
             (sel!(refresh:), refresh as Extern0),
             (sel!(openSeerr:), crate::ui::seerr::open_seerr as Extern0),
+            (sel!(showAbout:), show_about as Extern0),
             (sel!(seerrRequest:), crate::ui::seerr::seerr_request as Extern0),
             (sel!(seerrTab:), crate::ui::seerr::seerr_tab as Extern0),
             (sel!(seerrModeChanged:), crate::ui::seerr::seerr_mode_changed as Extern0),
@@ -625,6 +626,20 @@ pub(crate) unsafe fn settings_open() -> bool {
     }
     let attached: *mut Object = msg_send![ui.win.get(), attachedSheet];
     !attached.is_null()
+}
+/// Standard About panel, with a credits line saying what this is and where the idea came from.
+pub(crate) extern "C" fn show_about(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let credits: *mut Object = msg_send![class!(NSAttributedString), alloc];
+        let credits: *mut Object = msg_send![credits, initWithString: ns("A native client for Jellyfin. Inspired by Spotifast.")];
+        let opts: *mut Object = msg_send![class!(NSMutableDictionary), dictionary];
+        let _: () = msg_send![opts, setObject: credits forKey: ns("Credits")];
+        let _: () = msg_send![opts, setObject: ns("Jellyfast") forKey: ns("ApplicationName")];
+        let _: () = msg_send![opts, setObject: ns(env!("CARGO_PKG_VERSION")) forKey: ns("ApplicationVersion")];
+        let _: () = msg_send![ui.app.get(), orderFrontStandardAboutPanelWithOptions: opts];
+        autorel(credits);
+    }
 }
 pub(crate) unsafe fn show_settings_sheet() {
     let ui = UI.get_mut().unwrap();

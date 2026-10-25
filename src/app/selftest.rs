@@ -1,11 +1,11 @@
-//! Headless UI self-test (JELLYFIN_MAC_SELFTEST=1). Inert unless the env var is set.
+//! Headless UI self-test (JELLYFAST_SELFTEST=1). Inert unless the env var is set.
 //!
 //! Drives every UI code path with fake data and no server: MainMsg values go
 //! through `handle_main` (the same reducer the worker results use), controller
 //! actions are invoked through real Objective-C dispatch on the JRCtl object,
 //! and outgoing UiCmds are logged by a drain task in main.rs. Steps run one per
 //! run-loop turn (optionally delayed) so AppKit layout/timers/KVO really fire.
-//! Video: $JELLYFIN_MAC_SELFTEST_VIDEO, else assets/selftest.mp4 (a plain gradient clip
+//! Video: $JELLYFAST_SELFTEST_VIDEO, else assets/selftest.mp4 (a plain gradient clip
 //! with two audio tracks and one subtitle track).
 #![allow(unsafe_code)]
 use crate::app::controller::handle_main;
@@ -24,7 +24,7 @@ use objc::runtime::{Object, BOOL, NO, YES};
 use objc::{class, sel, sel_impl};
 
 pub fn enabled() -> bool {
-    std::env::var("JELLYFIN_MAC_SELFTEST").map(|v| v == "1").unwrap_or(false)
+    std::env::var("JELLYFAST_SELFTEST").map(|v| v == "1").unwrap_or(false)
 }
 
 type Step = (&'static str, fn(), u64);
@@ -243,7 +243,7 @@ fn image_bytes(kind: usize, w: usize, h: usize, shade: u8) -> Vec<u8> {
     }
 }
 fn video_url() -> String {
-    let path = std::env::var("JELLYFIN_MAC_SELFTEST_VIDEO").unwrap_or_else(|_| {
+    let path = std::env::var("JELLYFAST_SELFTEST_VIDEO").unwrap_or_else(|_| {
         concat!(env!("CARGO_MANIFEST_DIR"), "/assets/selftest.mp4").into()
     });
     let enc: Vec<String> = path.split('/').map(crate::jellyfin::urls::enc).collect();
@@ -487,14 +487,14 @@ fn check_offscreen(tag: &str) {
         state_check(&format!("all visible windows are off-screen ({})", tag), bad == 0);
     }
 }
-/// With JELLYFIN_MAC_SHOTS=<dir>, capture the window with screencapture (own-window capture).
+/// With JELLYFAST_SHOTS=<dir>, capture the window with screencapture (own-window capture).
 fn shot(tag: &str, idx: usize, win: *mut Object) {
-    let dir = match std::env::var("JELLYFIN_MAC_SHOTS") {
+    let dir = match std::env::var("JELLYFAST_SHOTS") {
         Ok(d) if !d.is_empty() => d,
         _ => return,
     };
     unsafe {
-        let appearance = std::env::var("JELLYFIN_MAC_APPEARANCE").unwrap_or_else(|_| "system".into());
+        let appearance = std::env::var("JELLYFAST_APPEARANCE").unwrap_or_else(|_| "system".into());
         let clean: String = tag.chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let path = format!("{}/{}-{}-w{}.png", dir, appearance, clean, idx);
         // Render the view tree straight to a bitmap: works for off-screen windows, unlike screencapture.
@@ -1273,7 +1273,7 @@ fn s_audio_stop() {
 fn s_fullscreen() {
     handle_main(playback(0.0, 6.0));
     if offscreen_mode() {
-        // Full screen would take over a real display; only exercised with JELLYFIN_MAC_SELFTEST_ONSCREEN=1.
+        // Full screen would take over a real display; only exercised with JELLYFAST_SELFTEST_ONSCREEN=1.
         log("  fullscreen toggle skipped (headless mode)");
         return;
     }

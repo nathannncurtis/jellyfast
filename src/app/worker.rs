@@ -11,7 +11,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     // Lazily built from settings + Keychain; invalidated when settings change.
     let mut seerr: Option<SeerrClient> = None;
 
-    // Poster disk cache: ~/Library/Caches/JellyfinMac/posters
+    // Poster disk cache: ~/Library/Caches/Jellyfast/posters
     let poster_dir = crate::config::cache_dir().join("posters");
     let _ = std::fs::create_dir_all(&poster_dir);
 

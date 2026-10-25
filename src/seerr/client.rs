@@ -116,7 +116,7 @@ impl SeerrClient {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
-            .user_agent("JellyfinMac/0.1.0")
+            .user_agent("Jellyfast/0.1.0")
             .build()
             .map_err(|e| SeerrError::Network(e.to_string()))?;
         Ok(Self { http, base, auth })
