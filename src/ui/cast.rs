@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 
 const BAR_W: f64 = 640.;
 const BAR_H: f64 = 60.;
+/// Bottom strip of the window: the remote bar sits in it and the library side stops above it.
+pub const STRIP_H: f64 = 84.;
+const BAR_Y: f64 = 12.;
 /// The remote bar re-reads the session this often while it is up.
 const POLL_EVERY: Duration = Duration::from_millis(2000);
 
@@ -28,6 +31,8 @@ pub struct CastItem {
     pub subtitle: String,
     pub start_secs: f64,
     pub run_secs: f64,
+    /// A series: the Play On target is its Next Up episode (or first episode).
+    pub series: bool,
 }
 
 /// The session the remote bar controls, as last reported by the server.
@@ -64,6 +69,8 @@ pub struct CastUi {
     /// Titles of the last menu built, and its item count. Menus are not shown in self-test mode, so tests read these.
     pub menu_titles: Vec<String>,
     pub menu_items: usize,
+    /// A cast error waiting to be read, shown in the strip until dismissed.
+    pub message: Option<String>,
     pub remote: Option<Remote>,
     last_poll: Option<Instant>,
     /// Self-test only: presses seen by the AirPlay row while off-screen.
@@ -89,6 +96,7 @@ impl CastUi {
             menu: Vec::new(),
             menu_titles: Vec::new(),
             menu_items: 0,
+            message: None,
             remote: None,
             last_poll: None,
             airplay_presses: 0,
@@ -128,19 +136,22 @@ pub(crate) extern "C" fn show_menu(_t: &mut Object, _c: Sel, sender: *mut Object
                 subtitle,
                 start_secs: now.seconds().max(0.0),
                 run_secs: pn.duration_secs,
+                series: false,
             };
             let anchor = if sender.is_null() { ui.pbar.cast.get() } else { sender };
             open_menu(anchor, item);
             return;
         }
         if let Some(d) = ui.detail.item.as_ref() {
-            if d.item_type != "Series" && ui.detail.open {
+            if ui.detail.open {
+                let series = d.item_type == "Series";
                 let item = CastItem {
                     id: d.id.clone(),
                     title: d.name.clone(),
                     subtitle: String::new(),
-                    start_secs: secs(d.resume_ticks),
+                    start_secs: if series { 0. } else { secs(d.resume_ticks) },
                     run_secs: secs(d.run_time_ticks.unwrap_or(0)),
+                    series,
                 };
                 open_menu(ui.detail.host.get(), item);
                 return;
@@ -262,10 +273,11 @@ pub(crate) extern "C" fn pick(_t: &mut Object, _c: Sel, sender: *mut Object) {
         if ui.playing.is_some() {
             crate::platform::avkit::stop_for_cast();
         }
-        let _ = ui.ui_tx.send(UiCmd::CastPlay {
-            session_id: session.id.clone(),
-            item_id: item.id.clone(),
-            start_secs: item.start_secs,
+        ui.cast.message = None;
+        let _ = ui.ui_tx.send(if item.series {
+            UiCmd::CastSeries { session_id: session.id.clone(), series_id: item.id.clone() }
+        } else {
+            UiCmd::CastPlay { session_id: session.id.clone(), item_id: item.id.clone(), start_secs: item.start_secs }
         });
         ui.cast.remote = Some(Remote {
             session_id: session.id.clone(),
@@ -327,7 +339,7 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
     let ui = UI.get_mut().unwrap();
     let w = BAR_W.min(b.size.w - 2. * EDGE);
     let bar = vev(MAT_HUD, BLEND_WITHIN);
-    let _: () = msg_send![bar, setFrame: rect((b.size.w - w) / 2., 16., w, BAR_H)];
+    let _: () = msg_send![bar, setFrame: rect((b.size.w - w) / 2., BAR_Y, w, BAR_H)];
     set_autoresize(bar, MARGIN_MINX | MARGIN_MAXX | MARGIN_MAXY);
     let _: () = msg_send![bar, setAppearance: crate::ui::player::dark_appearance()];
     set_corner(layer_of(bar), BAR_H / 2.);
@@ -374,21 +386,45 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
     ui.cast.close = Ptr(close);
 }
 
-/// Pushes `ui.cast.remote` into the bar: title, device, play/pause icon, scrubber and clock.
+/// The strip is up when there is a message or a remote session, and no video fills the window.
+unsafe fn strip_shown(ui: &CastUi) -> bool {
+    (ui.message.is_some() || ui.remote.is_some()) && !crate::ui::player::video_on_screen()
+}
+
+/// Pushes the cast state into the bottom strip: a message (with its ×), or the remote session's
+/// controls. Then sizes the library side so it stops above the strip.
 unsafe fn apply_remote() {
     let ui = UI.get_mut().unwrap();
+    let title = ui.cast.title.get();
+    let device = ui.cast.device.get();
+    if let Some(m) = ui.cast.message.clone() {
+        // Message mode: the text gets the full width and the controls step aside.
+        for v in [ui.cast.play.get(), ui.cast.stop.get(), ui.cast.scrub.get(), ui.cast.time.get()] {
+            set_hidden(v, true);
+        }
+        set_frame(title, rect(SP4, 30., BAR_W - 2. * SP4 - 40., 18.));
+        set_frame(device, rect(SP4, 12., BAR_W - 2. * SP4 - 40., 14.));
+        set_text(title, &crate::ui::shell::clip_msg(&m, 110));
+        set_text(device, "Press × to dismiss");
+        layout();
+        return;
+    }
     let Some(r) = ui.cast.remote.clone() else {
-        set_hidden(ui.cast.bar.get(), true);
+        layout();
         return;
     };
-    set_hidden(ui.cast.bar.get(), false);
-    let title = match (&r.title, r.online) {
+    for v in [ui.cast.play.get(), ui.cast.stop.get(), ui.cast.scrub.get(), ui.cast.time.get()] {
+        set_hidden(v, false);
+    }
+    set_frame(title, rect(SP4, 30., 212., 18.));
+    set_frame(device, rect(SP4, 12., 212., 14.));
+    let title_text = match (&r.title, r.online) {
         (Some(t), _) => t.clone(),
         (None, true) => "Nothing playing".to_string(),
         (None, false) => "Not available right now".to_string(),
     };
-    set_text(ui.cast.title.get(), &title);
-    set_text(ui.cast.device.get(), &r.device);
+    set_text(title, &title_text);
+    set_text(device, &r.device);
     let playing = r.title.is_some() && !r.paused;
     let img = symbol(if playing { "pause.fill" } else { "play.fill" }, 18., Weight::Medium);
     if !img.is_null() {
@@ -405,6 +441,25 @@ unsafe fn apply_remote() {
         String::new()
     };
     set_text(ui.cast.time.get(), &clock);
+    layout();
+}
+
+/// Shows the strip (or hides it) and moves the library side to sit above it. Also run when
+/// video starts or stops, since the strip stays down while video fills the window.
+pub(crate) unsafe fn layout() {
+    let Some(ui) = UI.get_mut() else { return };
+    let host = ui.content_host.get();
+    let bar = ui.cast.bar.get();
+    if host.is_null() || bar.is_null() {
+        return;
+    }
+    let show = strip_shown(&ui.cast);
+    set_hidden(bar, !show);
+    let strip = if show { STRIP_H } else { 0. };
+    let f = frame_of(host);
+    let sup: *mut Object = msg_send![host, superview];
+    let h = bounds_of(sup).size.h;
+    set_frame(host, rect(f.origin.x, strip, f.size.w, (h - strip).max(0.)));
 }
 
 pub(crate) extern "C" fn play_pause(_t: &mut Object, _c: Sel, _s: *mut Object) {
@@ -433,12 +488,14 @@ pub(crate) extern "C" fn stop(_t: &mut Object, _c: Sel, _s: *mut Object) {
     }
 }
 
-/// Hides the remote bar. The device keeps playing.
+/// × on the strip: dismisses a message first, else hides the remote bar. The device keeps playing.
 pub(crate) extern "C" fn close(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
-        ui.cast.remote = None;
-        ui.cast.last_poll = None;
+        if ui.cast.message.take().is_none() {
+            ui.cast.remote = None;
+            ui.cast.last_poll = None;
+        }
         apply_remote();
     }
 }
@@ -472,15 +529,16 @@ pub(crate) unsafe fn poll_tick() {
     }
 }
 
-/// A cast request or remote command failed. The menu is not left waiting.
 pub fn on_error(message: String) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         ui.cast.pending = false;
         if crate::ui::player::video_on_screen() {
+            // The player has its own toast; the strip is hidden while video fills the window.
             crate::ui::player::toast(&message, Some("exclamationmark.triangle"), true);
         } else {
-            crate::ui::shell::set_count(&crate::ui::shell::clip_msg(&message, 80), true);
+            ui.cast.message = Some(message);
+            apply_remote();
         }
     }
 }

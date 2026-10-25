@@ -278,6 +278,7 @@ pub fn stop_playback_ui() {
         let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: NO];
         let _: () = msg_send![ui.win.get(), setTitle: ns("Jellyfast")];
         let _: () = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
+        crate::ui::cast::layout(); // after the player host is hidden: the strip may come back
     }
 }
 pub(crate) unsafe fn clear_media_groups() {
@@ -530,6 +531,7 @@ pub fn start_playback(ps: &PlaybackStart) {
             ticks: crate::jellyfin::urls::ticks_from_secs(ps.resume_secs),
             paused: false,
         });
+        crate::ui::cast::layout();
     }
 }
 

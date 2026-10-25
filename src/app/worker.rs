@@ -405,6 +405,23 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     }
                 }
             }
+            UiCmd::CastSeries { session_id, series_id } => {
+                if let Some(c) = &client {
+                    let target = match c.series_next_up(&series_id).await {
+                        Ok(Some(ep)) => Ok(Some(ep.id)),
+                        Ok(None) => first_episode_id(c, &series_id).await,
+                        Err(e) => Err(e),
+                    };
+                    let result = match target {
+                        Ok(Some(id)) => c.play_on_session(&session_id, &id, 0.0).await,
+                        Ok(None) => Err(crate::jellyfin::client::JFError::Api(404, "no episodes to play".into())),
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = result {
+                        let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                    }
+                }
+            }
             UiCmd::CastControl { session_id, action } => {
                 if let Some(c) = &client {
                     if let Err(e) = c.remote_control(&session_id, action).await {
@@ -782,6 +799,17 @@ async fn save_seerr(
         }
         Err(e) => fail(e.to_string()),
     }
+}
+
+/// The first episode of a series' first season, for Play On when nothing is Next Up.
+async fn first_episode_id(
+    c: &JellyfinClient,
+    series_id: &str,
+) -> Result<Option<String>, crate::jellyfin::client::JFError> {
+    let seasons = c.seasons(series_id).await?;
+    let Some(season) = seasons.first() else { return Ok(None) };
+    let eps = c.season_episodes(series_id, &season.id).await?;
+    Ok(eps.first().map(|e| e.id.clone()))
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -2630,6 +2658,31 @@ mod tests {
         assert_eq!(seek.len(), 1);
         assert_eq!(seek[0].qp("seekPositionTicks"), Some("300000000"));
         assert_eq!(m.find("POST", "/Sessions/sess-gone/Playing/Stop").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn play_on_series_uses_next_up_then_first_episode() {
+        use crate::app::messages::MainMsg;
+        let (_e, m, mut h) = connected().await;
+        // sr1 has a Next Up episode; sr4 has none, so the first episode of its first season is used;
+        // noseasons has nothing to play.
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "sr1".into() });
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "sr4".into() });
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "noseasons".into() });
+        let rest = h.drain_via_probe().await;
+        assert_eq!(rest.len(), 1, "only the empty series fails");
+        assert!(matches!(&rest[0], MainMsg::CastError(_)));
+        let plays: Vec<_> = m
+            .reqs()
+            .into_iter()
+            .filter(|r| r.method == "POST" && r.path == "/Sessions/sess-tv/Playing")
+            .collect();
+        assert_eq!(plays.len(), 2);
+        assert_eq!(plays[0].qp("playCommand"), Some("PlayNow"));
+        assert_eq!(plays[0].qp("itemIds"), Some("nx1"));
+        assert_eq!(plays[0].qp("startPositionTicks"), Some("0"));
+        assert!(plays[1].qp("itemIds").map(|v| !v.is_empty()).unwrap_or(false));
+        assert_eq!(m.find("GET", "/Shows/sr4/Episodes").len(), 1);
     }
 
     // ------------------------------------------------- settings / sign-out

@@ -136,17 +136,20 @@ extern "C" fn on_play(_t: &mut Object, _c: Sel, _s: *mut Object) {
     }
 }
 
-/// Cast button: Play On menu for the open movie or episode, starting at its saved position.
+/// Cast button: Play On menu for the open movie, episode or series.
 extern "C" fn on_cast(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let Some(item) = ui.detail.item.as_ref() else { return };
+        let series = item.item_type == "Series";
         let cast_item = crate::ui::cast::CastItem {
             id: item.id.clone(),
             title: item.name.clone(),
             subtitle: meta_line(item),
-            start_secs: crate::jellyfin::urls::secs_from_ticks(item.resume_ticks),
+            // A series starts at its Next Up episode, so no saved position applies.
+            start_secs: if series { 0. } else { crate::jellyfin::urls::secs_from_ticks(item.resume_ticks) },
             run_secs: crate::jellyfin::urls::secs_from_ticks(item.run_time_ticks.unwrap_or(0)),
+            series,
         };
         crate::ui::cast::open_menu(sender, cast_item);
     }
@@ -573,11 +576,12 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut Object, host: *mut Object, item: &De
         set_frame(b, rect(bx, y, bw, BUTTON_H));
         add_sub(doc, b);
         bx += bw + SP2;
-        let (c, cw) = action_button("Cast", "tv", sel!(detailCast:), host, false);
-        set_frame(c, rect(bx, y, cw, BUTTON_H));
-        add_sub(doc, c);
-        bx += cw + SP2;
     }
+    // Cast: a movie or episode, or a series (its Next Up episode goes to the device).
+    let (c, cw) = action_button("Cast", "tv", sel!(detailCast:), host, false);
+    set_frame(c, rect(bx, y, cw, BUTTON_H));
+    add_sub(doc, c);
+    bx += cw + SP2;
     let watched = if item.played { "Mark as unwatched" } else { "Mark as watched" };
     let (b, bw) = action_button(watched, "checkmark.circle", sel!(detailWatched:), host, false);
     set_frame(b, rect(bx, y, bw, BUTTON_H));

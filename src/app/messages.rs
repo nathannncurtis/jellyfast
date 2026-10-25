@@ -128,6 +128,11 @@ pub enum UiCmd {
         item_id: String,
         start_secs: f64,
     },
+    /// Play On a series: the server picks its Next Up episode (else the first one) and starts it.
+    CastSeries {
+        session_id: String,
+        series_id: String,
+    },
     /// Remote control (pause, unpause, stop, seek) for another session.
     CastControl {
         session_id: String,

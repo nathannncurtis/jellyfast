@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::jellyfin::models::{ImageTags, ListItem, UserData};
 use crate::platform::appkit::*;
 use crate::platform::avkit::*;
+use crate::ui::cast::STRIP_H;
 use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
 use std::sync::Mutex;
@@ -197,6 +198,8 @@ fn steps() -> Vec<Step> {
         ("detail: error toast", s_detail_error, 50),
         ("cast: detail Cast button and Play On menu", s_cast_detail, 150),
         ("cast: remote bar controls and audit", s_cast_bar, 200),
+        ("cast: error strip in the library", s_cast_error, 150),
+        ("cast: series Cast button sends the series", s_cast_series, 150),
         ("stop when not playing", s_stop_idle, 50),
         ("playback error (idle)", s_playback_error, 50),
         ("server down/up while idle", s_server_idle, 50),
@@ -339,6 +342,28 @@ fn s_cast_detail() {
         let r = crate::ui::cast::remote_state();
         state_check("remote bar names the device", r.as_ref().map(|r| r.device.as_str()) == Some("Living Room · Jellyfin Android TV"));
     }
+    strip_no_overlap("detail page");
+    audit("cast/detail page with remote bar");
+}
+
+/// The remote strip sits below the library side: the content host stops at its top edge,
+/// so nothing under it is covered.
+fn strip_no_overlap(what: &str) {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let host = frame_of(ui.content_host.get());
+        let bar = frame_of(ui.cast.bar.get());
+        state_check(
+            &format!("{}: library side stops above the remote bar", what),
+            (host.origin.y - STRIP_H).abs() < 0.5 && bar.origin.y + bar.size.h <= host.origin.y + 0.5,
+        );
+        let c: *mut Object = msg_send![ui.cast.bar.get(), superview];
+        let cb = bounds_of(c);
+        state_check(
+            &format!("{}: remote bar is inside the window", what),
+            bar.origin.x >= 0.0 && bar.origin.x + bar.size.w <= cb.size.w + 0.5 && bar.origin.y >= 0.0,
+        );
+    }
 }
 
 fn s_cast_bar() {
@@ -393,12 +418,58 @@ fn s_cast_bar() {
     handle_main(MainMsg::SessionsLoaded(only_web));
     state_check("remote: offline device says so", unsafe { read_field(title) } == "Not available right now");
     audit("cast/remote bar (offline)");
+    // Over the library grid: the grid's bottom edge moves up, so no card sits under the strip.
+    crate::ui::detail::hide();
+    strip_no_overlap("library grid");
+    audit("cast/remote bar over library grid");
     unsafe {
         act(sel!(jrCastClose:), nil());
         state_check("remote bar hides on close", !crate::ui::cast::remote_visible() && is_hidden_or_gone(bar));
         let _ = close;
     }
+    let host = unsafe { UI.get().unwrap().content_host.get() };
+    state_check("library side returns to full height on close", unsafe { frame_of(host).origin.y.abs() < 0.5 });
+}
+
+fn s_cast_error() {
+    crate::ui::cast::on_error("Couldn't reach Living Room: the session has ended".into());
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("cast error: strip shows in the library", crate::ui::cast::remote_visible());
+        state_check(
+            "cast error: the message is the strip's text",
+            read_field(ui.cast.title.get()).starts_with("Couldn't reach Living Room"),
+        );
+        state_check("cast error: controls step aside", is_hidden(ui.cast.play.get()));
+    }
+    strip_no_overlap("error strip");
+    audit("cast/error strip (library)");
+    unsafe { act(sel!(jrCastClose:), nil()) };
+    state_check("cast error: × dismisses it", !crate::ui::cast::remote_visible());
+    let host = unsafe { UI.get().unwrap().content_host.get() };
+    state_check("cast error: library returns to full height", unsafe { frame_of(host).origin.y.abs() < 0.5 });
+}
+
+fn s_cast_series() {
+    take_cmds();
+    let series = detail_view(true);
+    let series_id = series.id.clone();
+    handle_main(MainMsg::DetailLoaded(Box::new(series)));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let btn = find_action(ui.detail.doc.get(), sel!(detailCast:), 0);
+        state_check("series page: Cast button shown", !btn.is_null());
+        act_with(detail_host(), sel!(detailCast:), btn);
+    }
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    let picked = crate::ui::cast::choose_row_for_test(0);
+    state_check("series cast: picks the TV", picked.map(|s| s.id == "sess-tv").unwrap_or(false));
+    state_check(
+        "series cast sends CastSeries (server resolves Next Up)",
+        take_cmds().iter().any(|c| matches!(c, UiCmd::CastSeries { session_id, series_id: sid } if session_id == "sess-tv" && *sid == series_id)),
+    );
     crate::ui::detail::hide();
+    unsafe { act(sel!(jrCastClose:), nil()) };
 }
 
 fn is_hidden_or_gone(v: *mut Object) -> bool {
@@ -465,6 +536,15 @@ fn s_player_cast() {
     state_check("casting stops local playback", idle);
     state_check("library is back after casting", library);
     state_check("remote bar shows after a player cast", crate::ui::cast::remote_visible());
+    // Video fills the window: the strip steps away (its state is kept) and comes back afterwards.
+    handle_main(playback(0.0, 6.0));
+    state_check("strip hides while video fills the window", !crate::ui::cast::remote_visible());
+    state_check("library side is full height while video plays", unsafe { frame_of(UI.get().unwrap().content_host.get()).origin.y.abs() < 0.5 });
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    state_check("video: remote session still tracked", crate::ui::cast::remote_state().is_some());
+    unsafe { act(sel!(stopPlayback:), nil()) };
+    state_check("strip returns when video stops", crate::ui::cast::remote_visible());
+    strip_no_overlap("after video");
     unsafe {
         act_with(ctl(), sel!(jrCastClose:), nil());
     }
