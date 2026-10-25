@@ -150,6 +150,7 @@ pub mod config;
 pub mod jellyfin;
 pub mod platform;
 pub mod search_integration;
+pub mod seerr;
 pub mod storage;
 pub mod transcode;
 pub mod ui;

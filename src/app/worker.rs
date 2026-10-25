@@ -3,10 +3,13 @@ use std::collections::VecDeque;
 use crate::app::messages::*;
 use crate::jellyfin::client::JellyfinClient;
 use crate::config::{load_config, save_config, Config};
+use crate::seerr::client::{SeerrClient, SeerrError};
 
 pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedSender<MainMsg>, cfg: Config) {
     let mut client: Option<JellyfinClient> = None;
     let mut cfg = cfg;
+    // Lazily built from settings + Keychain; invalidated when settings change.
+    let mut seerr: Option<SeerrClient> = None;
 
     // Poster disk cache: ~/Library/Caches/JellyfinMac/posters
     let poster_dir = crate::config::cache_dir().join("posters");
@@ -282,7 +285,70 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     }
                 }
             }
+            UiCmd::SeerrSearch { q } => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let mut latest = q;
+                let mut held = Vec::new();
+                while let Ok(c2) = rx.try_recv() {
+                    match c2 {
+                        UiCmd::SeerrSearch { q } => latest = q,
+                        other => held.push(other),
+                    }
+                }
+                backlog.extend(held);
+                match seerr_client(&cfg, &mut seerr) {
+                    Err(m) => {
+                        let _ = main_tx.send(MainMsg::SeerrError(m));
+                    }
+                    Ok(_) if latest.trim().is_empty() => {
+                        let _ = main_tx.send(MainMsg::SeerrResults(Vec::new()));
+                    }
+                    Ok(c) => match c.search(&latest, 1).await {
+                        Ok(page) => {
+                            let _ = main_tx.send(MainMsg::SeerrResults(page.results));
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeerrError(e.to_string()));
+                        }
+                    },
+                }
+            }
+            UiCmd::SeerrRequest { media_type, tmdb_id, title } => match seerr_client(&cfg, &mut seerr) {
+                Err(m) => {
+                    let _ = main_tx.send(MainMsg::SeerrError(m));
+                }
+                Ok(c) => match c.request(&media_type, tmdb_id).await {
+                    Ok(_) => {
+                        let _ = main_tx.send(MainMsg::SeerrRequested { title });
+                    }
+                    Err(SeerrError::AlreadyRequested(_)) => {
+                        let _ = main_tx.send(MainMsg::SeerrError(format!("“{}” has already been requested.", title)));
+                    }
+                    Err(e) => {
+                        let _ = main_tx.send(MainMsg::SeerrError(e.to_string()));
+                    }
+                },
+            },
+            UiCmd::SeerrRequests => match seerr_client(&cfg, &mut seerr) {
+                Err(m) => {
+                    let _ = main_tx.send(MainMsg::SeerrError(m));
+                }
+                Ok(c) => match c.requests(20, 0).await {
+                    Ok(v) => {
+                        let _ = main_tx.send(MainMsg::SeerrRequestList(v));
+                    }
+                    Err(e) => {
+                        let _ = main_tx.send(MainMsg::SeerrError(e.to_string()));
+                    }
+                },
+            },
+            UiCmd::SaveSeerr { enabled, url, api_key } => {
+                seerr = None;
+                let msg = save_seerr(&mut cfg, enabled, &url, api_key).await;
+                let _ = main_tx.send(msg);
+            }
             UiCmd::SaveSettings { settings, reconnect } => {
+                seerr = None;
                 cfg.settings = settings;
                 crate::config::save_config(&cfg);
                 if reconnect {
@@ -336,6 +402,73 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 }
             }
         }
+    }
+}
+
+/// Build (or reuse) the Seerr client. Err = user-facing reason; no network I/O.
+fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrClient, String> {
+    if !cfg.settings.seerr_enabled {
+        return Err("Seerr is turned off. Enable it in Settings to search and request.".into());
+    }
+    let raw = cfg.settings.seerr_url.trim();
+    if raw.is_empty() {
+        return Err("Seerr URL is not set. Add it in Settings.".into());
+    }
+    let url = crate::jellyfin::urls::normalize_base_url(raw).map_err(|e| format!("Invalid Seerr URL: {}", e))?;
+    if let Some(c) = cache {
+        if c.base == url {
+            return Ok(c.clone());
+        }
+    }
+    let key = crate::config::load_seerr_key(&url)
+        .ok_or_else(|| "No Seerr API key saved. Add it in Settings.".to_string())?;
+    let c = SeerrClient::new(&url, &key).map_err(|e| e.to_string())?;
+    *cache = Some(c.clone());
+    Ok(c)
+}
+
+/// Handle SaveSeerr: validate before persisting anything when enabling.
+async fn save_seerr(cfg: &mut Config, enabled: bool, url: &str, api_key: Option<String>) -> MainMsg {
+    let fail = |m: String| MainMsg::SeerrStatus { ok: false, message: m };
+    let key_in = api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    let trimmed = url.trim();
+    if !enabled {
+        if !trimmed.is_empty() {
+            let n = normalize(trimmed);
+            if let Some(k) = &key_in {
+                crate::config::store_seerr_key(&n, k);
+            }
+            cfg.settings.seerr_url = n;
+        }
+        cfg.settings.seerr_enabled = false;
+        crate::config::save_config(cfg);
+        return MainMsg::SeerrStatus { ok: true, message: "Seerr is turned off.".into() };
+    }
+    let n = match crate::jellyfin::urls::normalize_base_url(trimmed) {
+        Ok(n) => n,
+        Err(e) => return fail(format!("Invalid Seerr URL: {}", e)),
+    };
+    let Some(key) = key_in.clone().or_else(|| crate::config::load_seerr_key(&n)) else {
+        return fail("Enter your Seerr API key (Seerr > Settings > General).".into());
+    };
+    let client = match SeerrClient::new(&n, &key) {
+        Ok(c) => c,
+        Err(e) => return fail(e.to_string()),
+    };
+    match client.verify().await {
+        Ok((st, me)) => {
+            if key_in.is_some() {
+                crate::config::store_seerr_key(&n, &key);
+            }
+            cfg.settings.seerr_enabled = true;
+            cfg.settings.seerr_url = n;
+            crate::config::save_config(cfg);
+            MainMsg::SeerrStatus {
+                ok: true,
+                message: format!("Connected to Seerr {} as {}.", st.version, me.display_name),
+            }
+        }
+        Err(e) => fail(e.to_string()),
     }
 }
 
@@ -1396,5 +1529,234 @@ mod tests {
         let (_e, _m, mut h) = connected().await;
         h.send(UiCmd::QuitSaving);
         assert!(h.drain_via_probe().await.is_empty());
+    }
+
+    // ------------------------------------------------------------------ seerr
+    use crate::seerr::models::{Availability, RequestStatus};
+    use crate::seerr::testutil::{default_route, start as start_seerr, MockSeerr, Resp as SResp};
+
+    /// Worker with Seerr enabled against `m`, key stored in the (test) keychain.
+    fn seerr_cfg(m: &MockSeerr) -> Config {
+        crate::config::store_seerr_key(&m.url(), "good-key");
+        let mut c = base_cfg();
+        c.settings.seerr_enabled = true;
+        c.settings.seerr_url = m.url();
+        c
+    }
+
+    fn seerr_err(m: MainMsg) -> String {
+        match m {
+            MainMsg::SeerrError(e) => e,
+            o => panic!("expected SeerrError, got {:?}", o),
+        }
+    }
+
+    #[tokio::test]
+    async fn seerr_search_returns_movies_and_tv() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrSearch { q: "incep tion".into() });
+        match h.next().await {
+            MainMsg::SeerrResults(v) => {
+                assert_eq!(v.len(), 3);
+                assert_eq!(v[0].title, "Inception");
+                assert_eq!(v[0].availability, Availability::Available);
+            }
+            o => panic!("{:?}", o),
+        }
+        assert_eq!(m.find("GET", "/api/v1/search")[0].query["query"], "incep tion");
+    }
+
+    #[tokio::test]
+    async fn seerr_search_debounce_keeps_newest_and_preserves_other_commands() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrSearch { q: "a".into() });
+        h.send(UiCmd::SeerrSearch { q: "ab".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 1, title: "One".into() });
+        h.send(UiCmd::SeerrSearch { q: "abc".into() });
+        assert!(matches!(h.next().await, MainMsg::SeerrResults(_)));
+        assert!(matches!(h.next().await, MainMsg::SeerrRequested { .. }));
+        let s = m.find("GET", "/api/v1/search");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].query["query"], "abc");
+        assert_eq!(m.find("POST", "/api/v1/request").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn seerr_blank_search_clears_without_request() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrSearch { q: "   ".into() });
+        assert!(matches!(h.next().await, MainMsg::SeerrResults(v) if v.is_empty()));
+        assert!(m.reqs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn seerr_search_error_reports() {
+        let _env = TestEnv::new();
+        let m = start_seerr(|_| SResp::json(500, serde_json::json!({"message": "db down"}))).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrSearch { q: "x".into() });
+        assert!(seerr_err(h.next().await).contains("db down"));
+    }
+
+    #[tokio::test]
+    async fn seerr_request_success_movie_and_tv() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 27205, title: "Inception".into() });
+        assert!(matches!(h.next().await, MainMsg::SeerrRequested { title } if title == "Inception"));
+        h.send(UiCmd::SeerrRequest { media_type: "tv".into(), tmdb_id: 1399, title: "GoT".into() });
+        assert!(matches!(h.next().await, MainMsg::SeerrRequested { title } if title == "GoT"));
+        let posts = m.find("POST", "/api/v1/request");
+        assert!(posts[1].body.contains("\"seasons\":\"all\""));
+    }
+
+    #[tokio::test]
+    async fn seerr_request_already_requested_and_other_errors() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 999, title: "Dup".into() });
+        let e = seerr_err(h.next().await);
+        assert!(e.contains("Dup") && e.contains("already been requested"), "{}", e);
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 997, title: "Q".into() });
+        assert!(seerr_err(h.next().await).contains("quota"));
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 996, title: "B".into() });
+        assert!(seerr_err(h.next().await).contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn seerr_request_list() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrRequests);
+        match h.next().await {
+            MainMsg::SeerrRequestList(v) => {
+                assert_eq!(v.len(), 3);
+                assert_eq!(v[0].title, "Game of Thrones");
+                assert_eq!(v[0].status, RequestStatus::Approved);
+            }
+            o => panic!("{:?}", o),
+        }
+        assert!(m.find("GET", "/api/v1/request")[0].raw_target.contains("take=20"));
+    }
+
+    #[tokio::test]
+    async fn seerr_disabled_or_unconfigured_makes_no_network_calls() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        // disabled (url + key present, but switched off)
+        let mut c = seerr_cfg(&m);
+        c.settings.seerr_enabled = false;
+        let mut h = H::start(c);
+        h.send(UiCmd::SeerrSearch { q: "x".into() });
+        assert!(seerr_err(h.next().await).contains("turned off"));
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 1, title: "T".into() });
+        assert!(seerr_err(h.next().await).contains("turned off"));
+        h.send(UiCmd::SeerrRequests);
+        assert!(seerr_err(h.next().await).contains("turned off"));
+        // enabled but no URL
+        let mut c = base_cfg();
+        c.settings.seerr_enabled = true;
+        let mut h2 = H::start(c);
+        h2.send(UiCmd::SeerrRequests);
+        assert!(seerr_err(h2.next().await).contains("URL"));
+        // enabled, URL, but no key stored
+        let _ = crate::config::delete_seerr_key(&m.url());
+        let mut c = base_cfg();
+        c.settings.seerr_enabled = true;
+        c.settings.seerr_url = m.url();
+        let mut h3 = H::start(c);
+        h3.send(UiCmd::SeerrRequests);
+        assert!(seerr_err(h3.next().await).contains("API key"));
+        assert!(m.reqs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_seerr_validates_then_persists() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::SaveSeerr { enabled: true, url: format!("{}/", m.url()), api_key: Some(" good-key ".into()) });
+        match h.next().await {
+            MainMsg::SeerrStatus { ok, message } => {
+                assert!(ok, "{}", message);
+                assert!(message.contains("2.7.2") && message.contains("Nathan"), "{}", message);
+            }
+            o => panic!("{:?}", o),
+        }
+        let c = load_config();
+        assert!(c.settings.seerr_enabled);
+        assert_eq!(c.settings.seerr_url, m.url());
+        assert_eq!(crate::config::load_seerr_key(&m.url()).as_deref(), Some("good-key"));
+        // key never lands in config.json
+        let raw = std::fs::read_to_string(crate::config::config_path()).unwrap();
+        assert!(!raw.contains("good-key"));
+        // and searching now works with the stored key
+        h.send(UiCmd::SeerrSearch { q: "x".into() });
+        assert!(matches!(h.next().await, MainMsg::SeerrResults(_)));
+        // re-save without a key reuses the stored one
+        h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), api_key: None });
+        assert!(matches!(h.next().await, MainMsg::SeerrStatus { ok: true, .. }));
+    }
+
+    #[tokio::test]
+    async fn save_seerr_bad_key_persists_nothing() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), api_key: Some("bad".into()) });
+        match h.next().await {
+            MainMsg::SeerrStatus { ok, message } => {
+                assert!(!ok);
+                assert!(message.contains("API key"), "{}", message);
+            }
+            o => panic!("{:?}", o),
+        }
+        assert!(!load_config().settings.seerr_enabled);
+        assert_eq!(crate::config::load_seerr_key(&m.url()), None);
+        // follow-up commands stay disabled
+        h.send(UiCmd::SeerrRequests);
+        assert!(seerr_err(h.next().await).contains("turned off"));
+    }
+
+    #[tokio::test]
+    async fn save_seerr_input_errors_and_unreachable() {
+        let _env = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::SaveSeerr { enabled: true, url: "nope".into(), api_key: Some("k".into()) });
+        assert!(matches!(h.next().await, MainMsg::SeerrStatus { ok: false, .. }));
+        h.send(UiCmd::SaveSeerr { enabled: true, url: "http://127.0.0.1:1".into(), api_key: None });
+        match h.next().await {
+            MainMsg::SeerrStatus { ok: false, message } => assert!(message.contains("API key")),
+            o => panic!("{:?}", o),
+        }
+        h.send(UiCmd::SaveSeerr { enabled: true, url: "http://127.0.0.1:1".into(), api_key: Some("k".into()) });
+        match h.next().await {
+            MainMsg::SeerrStatus { ok: false, message } => assert!(message.contains("Could not reach"), "{}", message),
+            o => panic!("{:?}", o),
+        }
+        assert!(!load_config().settings.seerr_enabled);
+    }
+
+    #[tokio::test]
+    async fn save_seerr_disable_keeps_key_and_skips_network() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SaveSeerr { enabled: false, url: m.url(), api_key: None });
+        assert!(matches!(h.next().await, MainMsg::SeerrStatus { ok: true, .. }));
+        assert!(!load_config().settings.seerr_enabled);
+        assert_eq!(crate::config::load_seerr_key(&m.url()).as_deref(), Some("good-key"));
+        h.send(UiCmd::SeerrSearch { q: "x".into() });
+        assert!(seerr_err(h.next().await).contains("turned off"));
+        assert!(m.reqs().is_empty());
     }
 }

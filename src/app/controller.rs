@@ -87,5 +87,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
             settings_fill(&cfg);
             show_settings_sheet();
         },
+        // TODO(seerr-ui): route the Seerr messages to the Seerr window.
+        _ => {}
     }
 }

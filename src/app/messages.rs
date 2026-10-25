@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::jellyfin::models::ListItem;
+use crate::seerr::models::{SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +60,25 @@ pub enum UiCmd {
     },
     SignOut,
     ProbeServer,
+    /// Debounced like `Search`. Blank query yields empty `SeerrResults`.
+    SeerrSearch {
+        q: String,
+    },
+    /// `media_type` is "movie" or "tv" (tv requests all seasons).
+    SeerrRequest {
+        media_type: String,
+        tmdb_id: u64,
+        title: String,
+    },
+    /// The signed-in Seerr user's recent requests, newest first.
+    SeerrRequests,
+    /// Validate the connection, then persist. `api_key: None` (or blank)
+    /// reuses the key already stored in the Keychain for this URL.
+    SaveSeerr {
+        enabled: bool,
+        url: String,
+        api_key: Option<String>,
+    },
     QuitSaving,
 }
 
@@ -85,6 +105,18 @@ pub enum MainMsg {
     ServerDown,
     SignedOut,
     SettingsSnapshot(Box<Config>),
+    SeerrResults(Vec<SeerrResult>),
+    SeerrRequested {
+        title: String,
+    },
+    SeerrRequestList(Vec<SeerrRequestItem>),
+    /// Search/request/list failure, "already requested", or Seerr disabled/unconfigured.
+    SeerrError(String),
+    /// Outcome of `SaveSeerr` (ok=false: nothing was persisted).
+    SeerrStatus {
+        ok: bool,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -109,8 +141,16 @@ pub struct Settings {
     #[serde(default)]
     pub audio_lang: String,
     #[serde(default)]
-    pub searx_enabled: bool,
+    pub seerr_enabled: bool,
+    /// Base URL of the Seerr instance. The API key lives in the Keychain
+    /// (account "seerr@<url>"), never here.
     #[serde(default)]
+    pub seerr_url: String,
+    // TODO(seerr-ui): remove after UI wiring (kept only so platform/ui still compile)
+    #[serde(skip)]
+    pub searx_enabled: bool,
+    // TODO(seerr-ui): remove after UI wiring
+    #[serde(skip)]
     pub searx_url: String,
 }
 fn default_sub_lang() -> String {
@@ -127,5 +167,17 @@ mod tests {
         assert_eq!((s.theme.as_str(), s.max_bitrate_kbps, s.subtitle_lang.as_str()), ("", 0, ""));
         let s: Settings = serde_json::from_str(r#"{"theme":"dark","max_bitrate_kbps":5000,"extra":1}"#).unwrap();
         assert_eq!((s.theme.as_str(), s.max_bitrate_kbps), ("dark", 5000));
+    }
+
+    #[test]
+    fn seerr_settings_default_and_old_searx_ignored() {
+        let s: Settings = serde_json::from_str(r#"{"searx_enabled":true,"searx_url":"https://s.x"}"#).unwrap();
+        assert!(!s.seerr_enabled && s.seerr_url.is_empty());
+        assert!(!s.searx_enabled && s.searx_url.is_empty());
+        let s: Settings = serde_json::from_str(r#"{"seerr_enabled":true,"seerr_url":"http://h:5055"}"#).unwrap();
+        assert!(s.seerr_enabled);
+        let j = serde_json::to_string(&s).unwrap();
+        assert!(j.contains("seerr_url") && !j.contains("searx"));
+        assert!(!j.contains("api_key"));
     }
 }

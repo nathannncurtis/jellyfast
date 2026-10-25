@@ -17,6 +17,12 @@ pub fn keychain_account(server: &str) -> String {
     format!("token@{}", server)
 }
 
+/// Keychain account for the Seerr API key (same service, separate from the
+/// Jellyfin token).
+pub fn seerr_account(url: &str) -> String {
+    format!("seerr@{}", url)
+}
+
 // Test seam: unit tests never touch the real Keychain; they use this
 // in-memory map instead. Compiled out of non-test builds.
 #[cfg(test)]
@@ -86,7 +92,12 @@ pub fn delete_token(server: &str) {
 
 #[cfg_attr(test, allow(dead_code))]
 fn store_fallback(token: &str) {
-    let p = fallback_token_path();
+    store_fallback_at(&fallback_token_path(), token)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn store_fallback_at(p: &std::path::Path, token: &str) {
+    let p = p.to_path_buf();
     let _ = std::fs::create_dir_all(config_dir());
     let b64 = {
         use std::io::Write;
@@ -103,7 +114,12 @@ fn store_fallback(token: &str) {
 /// The fallback file stores base64; it must be decoded on the way back out.
 #[cfg_attr(test, allow(dead_code))]
 fn load_fallback() -> Option<String> {
-    let raw = fs::read_to_string(fallback_token_path()).ok()?;
+    load_fallback_at(&fallback_token_path())
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn load_fallback_at(p: &std::path::Path) -> Option<String> {
+    let raw = fs::read_to_string(p).ok()?;
     let bytes = base64_decode(raw.trim())?;
     String::from_utf8(bytes).ok().filter(|t| !t.is_empty())
 }
@@ -135,6 +151,61 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 fn fallback_token_path() -> PathBuf {
     config_dir().join("token.fallback")
+}
+
+fn fallback_seerr_path() -> PathBuf {
+    config_dir().join("seerr.fallback")
+}
+
+/// Store the Seerr API key (Keychain; documented 0600 base64 fallback file
+/// only if the Keychain write fails). `url` should be the normalized base URL.
+pub fn store_seerr_key(url: &str, key: &str) {
+    #[cfg(test)]
+    {
+        test_store(|m| m.insert(seerr_account(url), key.to_string()));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        use security_framework::passwords;
+        match passwords::set_generic_password(KEYCHAIN_SERVICE, &seerr_account(url), key.as_bytes()) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(fallback_seerr_path());
+            }
+            Err(e) => {
+                tracing::warn!("Keychain unavailable ({}); using documented fallback file for Seerr key", e);
+                store_fallback_at(&fallback_seerr_path(), key);
+            }
+        }
+    }
+}
+
+pub fn load_seerr_key(url: &str) -> Option<String> {
+    #[cfg(test)]
+    {
+        return test_store(|m| m.get(&seerr_account(url)).cloned());
+    }
+    #[cfg(not(test))]
+    {
+        use security_framework::passwords;
+        match passwords::get_generic_password(KEYCHAIN_SERVICE, &seerr_account(url)) {
+            Ok(t) if !t.is_empty() => String::from_utf8(t).ok(),
+            _ => load_fallback_at(&fallback_seerr_path()),
+        }
+    }
+}
+
+pub fn delete_seerr_key(url: &str) {
+    #[cfg(test)]
+    {
+        test_store(|m| m.remove(&seerr_account(url)));
+    }
+    #[cfg(not(test))]
+    {
+        use security_framework::passwords;
+        let _ = passwords::delete_generic_password(KEYCHAIN_SERVICE, &seerr_account(url));
+    }
+    let _ = fs::remove_file(fallback_seerr_path());
 }
 
 fn set_owner_only(p: &std::path::Path) {
@@ -188,6 +259,35 @@ mod tests {
         delete_token("http://a");
         assert_eq!(load_token("http://a"), None);
         assert_eq!(load_token("http://b").as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn seerr_key_separate_from_token() {
+        let _e = TestEnv::new();
+        assert_eq!(seerr_account("http://s:5055"), "seerr@http://s:5055");
+        store_token("http://s:5055", "jf-token");
+        assert_eq!(load_seerr_key("http://s:5055"), None);
+        store_seerr_key("http://s:5055", "k1");
+        store_seerr_key("http://other", "k2");
+        assert_eq!(load_seerr_key("http://s:5055").as_deref(), Some("k1"));
+        assert_eq!(load_token("http://s:5055").as_deref(), Some("jf-token"));
+        delete_seerr_key("http://s:5055");
+        assert_eq!(load_seerr_key("http://s:5055"), None);
+        assert_eq!(load_seerr_key("http://other").as_deref(), Some("k2"));
+        assert_eq!(load_token("http://s:5055").as_deref(), Some("jf-token"));
+    }
+
+    #[test]
+    fn seerr_fallback_file_is_separate() {
+        let _e = TestEnv::new();
+        store_fallback_at(&fallback_seerr_path(), "seerr-key");
+        assert_eq!(load_fallback_at(&fallback_seerr_path()).as_deref(), Some("seerr-key"));
+        assert_eq!(load_fallback(), None);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(fallback_seerr_path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        delete_seerr_key("x");
+        assert_eq!(load_fallback_at(&fallback_seerr_path()), None);
     }
 
     #[test]
