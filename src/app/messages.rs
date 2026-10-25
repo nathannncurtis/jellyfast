@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, LayoutMode};
 use crate::jellyfin::models::ListItem;
 use crate::seerr::models::{SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
@@ -53,6 +53,13 @@ pub enum UiCmd {
     MarkPlayed {
         item_id: String,
         played: bool,
+    },
+    /// Unified Browse: every movie and show in one grid (`ItemsLoaded`, title "Browse").
+    LoadBrowse,
+    /// Layout chosen in onboarding or Settings. The UI already saved the config;
+    /// this only keeps the worker's copy in step.
+    SetLayoutMode {
+        mode: LayoutMode,
     },
     /// Fetch the Home screen rows (continue watching, next up, recently added,
     /// recommendations). Answered with `MainMsg::HomeLoaded`.

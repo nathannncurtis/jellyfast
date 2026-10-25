@@ -96,6 +96,36 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     }
                 }
             }
+            UiCmd::LoadBrowse => {
+                if let Some(c) = &client {
+                    // Movies and series together; no ParentId, so Jellyfin searches every library.
+                    let sort = sort_from_popup(&cfg);
+                    let q = crate::jellyfin::models::ItemQuery {
+                        types: Some("Movie,Series".into()),
+                        sort_by: sort.0,
+                        sort_order: sort.1,
+                        ..Default::default()
+                    };
+                    match c.items(&q).await {
+                        Ok(items) => {
+                            fetch_posters(&c, &main_tx, &items, &poster_dir, http_poster.as_ref()).await;
+                            let _ = main_tx.send(MainMsg::ItemsLoaded {
+                                title: "Browse".into(),
+                                items,
+                                can_go_back: false,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
+                        }
+                    }
+                }
+            }
+            UiCmd::SetLayoutMode { mode } => {
+                // In-memory only: the UI wrote the config file already, and a second
+                // write from here could clobber fields the UI changed since startup.
+                cfg.layout_mode = Some(mode);
+            }
             UiCmd::Search { q } => {
                 // Debounce: wait, then keep only the newest search.
                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1407,6 +1437,28 @@ mod tests {
             assert_eq!(last.query["SortBy"], "SortName");
             assert_eq!(last.query["SortOrder"], "Ascending");
         }
+    }
+
+    #[tokio::test]
+    async fn load_browse_asks_for_movies_and_series_everywhere() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::LoadBrowse);
+        let (title, _names, back) = items_of(h.next().await);
+        assert_eq!(title, "Browse");
+        assert!(!back);
+        let last = m.find("GET", "/Users/u1/Items").pop().unwrap();
+        assert_eq!(last.query.get("IncludeItemTypes").map(String::as_str), Some("Movie,Series"));
+        assert_eq!(last.query.get("Recursive").map(String::as_str), Some("true"));
+        assert!(!last.query.contains_key("ParentId"), "browse must not be scoped to one library");
+    }
+
+    #[tokio::test]
+    async fn load_browse_before_connect_is_ignored() {
+        let _e = TestEnv::new();
+        let mut h = H::start(base_cfg());
+        h.send(UiCmd::LoadBrowse);
+        h.send(UiCmd::ProbeServer);
+        assert!(matches!(h.next().await, MainMsg::ServerDown));
     }
 
     #[tokio::test]

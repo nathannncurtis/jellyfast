@@ -16,6 +16,8 @@ use objc::{sel, sel_impl};
 
 /// `cfg.last_view` value meaning "Home was the last selected place".
 pub const HOME_ID: &str = "home";
+/// `cfg.last_view` value meaning "Browse (unified layout) was the last place".
+pub const BROWSE_ID: &str = "browse";
 
 /// Poster cards (2:3) and wide cards (16:9, Continue Watching and Next Up).
 pub const POSTER_W: f64 = 176.;
@@ -195,6 +197,7 @@ pub(crate) unsafe fn enter() {
     let ui = UI.get_mut().unwrap();
     ui.home.active = true;
     ui.selected_view = None;
+    ui.browse_active = false;
     ui.cfg.last_view = Some(HOME_ID.to_string());
     crate::config::save_config(&ui.cfg);
     set_hidden(ui.lib_scroll.get(), true);
@@ -208,6 +211,23 @@ pub(crate) unsafe fn enter() {
     header_layout();
     sidebar_refresh_selection();
     reload();
+}
+
+/// Unified layout: the "Browse" grid, every movie and show in one list. Shows
+/// the skeleton until `ItemsLoaded` arrives, like a library does.
+pub(crate) unsafe fn enter_browse() {
+    let ui = UI.get_mut().unwrap();
+    ui.browse_active = true;
+    ui.selected_view = None;
+    ui.mode_stack.clear();
+    ui.cfg.last_view = Some(BROWSE_ID.to_string());
+    crate::config::save_config(&ui.cfg);
+    crate::ui::shell::begin_load(true);
+    ui.cur_title = "Browse".to_string();
+    set_text(ui.header_title.get(), "Browse");
+    header_layout();
+    sidebar_refresh_selection();
+    let _ = ui.ui_tx.send(UiCmd::LoadBrowse);
 }
 
 /// Leave Home for a library screen. A no-op unless Home is showing.
@@ -230,4 +250,8 @@ pub(crate) unsafe fn leave() {
 
 pub(crate) extern "C" fn home_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe { enter() }
+}
+
+pub(crate) extern "C" fn browse_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+    unsafe { enter_browse() }
 }

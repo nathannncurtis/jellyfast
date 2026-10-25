@@ -36,12 +36,26 @@ pub(crate) fn handle_main(msg: MainMsg) {
                 ui.views = views.clone();
                 sidebar_rebuild(user_name, &views, has_live_tv);
                 show_login_or_library(true);
-                // Restore the last place: a remembered library if it still exists,
-                // otherwise Home (the default).
+                // Restore the last place: a remembered library if it still exists
+                // (separate layout only), Browse if that was the last place (unified
+                // layout), otherwise Home. Home also requests its rows.
+                let unified = ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified);
                 let last = ui.cfg.last_view.clone();
-                match last.and_then(|id| ui.views.iter().position(|v| v.0 == id)) {
+                let lib = if unified {
+                    None
+                } else {
+                    last.as_deref().and_then(|id| ui.views.iter().position(|v| v.0 == id))
+                };
+                match lib {
                     Some(idx) => select_view(idx),
-                    None => crate::ui::home::enter(), // also requests the Home rows
+                    None if unified && last.as_deref() == Some(crate::ui::home::BROWSE_ID) => {
+                        crate::ui::home::enter_browse()
+                    }
+                    None => crate::ui::home::enter(),
+                }
+                // First successful login with no layout chosen yet: ask how to browse.
+                if ui.cfg.layout_mode.is_none() {
+                    crate::ui::onboarding::show();
                 }
             }
         }

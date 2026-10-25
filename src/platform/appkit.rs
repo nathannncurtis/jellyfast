@@ -342,6 +342,8 @@ pub struct Ui {
     pub retry_pending: bool,
     pub s_quality: Ptr,
     pub s_theme: Ptr,
+    /// Settings: sidebar layout popup (separate libraries / one big library).
+    pub s_layout: Ptr,
     pub seerr: crate::ui::seerr::SeerrUi,
     // Rust-side state
     pub rows: Vec<(*mut Object, String)>, // sidebar row buttons + view ids
@@ -363,6 +365,13 @@ pub struct Ui {
     /// Home screen rows from the latest `MainMsg::HomeLoaded`.
     /// Home screen views (scroll, rows, cards, sidebar row).
     pub home: crate::ui::home::HomeUi,
+    /// Unified-layout "Browse" sidebar row, and whether Browse is the screen showing.
+    pub browse_row: Ptr,
+    pub browse_active: bool,
+    /// First-run onboarding card (see ui/onboarding.rs).
+    pub onboard: crate::ui::onboarding::OnboardUi,
+    /// Account name for the sidebar footer, from the last `Connected`.
+    pub user_name: String,
     pub now: crate::ui::nowbar::NowBar,
     pub tint_cache: HashMap<u64, (f64, f64, f64)>, // artwork tint (h, s, b) by poster key
 }
@@ -489,6 +498,11 @@ pub(crate) unsafe fn register_classes() {
             (sel!(itemClicked:), item_clicked as Extern0),
             (sel!(homeItemClicked:), home_item_clicked as Extern0),
             (sel!(homeSelected:), crate::ui::home::home_selected as Extern0),
+            (sel!(browseSelected:), crate::ui::home::browse_selected as Extern0),
+            (sel!(focusSearch:), crate::ui::shell::focus_search as Extern0),
+            (sel!(openRequests:), crate::ui::seerr::open_requests as Extern0),
+            (sel!(onboardPick:), crate::ui::onboarding::onboard_pick as Extern0),
+            (sel!(onboardContinue:), crate::ui::onboarding::onboard_continue as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
             (sel!(markUnwatched:), mark_unwatched as Extern0),
             (sel!(openInWeb:), open_in_web as Extern0),
@@ -697,6 +711,12 @@ pub(crate) extern "C" fn save_settings(_t: &mut Object, _c: Sel, _s: *mut Object
             ui.cfg.server_url = Some(new_url);
         }
         crate::config::save_config(&ui.cfg);
+        // Compare with the effective layout, so saving other settings never answers onboarding.
+        let lay: NSInteger = msg_send![ui.s_layout.get(), indexOfSelectedItem];
+        let layout = if lay == 1 { crate::config::LayoutMode::Unified } else { crate::config::LayoutMode::Separate };
+        if layout != ui.cfg.layout_mode.unwrap_or_default() {
+            crate::ui::shell::set_layout_mode(layout);
+        }
         apply_theme();
         // SaveSettings replaces the worker's whole Settings, so it goes first;
         // ui.cfg.settings carries the last *confirmed* Seerr values. SaveSeerr
@@ -764,6 +784,11 @@ pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
             crate::ui::home::reload();
             return;
         }
+        if ui.browse_active {
+            begin_load(false);
+            let _ = ui.ui_tx.send(UiCmd::LoadBrowse);
+            return;
+        }
         if let Some((id, name, ct)) = ui.mode_stack.last().cloned() {
             begin_load(false);
             let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
@@ -791,6 +816,7 @@ pub(crate) unsafe fn select_view(idx: usize) {
     if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
         ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
         ui.selected_view = Some(idx);
+        ui.browse_active = false;
         sidebar_refresh_selection();
         ui.cfg.last_view = Some(id.clone());
         crate::config::save_config(&ui.cfg);
@@ -1144,6 +1170,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         retry_pending: false,
         s_quality: Ptr(nil()),
         s_theme: Ptr(nil()),
+        s_layout: Ptr(nil()),
         seerr: crate::ui::seerr::SeerrUi::new(),
         rows: vec![],
         views: vec![],
@@ -1162,6 +1189,10 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         side_dyn: vec![],
         cur_title: String::new(),
         home: crate::ui::home::HomeUi::new(),
+        browse_row: Ptr(nil()),
+        browse_active: false,
+        onboard: crate::ui::onboarding::OnboardUi::new(),
+        user_name: String::new(),
         now: crate::ui::nowbar::NowBar::new(),
         tint_cache: HashMap::new(),
     };

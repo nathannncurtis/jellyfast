@@ -6,3 +6,4 @@ pub mod settings;
 pub mod shell;
 pub mod nowbar;
 pub mod home;
+pub mod onboarding;
