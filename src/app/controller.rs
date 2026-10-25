@@ -36,9 +36,13 @@ pub(crate) fn handle_main(msg: MainMsg) {
                 ui.views = views.clone();
                 sidebar_rebuild(user_name, &views, has_live_tv);
                 show_login_or_library(true);
-                // Home is the login default (audit decision). The last place is still
-                // saved to config, but a fresh login does not restore a library.
-                crate::ui::home::enter(); // also requests the Home rows
+                // Restore the last place: a remembered library if it still exists,
+                // otherwise Home (the default).
+                let last = ui.cfg.last_view.clone();
+                match last.and_then(|id| ui.views.iter().position(|v| v.0 == id)) {
+                    Some(idx) => select_view(idx),
+                    None => crate::ui::home::enter(), // also requests the Home rows
+                }
             }
         }
         MainMsg::ConnectError(e) => unsafe {

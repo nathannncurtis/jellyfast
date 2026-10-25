@@ -646,7 +646,6 @@ fn s_connected() {
         });
         state_check("home is the default landing", ui.home.active && ui.selected_view.is_none());
         state_check("home scroll shown, library grid hidden", visible(ui.home.scroll.get()) && !visible(ui.lib_scroll.get()));
-        state_check("home scroll shown, library grid hidden", !visible(ui.home.scroll.get()) == false && !visible(ui.lib_scroll.get()));
         state_check("Home sidebar row selected on launch", row_selected(ui.home.row.get()));
         state_check("no library row selected on launch", selected_rows() == 0);
         state_check("window is opaque", { let o: BOOL = msg_send![ui.win.get(), isOpaque]; o == YES });
@@ -658,7 +657,7 @@ fn s_connected() {
     }
 }
 fn s_connected_library() {
-    // A library was the last place, but login still lands on Home.
+    // A library was the last place: login restores it instead of Home.
     unsafe { UI.get_mut().unwrap().cfg.last_view = Some("v2".into()) };
     handle_main(MainMsg::Connected {
         user_name: "tester".into(),
@@ -673,12 +672,12 @@ fn s_connected_library() {
     });
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("login over remembered library: Home active", ui.home.active);
-        state_check("login over remembered library: no library selected", ui.selected_view.is_none());
-        state_check("login over remembered library: Home row selected", row_selected(ui.home.row.get()));
+        state_check("login over remembered library: Home inactive", !ui.home.active);
+        state_check("login over remembered library: library selected", ui.selected_view == Some(1));
+        state_check("login over remembered library: Home row not selected", !row_selected(ui.home.row.get()));
         let cmds = take_cmds();
-        state_check("login over remembered library: no LoadView", !cmds.iter().any(|c| matches!(c, UiCmd::LoadView { .. })));
-        state_check("login over remembered library: LoadHome sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
+        state_check("login over remembered library: LoadView sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadView { .. })));
+        state_check("login over remembered library: no LoadHome", !cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
     }
 }
 fn s_worker_path() {
@@ -703,10 +702,10 @@ fn s_home_rows() {
         let ui = UI.get().unwrap();
         state_check(
             "home rows stored in order",
-            ui.home_rows.len() == 2
-                && ui.home_rows[0].title == "Continue Watching"
-                && ui.home_rows[0].items.len() == 2
-                && ui.home_rows[1].kind == HomeRowKind::RecentlyAdded,
+            ui.home.rows.len() == 2
+                && ui.home.rows[0].title == "Continue Watching"
+                && ui.home.rows[0].items.len() == 2
+                && ui.home.rows[1].kind == HomeRowKind::RecentlyAdded,
         );
     }
 }
@@ -1108,7 +1107,7 @@ fn s_home_fake() {
     unsafe {
         let ui = UI.get().unwrap();
         state_check("home: five rows built", ui.home.views.len() == 5);
-        let total: usize = ui.home_rows.iter().map(|r| r.items.len()).sum();
+        let total: usize = ui.home.rows.iter().map(|r| r.items.len()).sum();
         state_check("home: one card per item", ui.home.flat.len() == total && total == 34);
         let cw = &ui.home.views[0].cells[0];
         state_check("home: continue watching uses wide cards", frame_of(cw.container).size.w == crate::ui::home::WIDE_W);

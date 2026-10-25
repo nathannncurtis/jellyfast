@@ -361,7 +361,6 @@ pub struct Ui {
     pub side_dyn: Vec<*mut Object>, // header/rows/footer built by sidebar_rebuild
     pub cur_title: String,
     /// Home screen rows from the latest `MainMsg::HomeLoaded`.
-    pub home_rows: Vec<crate::app::messages::HomeRow>,
     /// Home screen views (scroll, rows, cards, sidebar row).
     pub home: crate::ui::home::HomeUi,
     pub now: crate::ui::nowbar::NowBar,
@@ -786,19 +785,24 @@ pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
         }
     }
 }
+/// Open library `idx` (an index into `ui.views`) and remember it as the last place.
+pub(crate) unsafe fn select_view(idx: usize) {
+    let ui = UI.get_mut().unwrap();
+    if let Some((id, name, ct)) = ui.views.get(idx).cloned() {
+        ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
+        ui.selected_view = Some(idx);
+        sidebar_refresh_selection();
+        ui.cfg.last_view = Some(id.clone());
+        crate::config::save_config(&ui.cfg);
+        begin_load(true);
+        let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
+    }
+}
 pub(crate) extern "C" fn view_selected(_t: &mut Object, _c: Sel, sender: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
-        if let Some((id, name, ct)) = ui.views.get(tag as usize).cloned() {
-            ui.mode_stack = vec![(id.clone(), name.clone(), ct.clone())];
-            ui.selected_view = Some(tag as usize);
-            sidebar_refresh_selection();
-            ui.cfg.last_view = Some(id.clone());
-            crate::config::save_config(&ui.cfg);
-            begin_load(true);
-            let _ = ui.ui_tx.send(UiCmd::LoadView { view_id: id, name, collection_type: ct });
-        }
+        select_view(tag as usize);
     }
 }
 pub(crate) extern "C" fn item_clicked(_t: &mut Object, _c: Sel, sender: *mut Object) {
@@ -1157,7 +1161,6 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         selected_view: None,
         side_dyn: vec![],
         cur_title: String::new(),
-        home_rows: Vec::new(),
         home: crate::ui::home::HomeUi::new(),
         now: crate::ui::nowbar::NowBar::new(),
         tint_cache: HashMap::new(),

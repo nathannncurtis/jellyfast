@@ -45,6 +45,8 @@ pub struct HomeUi {
     pub doc: crate::platform::appkit::Ptr,
     /// The "Home" sidebar row.
     pub row: crate::platform::appkit::Ptr,
+    /// The Home rows (single source of truth).
+    pub rows: Vec<HomeRow>,
     pub views: Vec<HomeRowView>,
     /// Every card's item; a card's button tag is its index here.
     pub flat: Vec<ListItem>,
@@ -60,6 +62,7 @@ impl HomeUi {
             scroll: Ptr(std::ptr::null_mut()),
             doc: Ptr(std::ptr::null_mut()),
             row: Ptr(std::ptr::null_mut()),
+            rows: Vec::new(),
             views: Vec::new(),
             flat: Vec::new(),
             active: false,
@@ -98,7 +101,7 @@ pub(crate) unsafe fn build_scroll(content_host: *mut Object, frame: NSRect) {
 /// Replace the Home rows with `rows` (display order; empty rows never arrive).
 pub(crate) unsafe fn set_rows(rows: Vec<HomeRow>) {
     let ui = UI.get_mut().unwrap();
-    ui.home_rows = rows;
+    ui.home.rows = rows;
     ui.home.loading = false;
     rebuild();
     update_state();
@@ -120,7 +123,7 @@ unsafe fn rebuild() {
     let scale: f64 = msg_send![ui.win.get(), backingScaleFactor];
     tx_begin_instant();
     let mut y = SP2;
-    for r in ui.home_rows.iter() {
+    for r in ui.home.rows.iter() {
         let wide = r.kind.is_wide();
         let (tile_w, ratio) = if wide { (WIDE_W, WIDE_RATIO) } else { (POSTER_W, POSTER_ASPECT) };
         let poster_h = (tile_w * ratio).round();
@@ -170,7 +173,7 @@ unsafe fn update_state() {
     if !ui.home.active {
         return;
     }
-    if !ui.home_rows.is_empty() {
+    if !ui.home.rows.is_empty() {
         hide_state();
     } else if ui.home.loading {
         show_state("house", "Loading Home…", "Fetching your libraries.", false);
