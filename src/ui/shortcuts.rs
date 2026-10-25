@@ -48,6 +48,13 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("App", "About Jellyfast", "showAbout:", "", 0, 0),
     s("App", "Settings…", "showSettings:", ",", CMD, 0),
     s("App", "Quit Jellyfast", "terminate:", "q", CMD, 0),
+    // Text editing (standard Edit menu; nil target, so the first responder gets them)
+    s("Edit", "Undo", "undo:", "z", CMD, 0),
+    s("Edit", "Redo", "redo:", "z", CMD | SHIFT, 0),
+    s("Edit", "Cut", "cut:", "x", CMD, 0),
+    s("Edit", "Copy", "copy:", "c", CMD, 0),
+    s("Edit", "Paste", "paste:", "v", CMD, 0),
+    s("Edit", "Select All", "selectAll:", "a", CMD, 0),
     // Playback
     s("Controls", "Play / Pause", "playPause:", " ", 0, 0),
     s("Controls", "Stop", "stopPlayback:", ".", CMD, 0),
@@ -154,6 +161,7 @@ pub(crate) fn help_rows() -> Vec<HelpRow> {
             last = e.menu;
             out.push(HelpRow::Heading(match e.menu {
                 "App" => "Application",
+                "Edit" => "Text Editing",
                 "Controls" => "Playback",
                 "Speed" => "Playback Speed",
                 "Go" => "Browse and Requests",
@@ -373,7 +381,9 @@ pub(crate) unsafe fn build_menus_from_table() {
     };
     let add = |menu: *mut Object, e: &Shortcut| -> *mut Object {
         let it = menu_item(e.title, Sel::register(e.action), e.key);
-        if e.action != "terminate:" {
+        // Edit items keep a nil target so AppKit sends them down the responder chain
+        // to the focused text field. Everything else goes to our controller.
+        if e.action != "terminate:" && e.menu != "Edit" {
             let _: () = msg_send![it, setTarget: ctl];
         }
         let _: () = msg_send![it, setKeyEquivalentModifierMask: e.mods];
@@ -392,6 +402,14 @@ pub(crate) unsafe fn build_menus_from_table() {
         if e.action == "showAbout:" {
             let _: () = msg_send![app_menu, addItem: sep()];
         }
+    }
+
+    let edit_menu = top("Edit");
+    for e in SHORTCUTS.iter().filter(|e| e.menu == "Edit") {
+        if e.action == "cut:" {
+            let _: () = msg_send![edit_menu, addItem: sep()];
+        }
+        add(edit_menu, e);
     }
 
     let ctl_menu = top("Controls");
@@ -445,11 +463,17 @@ pub(crate) unsafe fn menu_key_problems() -> Vec<String> {
         if action.as_ptr().is_null() {
             return;
         }
+        if is_system_edit_item(action.name()) {
+            return;
+        }
         leaves += 1;
         let title = to_str(msg_send![item, title]);
         let key = to_str(msg_send![item, keyEquivalent]);
         let mods: NSUInteger = msg_send![item, keyEquivalentModifierMask];
         let name = action.name();
+        if is_system_edit_item(name) {
+            return;
+        }
         if key.is_empty() {
             if !EXEMPT_ACTIONS.contains(&name) {
                 problems.push(format!("“{}” ({}) has no shortcut", title, name));
@@ -474,6 +498,12 @@ pub(crate) unsafe fn menu_key_problems() -> Vec<String> {
         ));
     }
     problems
+}
+
+/// AppKit adds its own items (AutoFill, Start Dictation, Emoji & Symbols) to any menu
+/// titled "Edit". They are not ours, so the menu check skips them.
+fn is_system_edit_item(action: &str) -> bool {
+    action.starts_with('_') || matches!(action, "startDictation:" | "orderFrontCharacterPalette:")
 }
 
 unsafe fn walk_menu(menu: *mut Object, f: &mut dyn FnMut(*mut Object)) {
