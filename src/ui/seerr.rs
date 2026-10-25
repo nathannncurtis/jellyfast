@@ -568,14 +568,17 @@ unsafe fn make_row(i: usize, spec: &RowSpec, width: f64, requesting: bool) -> *m
     make_thumb(row, spec);
 
     // Right cluster, laid out from the trailing edge: pill, then (Request) button + spinner.
-    let (pill, pw) = make_pill(&spec.badge, spec.badge_color);
-    let px = width - SP6 - pw;
-    set_frame(pill, rect(px, (ROW_H - PILL_H) / 2., pw, PILL_H));
-    set_autoresize(pill, MARGIN_MINX);
-    add_sub(row, pill);
-    let mut left = px;
+    // A requestable row shows only the Request button; a "Not requested" pill beside it says nothing new.
+    let mut left = width - SP6;
+    if !spec.can_request {
+        let (pill, pw) = make_pill(&spec.badge, spec.badge_color);
+        left -= pw;
+        set_frame(pill, rect(left, (ROW_H - PILL_H) / 2., pw, PILL_H));
+        set_autoresize(pill, MARGIN_MINX);
+        add_sub(row, pill);
+    }
     if spec.can_request {
-        let bx = px - SP3 - BTN_W;
+        let bx = left - BTN_W;
         let btn: *mut Object = msg_send![class!(NSButton),
             buttonWithTitle: ns(if requesting { "Requesting…" } else { "Request" })
             target: ui.ctl.get() action: sel!(seerrRequest:)];

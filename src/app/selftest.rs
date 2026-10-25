@@ -1470,7 +1470,7 @@ fn s_seerr_results() {
         state_check("7 rows", ui.seerr.rows.len() == 7);
         state_check("2 request buttons (NotRequested only)", seerr_button_rows() == 2);
         state_check("rows are 76 tall", seerr_row_heights_ok());
-        state_check("a pill per row", seerr_pills() == 7);
+        state_check("a pill per row without a Request button", seerr_pills() == 7 - seerr_button_rows());
         state_check("empty state hidden with rows", seerr_empty_shown().is_none());
         state_check("thumbnail waits for the poster", unsafe { crate::ui::seerr::thumb_has_image("/p11.jpg") } == Some(false));
     }
