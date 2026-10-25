@@ -604,6 +604,7 @@ pub(crate) unsafe fn set_layout_mode(mode: crate::config::LayoutMode) {
     } else {
         sidebar_refresh_selection();
     }
+    crate::ui::home::layout_changed();
 }
 
 /// Rebuild the sidebar rows from `ui.views`. Callers set `ui.views` first.

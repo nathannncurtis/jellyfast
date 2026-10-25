@@ -67,7 +67,7 @@ fn map_err(e: reqwest::Error) -> JFError {
 }
 
 /// Fields requested for every home-screen list.
-const HOME_FIELDS: &str = "PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName";
+const HOME_FIELDS: &str = "PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,DateCreated";
 
 impl JellyfinClient {
     pub fn new(
@@ -360,35 +360,51 @@ impl JellyfinClient {
 
     /// Continue Watching: in-progress movies and episodes, most recent first.
     pub async fn resume_items(&self, limit: u32) -> Result<Vec<ListItem>, JFError> {
+        self.resume_items_in(None, limit).await
+    }
+
+    /// Continue Watching limited to one library (`parent` is a view id).
+    pub async fn resume_items_in(&self, parent: Option<&str>, limit: u32) -> Result<Vec<ListItem>, JFError> {
         #[derive(Deserialize)]
         struct R {
             #[serde(rename = "Items", default)]
             items: Vec<ListItem>,
         }
         let path = format!("/Users/{}/Items/Resume", enc(&self.user_id));
-        let pairs = [
+        let mut pairs = vec![
             ("Limit", limit.to_string()),
             ("MediaTypes", "Video".to_string()),
             ("Fields", HOME_FIELDS.to_string()),
             ("ImageTypeLimit", "1".to_string()),
         ];
+        if let Some(p) = parent {
+            pairs.push(("ParentId", p.to_string()));
+        }
         let v: R = self.get_json(&path, &pairs).await?;
         Ok(v.items)
     }
 
     /// Next Up: the next unwatched episode of each series in progress.
     pub async fn next_up(&self, limit: u32) -> Result<Vec<ListItem>, JFError> {
+        self.next_up_in(None, limit).await
+    }
+
+    /// Next Up limited to one library (`parent` is a view id).
+    pub async fn next_up_in(&self, parent: Option<&str>, limit: u32) -> Result<Vec<ListItem>, JFError> {
         #[derive(Deserialize)]
         struct R {
             #[serde(rename = "Items", default)]
             items: Vec<ListItem>,
         }
-        let pairs = [
+        let mut pairs = vec![
             ("UserId", self.user_id.clone()),
             ("Limit", limit.to_string()),
             ("Fields", HOME_FIELDS.to_string()),
             ("ImageTypeLimit", "1".to_string()),
         ];
+        if let Some(p) = parent {
+            pairs.push(("ParentId", p.to_string()));
+        }
         let v: R = self.get_json("/Shows/NextUp", &pairs).await?;
         Ok(v.items)
     }
@@ -408,11 +424,19 @@ impl JellyfinClient {
 
     /// Movie recommendation groups (similar to recent plays, liked people, ...).
     pub async fn recommendations(&self, limit: u32) -> Result<Vec<RecommendationDto>, JFError> {
-        let pairs = [
+        self.recommendations_in(None, limit).await
+    }
+
+    /// Movie recommendations limited to one library (`parent` is a view id).
+    pub async fn recommendations_in(&self, parent: Option<&str>, limit: u32) -> Result<Vec<RecommendationDto>, JFError> {
+        let mut pairs = vec![
             ("UserId", self.user_id.clone()),
             ("CategoryLimit", "5".to_string()),
             ("ItemLimit", limit.to_string()),
         ];
+        if let Some(p) = parent {
+            pairs.push(("ParentId", p.to_string()));
+        }
         self.get_json("/Movies/Recommendations", &pairs).await
     }
 

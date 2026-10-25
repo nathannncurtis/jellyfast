@@ -73,7 +73,7 @@ pub(crate) fn handle_main(msg: MainMsg) {
             show_login_or_library(false);
         },
         MainMsg::HomeLoaded(home) => unsafe {
-            crate::ui::home::set_rows(home.rows);
+            crate::ui::home::set_rows(home);
         },
         MainMsg::ItemsLoaded { title, items, can_go_back } => unsafe {
             crate::ui::detail::hide();

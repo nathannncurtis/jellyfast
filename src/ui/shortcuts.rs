@@ -67,6 +67,10 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Speed", "1.25×", "setSpeed:", "4", CTRL | CMD, 125),
     s("Speed", "1.5×", "setSpeed:", "5", CTRL | CMD, 150),
     s("Speed", "2×", "setSpeed:", "6", CTRL | CMD, 200),
+    // Home tabs (one big library): Home, Movies, TV Shows
+    s("Go", "Home", "showHomeSection:", "0", ALT | CMD, 0),
+    s("Go", "Movies", "showHomeSection:", "m", ALT | CMD, 1),
+    s("Go", "TV Shows", "showHomeSection:", "t", ALT | CMD, 2),
     // Browse
     s("Go", "Search", "focusSearch:", "f", CMD, 0),
     s("Go", "Open Selected Item", "openSelected:", "\r", 0, 0),
@@ -192,6 +196,7 @@ pub(crate) unsafe fn item_enabled(action: &str, tag: NSInteger, mods: NSUInteger
         "openSelected:" => main_window_active() && crate::ui::library::kb_focus_index().is_some(),
         "focusNext:" | "focusPrevious:" => main_window_active() && grid_has_items() && !settings_open(),
         "seerrShowTab:" => crate::ui::seerr::is_configured(&ui.cfg.settings),
+        "showHomeSection:" => ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified),
         _ => true,
     }
 }
