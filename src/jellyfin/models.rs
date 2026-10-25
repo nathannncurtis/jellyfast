@@ -158,6 +158,28 @@ pub struct MediaSource {
     pub bitrate: Option<u64>,
     #[serde(rename = "MediaStreams", default)]
     pub streams: Vec<MediaStream>,
+    /// Present on PlaybackInfo responses (relative URL, e.g. "/videos/<id>/master.m3u8?...").
+    #[serde(rename = "TranscodingUrl", default)]
+    pub transcoding_url: Option<String>,
+    #[serde(rename = "LiveStreamId", default)]
+    pub live_stream_id: Option<String>,
+    #[serde(rename = "SupportsDirectPlay", default)]
+    pub supports_direct_play: bool,
+    #[serde(rename = "SupportsDirectStream", default)]
+    pub supports_direct_stream: bool,
+    #[serde(rename = "SupportsTranscoding", default)]
+    pub supports_transcoding: bool,
+}
+
+/// POST /Items/{id}/PlaybackInfo response.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PlaybackInfo {
+    #[serde(rename = "MediaSources", default)]
+    pub media_sources: Vec<MediaSource>,
+    #[serde(rename = "PlaySessionId", default)]
+    pub play_session_id: Option<String>,
+    #[serde(rename = "ErrorCode", default)]
+    pub error_code: Option<String>,
 }
 impl MediaSource {
     pub fn video_codec(&self) -> Option<&str> {

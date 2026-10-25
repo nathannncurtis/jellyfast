@@ -33,6 +33,16 @@ impl fmt::Display for JFError {
     }
 }
 
+/// When set, playback reports and played-state changes are skipped. Used by
+/// live-server tests so a real server's user data is never modified.
+static READ_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_read_only(v: bool) {
+    READ_ONLY.store(v, std::sync::atomic::Ordering::SeqCst);
+}
+fn read_only() -> bool {
+    READ_ONLY.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[derive(Clone)]
 pub struct JellyfinClient {
     http: reqwest::Client,
@@ -278,8 +288,86 @@ impl JellyfinClient {
         Ok(v.items)
     }
 
+    /// POST /Items/{id}/PlaybackInfo with an AVFoundation-oriented device
+    /// profile. For live TV channels this opens the live stream (returns a
+    /// `LiveStreamId` the caller should close) and yields an HLS
+    /// `TranscodingUrl` that AVPlayer can play (raw MPEG-TS cannot be).
+    pub async fn playback_info(&self, item_id: &str, max_bitrate_bps: u64) -> Result<PlaybackInfo, JFError> {
+        let max = if max_bitrate_bps > 0 { max_bitrate_bps } else { 120_000_000 };
+        let body = serde_json::json!({
+            "DeviceProfile": {
+                "Name": "JellyfinMac",
+                "MaxStreamingBitrate": max,
+                "DirectPlayProfiles": [
+                    {"Container": "mp4,m4v,mov", "Type": "Video",
+                     "VideoCodec": "h264,hevc", "AudioCodec": "aac,mp3,ac3,eac3,alac,flac"},
+                    {"Container": "mp3,aac,m4a,flac,wav", "Type": "Audio"}
+                ],
+                "TranscodingProfiles": [
+                    {"Container": "ts", "Type": "Video", "Protocol": "hls", "Context": "Streaming",
+                     "VideoCodec": "h264,hevc", "AudioCodec": "aac,mp3,ac3,eac3",
+                     "MaxAudioChannels": "2", "MinSegments": "1", "BreakOnNonKeyFrames": true,
+                     "SegmentLength": 6}
+                ],
+                "CodecProfiles": [],
+                "SubtitleProfiles": []
+            },
+            "AutoOpenLiveStream": true
+        });
+        let r = self
+            .http
+            .post(format!("{}/Items/{}/PlaybackInfo", self.base, enc(item_id)))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .timeout(Duration::from_secs(45))
+            .query(&[
+                ("UserId", self.user_id.as_str()),
+                ("StartTimeTicks", "0"),
+                ("IsPlayback", "true"),
+                ("AutoOpenLiveStream", "true"),
+                ("MaxStreamingBitrate", &max.to_string()),
+            ])
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_err)?;
+        let r = check(r).await?;
+        let info: PlaybackInfo = r.json().await.map_err(|e| JFError::Parse(e.to_string()))?;
+        if let Some(code) = &info.error_code {
+            return Err(JFError::Api(400, format!("PlaybackInfo: {}", code)));
+        }
+        Ok(info)
+    }
+
+    /// Best-effort release of a live stream opened by `playback_info`.
+    pub async fn close_live_stream(&self, live_stream_id: &str) {
+        let _ = self
+            .http
+            .post(format!("{}/LiveStreams/Close", self.base))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .query(&[("liveStreamId", live_stream_id)])
+            .send()
+            .await;
+    }
+
+    /// Absolute playable URL for a server-relative TranscodingUrl, with the
+    /// token appended if the server did not embed one.
+    pub fn absolute_media_url(&self, rel: &str) -> String {
+        let mut u = if rel.starts_with("http") { rel.to_string() } else { format!("{}{}", self.base, rel) };
+        let l = u.to_ascii_lowercase();
+        if !l.contains("api_key=") && !l.contains("apikey=") {
+            u.push(if u.contains('?') { '&' } else { '?' });
+            u.push_str(&format!("api_key={}", enc(&self.token)));
+        }
+        u
+    }
+
     /// `play_method` is Jellyfin's PlayMethod: "DirectPlay", "DirectStream" or "Transcode".
     pub async fn report_start(&self, item_id: &str, ticks: i64, play_method: &str) {
+        if read_only() {
+            return;
+        }
         let _ = self
             .http
             .post(format!("{}/Sessions/Playing", self.base))
@@ -293,6 +381,9 @@ impl JellyfinClient {
             .await;
     }
     pub async fn report_progress(&self, item_id: &str, ticks: i64, paused: bool) {
+        if read_only() {
+            return;
+        }
         let _ = self
             .http
             .post(format!("{}/Sessions/Playing/Progress", self.base))
@@ -305,6 +396,9 @@ impl JellyfinClient {
             .await;
     }
     pub async fn report_stopped(&self, item_id: &str, ticks: i64) {
+        if read_only() {
+            return;
+        }
         let _ = self
             .http
             .post(format!("{}/Sessions/Playing/Stopped", self.base))
@@ -315,6 +409,9 @@ impl JellyfinClient {
             .await;
     }
     pub async fn set_played(&self, item_id: &str, played: bool) -> Result<(), JFError> {
+        if read_only() {
+            return Ok(());
+        }
         let m = if played { reqwest::Method::POST } else { reqwest::Method::DELETE };
         let r = self
             .http

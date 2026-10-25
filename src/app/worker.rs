@@ -10,6 +10,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
     let mut cfg = cfg;
     // Lazily built from settings + Keychain; invalidated when settings change.
     let mut seerr: Option<SeerrClient> = None;
+    // Live stream opened by the current channel playback; closed on the next one / stop.
+    let mut live_stream: Option<String> = None;
 
     // Poster disk cache: ~/Library/Caches/JellyfinMac/posters
     let poster_dir = crate::config::cache_dir().join("posters");
@@ -178,6 +180,9 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             UiCmd::Play { item_id } => {
                 if let Some(c) = &client {
                     match c.full_item(&item_id).await {
+                        Ok(full) if full.item_type == "TvChannel" => {
+                            play_channel(c, &cfg, &main_tx, &mut live_stream, full.id.clone(), full.name.clone()).await;
+                        }
                         Ok(full) => {
                             let ms = full.media_sources.first().cloned();
                             let (method, _kbps) =
@@ -255,17 +260,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             }
             UiCmd::PlayChannel { channel_id, name } => {
                 if let Some(c) = &client {
-                    let url = crate::jellyfin::urls::build_livetv_url(&c.base, &channel_id, &c.token);
-                    c.report_start(&channel_id, 0, "DirectStream").await;
-                    let _ = main_tx.send(MainMsg::PlaybackReady(PlaybackStart {
-                        url,
-                        item_id: channel_id,
-                        title: name,
-                        subtitle: Some("Live".into()),
-                        resume_secs: 0.0,
-                        method: crate::transcode::decision::PlaybackMethod::DirectPlay,
-                        run_time_secs: 0.0,
-                    }));
+                    play_channel(c, &cfg, &main_tx, &mut live_stream, channel_id, name).await;
                 }
             }
             UiCmd::Progress { item_id, ticks, paused } => {
@@ -275,6 +270,9 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             }
             UiCmd::Stopped { item_id, ticks } => {
                 if let Some(c) = &client {
+                    if let Some(id) = live_stream.take() {
+                        c.close_live_stream(&id).await;
+                    }
                     c.report_stopped(&item_id, ticks).await;
                 }
             }
@@ -406,6 +404,52 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
 }
 
 /// Build (or reuse) the Seerr client. Err = user-facing reason; no network I/O.
+/// Live TV: PlaybackInfo with an HLS-capable device profile, then play the
+/// returned TranscodingUrl (AVPlayer cannot play a raw MPEG-TS stream).
+async fn play_channel(
+    c: &JellyfinClient,
+    cfg: &Config,
+    main_tx: &UnboundedSender<MainMsg>,
+    live_stream: &mut Option<String>,
+    channel_id: String,
+    name: String,
+) {
+    // Release any previously opened live stream first.
+    if let Some(id) = live_stream.take() {
+        c.close_live_stream(&id).await;
+    }
+    match c.playback_info(&channel_id, cfg.settings.max_bitrate_kbps * 1000).await {
+        Ok(info) => {
+            let ms = info.media_sources.into_iter().next();
+            match ms.as_ref().and_then(|m| m.transcoding_url.clone()) {
+                Some(rel) => {
+                    *live_stream = ms.as_ref().and_then(|m| m.live_stream_id.clone());
+                    let url = c.absolute_media_url(&rel);
+                    c.report_start(&channel_id, 0, "Transcode").await;
+                    let _ = main_tx.send(MainMsg::PlaybackReady(PlaybackStart {
+                        url,
+                        item_id: channel_id,
+                        title: name,
+                        subtitle: Some("Live".into()),
+                        resume_secs: 0.0,
+                        method: crate::transcode::decision::PlaybackMethod::ServerHls,
+                        run_time_secs: 0.0,
+                    }));
+                }
+                None => {
+                    if let Some(id) = ms.and_then(|m| m.live_stream_id) {
+                        c.close_live_stream(&id).await;
+                    }
+                    let _ = main_tx.send(MainMsg::PlaybackError(format!("“{}” is not available right now.", name)));
+                }
+            }
+        }
+        Err(e) => {
+            let _ = main_tx.send(MainMsg::PlaybackError(format!("{}", e)));
+        }
+    }
+}
+
 fn seerr_client(cfg: &Config, cache: &mut Option<SeerrClient>) -> Result<SeerrClient, String> {
     if !cfg.settings.seerr_enabled {
         return Err("Seerr is turned off. Enable it in Settings to search and request.".into());
@@ -539,7 +583,9 @@ pub(crate) async fn connect_flow(
         .collect();
     // Probe live TV (cheap, 1 item) — sidebar shows the section only if present.
     let has_live = c.livetv_channels().await.map(|i| !i.is_empty()).unwrap_or(false);
-    if has_live {
+    // Jellyfin 10.9+/12 already lists Live TV as a user view; avoid a duplicate.
+    let already = v.iter().any(|x| x.2.as_deref() == Some("livetv"));
+    if has_live && !already {
         v.push(("livetv".into(), "Live TV".into(), Some("livetv".into())));
     }
     let _ = main_tx.send(MainMsg::Connected {
@@ -824,6 +870,16 @@ mod tests {
                 {"Id": "v-tv", "Name": "Shows", "CollectionType": "tvshows"},
                 {"Id": "v-mus", "Name": "Music", "CollectionType": "music"},
             ], "TotalRecordCount": 3})),
+            ("POST", ["Items", id, "PlaybackInfo"]) => json(serde_json::json!({
+                "PlaySessionId": "ps1",
+                "MediaSources": [{
+                    "Id": "lms-1", "Container": "hls", "LiveStreamId": "ls-1",
+                    "SupportsTranscoding": true,
+                    "TranscodingUrl": format!("/videos/{}/master.m3u8?MediaSourceId=lms-1&ApiKey=tok123&LiveStreamId=ls-1", id),
+                    "MediaStreams": []
+                }]
+            })),
+            ("POST", ["LiveStreams", "Close"]) => json(serde_json::json!({})),
             ("GET", ["LiveTv", "Channels"]) => {
                 if c.live {
                     json(serde_json::json!({"Items": [item("ch1", "Channel One", "TvChannel", false)]}))
@@ -1425,12 +1481,20 @@ mod tests {
         let (_e, m, mut h) = connected().await;
         h.send(UiCmd::PlayChannel { channel_id: "ch1".into(), name: "Channel One".into() });
         let p = playback(h.next().await);
-        assert_eq!(p.url, format!("{}/LiveTv/Channels/ch1/stream?api_key=tok123", m.url()));
+        assert_eq!(
+            p.url,
+            format!("{}/videos/ch1/master.m3u8?MediaSourceId=lms-1&ApiKey=tok123&LiveStreamId=ls-1", m.url())
+        );
+        assert_eq!(m.find("POST", "/Items/ch1/PlaybackInfo").len(), 1);
         assert_eq!(p.subtitle.as_deref(), Some("Live"));
         assert_eq!((p.title.as_str(), p.item_id.as_str()), ("Channel One", "ch1"));
-        assert_eq!(p.method, PlaybackMethod::DirectPlay);
+        assert_eq!(p.method, PlaybackMethod::ServerHls);
         assert_eq!(p.resume_secs, 0.0);
         assert_eq!(m.find("POST", "/Sessions/Playing").len(), 1);
+        // The live stream is released on the next channel / stop.
+        h.send(UiCmd::Stopped { item_id: "ch1".into(), ticks: 0 });
+        h.drain_via_probe().await;
+        assert_eq!(m.find("POST", "/LiveStreams/Close").len(), 1);
     }
 
     // -------------------------------------------------- progress / played
