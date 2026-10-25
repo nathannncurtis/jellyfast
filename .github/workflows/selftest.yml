@@ -20,5 +20,5 @@ jobs:
       - name: Self-test
         run: |
           bin=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[0].targets[] | select(.kind | index("bin")) | .name][0]')
-          HOME=$(mktemp -d) JELLYFIN_MAC_SELFTEST=1 perl -e 'alarm 600; exec @ARGV' "target/debug/$bin" 2>&1 | tee selftest.log || true
+          HOME=$(mktemp -d) JELLYFAST_SELFTEST=1 perl -e 'alarm 600; exec @ARGV' "target/debug/$bin" 2>&1 | tee selftest.log || true
           grep -q 'ALL STEPS DONE' selftest.log
