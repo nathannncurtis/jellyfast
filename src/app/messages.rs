@@ -116,3 +116,16 @@ pub struct Settings {
 fn default_sub_lang() -> String {
     String::new()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_deserialize_with_defaults_and_ignore_unknown() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!((s.theme.as_str(), s.max_bitrate_kbps, s.subtitle_lang.as_str()), ("", 0, ""));
+        let s: Settings = serde_json::from_str(r#"{"theme":"dark","max_bitrate_kbps":5000,"extra":1}"#).unwrap();
+        assert_eq!((s.theme.as_str(), s.max_bitrate_kbps), ("dark", 5000));
+    }
+}
