@@ -140,6 +140,12 @@ pub struct FullItem {
     pub item_type: String,
     #[serde(rename = "SeriesName", default)]
     pub series_name: Option<String>,
+    #[serde(rename = "ParentIndexNumber", default)]
+    pub season: Option<u32>,
+    #[serde(rename = "IndexNumber", default)]
+    pub episode: Option<u32>,
+    #[serde(rename = "ProductionYear", default)]
+    pub production_year: Option<u32>,
     #[serde(rename = "Album", default)]
     pub album: Option<String>,
     #[serde(rename = "AlbumArtist", default)]

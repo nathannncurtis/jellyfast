@@ -460,11 +460,13 @@ pub fn start_playback(ps: &PlaybackStart) {
             attempts: 0,
             ticks_since_save: 0,
         });
+        // Upper-left header: the title (episode or movie name) and, under it, the header line.
+        let header_sub = ps.header_subtitle();
         set_text(ui.top_title.get(), &ps.title);
-        set_text(ui.top_sub.get(), ps.subtitle.as_deref().unwrap_or(""));
+        set_text(ui.top_sub.get(), header_sub.as_deref().unwrap_or(""));
         {
             // One line vertically centred when there is no subtitle.
-            let has_sub = ps.subtitle.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+            let has_sub = header_sub.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
             let f = frame_of(ui.top_title.get());
             let y = if has_sub { 26. } else { (crate::ui::theme::PLAYER_BAR_H - 18.) / 2. };
             set_frame(ui.top_title.get(), rect(f.origin.x, y, f.size.w, 18.));

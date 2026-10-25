@@ -260,6 +260,10 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                     full.run_time_ticks.unwrap_or(0),
                                 ),
                                 image_key: Some(crate::ui::library::poster_key(&full.id)),
+                                series_name: if full.item_type == "Episode" { full.series_name.clone() } else { None },
+                                season_number: full.season,
+                                episode_number: full.episode,
+                                production_year: full.production_year,
                                 media_kind: if full.item_type == "Audio" {
                                     crate::app::messages::MediaKind::Audio
                                 } else {
@@ -454,6 +458,10 @@ async fn play_channel(
                         run_time_secs: 0.0,
                         image_key: Some(crate::ui::library::poster_key(&channel_id)),
                         media_kind: crate::app::messages::MediaKind::Video,
+                        series_name: None,
+                        season_number: None,
+                        episode_number: None,
+                        production_year: None,
                     }));
                 }
                 None => {
@@ -1006,6 +1014,9 @@ mod tests {
                     "ep1" => {
                         v["Type"] = "Episode".into();
                         v["SeriesName"] = "Show One".into();
+                        v["Name"] = "Pilot".into();
+                        v["ParentIndexNumber"] = 1.into();
+                        v["IndexNumber"] = 2.into();
                     }
                     _ => {}
                 }
@@ -1546,7 +1557,16 @@ mod tests {
         assert_eq!(playback(h.next().await).resume_secs, 0.0);
         // Episodes carry the series name as subtitle.
         h.send(UiCmd::Play { item_id: "ep1".into() });
-        assert_eq!(playback(h.next().await).subtitle.as_deref(), Some("Show One"));
+        let ep = playback(h.next().await);
+        assert_eq!(ep.subtitle.as_deref(), Some("Show One"));
+        assert_eq!(ep.title, "Pilot");
+        assert_eq!(ep.series_name.as_deref(), Some("Show One"));
+        assert_eq!((ep.season_number, ep.episode_number), (Some(1), Some(2)));
+        assert_eq!(ep.header_subtitle().as_deref(), Some("Show One · S1 E2"));
+        // A movie carries no series, but its year feeds the header line.
+        h.send(UiCmd::Play { item_id: "played".into() });
+        let mv = playback(h.next().await);
+        assert_eq!((mv.series_name.is_none(), mv.season_number, mv.episode_number), (true, None, None));
     }
 
     #[tokio::test]

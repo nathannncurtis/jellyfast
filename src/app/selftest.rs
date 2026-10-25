@@ -160,6 +160,7 @@ fn steps() -> Vec<Step> {
         ("playback: subtitle/audio cycle", s_play_cycle, 2300),
         ("playback: toast hides itself", s_toast_hidden, 50),
         ("audit: player (long title, toast, info)", s_audit_player, 200),
+        ("player header: episode, long names", s_player_header, 200),
         ("playback: speed", s_play_speed, 300),
         ("playback: server down/up/error", s_play_net, 500),
         ("playback: replace item", s_play_start, 1500),
@@ -266,6 +267,10 @@ fn playback(resume: f64, run: f64) -> MainMsg {
         run_time_secs: run,
         image_key: Some(poster_key("Movie-0")),
         media_kind: MediaKind::Video,
+        series_name: None,
+        season_number: None,
+        episode_number: None,
+        production_year: None,
     })
 }
 fn state_check(what: &str, ok: bool) {
@@ -1123,6 +1128,10 @@ fn s_audit_player() {
         run_time_secs: 6.0,
         image_key: None,
         media_kind: MediaKind::Video,
+        series_name: None,
+        season_number: None,
+        episode_number: None,
+        production_year: None,
     }));
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -1308,6 +1317,57 @@ fn s_play_cycle() {
         }
     }
 }
+const LONG_SERIES: &str = "The Extraordinarily Long Series Name That Keeps Going Season After Season Forever";
+fn s_player_header() {
+    // Episode with a long show name and a long episode title: title on top, "Series · S12 E105" under it.
+    handle_main(MainMsg::PlaybackReady(PlaybackStart {
+        url: video_url(),
+        item_id: "ep-long".into(),
+        title: LONG.into(),
+        subtitle: Some(LONG_SERIES.into()),
+        resume_secs: 0.0,
+        method: PlaybackMethod::DirectPlay,
+        run_time_secs: 6.0,
+        image_key: None,
+        media_kind: MediaKind::Video,
+        series_name: Some(LONG_SERIES.into()),
+        season_number: Some(12),
+        episode_number: Some(105),
+        production_year: Some(2001),
+    }));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let t = read_field(ui.top_title.get());
+        let s = read_field(ui.top_sub.get());
+        state_check("episode header: title is the episode name", t == LONG);
+        state_check("episode header: series line", s == format!("{} · S12 E105", LONG_SERIES));
+        let bar: *mut Object = msg_send![ui.top_title.get(), superview];
+        state_check("episode header sits in the top bar (fades with it)", bar == ui.top_bar.get());
+    }
+    audit_both("player header (episode)");
+    // Movie: the year goes under the title.
+    handle_main(MainMsg::PlaybackReady(PlaybackStart {
+        url: video_url(),
+        item_id: "movie-hdr".into(),
+        title: "Fake Movie".into(),
+        subtitle: None,
+        resume_secs: 0.0,
+        method: PlaybackMethod::DirectPlay,
+        run_time_secs: 6.0,
+        image_key: None,
+        media_kind: MediaKind::Video,
+        series_name: None,
+        season_number: None,
+        episode_number: None,
+        production_year: Some(1999),
+    }));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("movie header: title", read_field(ui.top_title.get()) == "Fake Movie");
+        state_check("movie header: year", read_field(ui.top_sub.get()) == "1999");
+    }
+    audit_both("player header (movie)");
+}
 fn s_play_speed() {
     unsafe {
         for t in [50, 75, 100, 125, 150, 200, 100] {
@@ -1344,6 +1404,10 @@ fn audio_start(title: &str, artist: &str) -> MainMsg {
         run_time_secs: 6.0,
         image_key: Some(poster_key("Audio-0")),
         media_kind: MediaKind::Audio,
+        series_name: None,
+        season_number: None,
+        episode_number: None,
+        production_year: None,
     })
 }
 fn s_audio_start() {
