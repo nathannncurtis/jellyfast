@@ -511,7 +511,6 @@ pub(crate) unsafe fn register_classes() {
             (sel!(homeItemClicked:), home_item_clicked as Extern0),
             (sel!(homeSelected:), crate::ui::home::home_selected as Extern0),
             (sel!(browseSelected:), crate::ui::home::browse_selected as Extern0),
-            (sel!(focusSearch:), crate::ui::shell::focus_search as Extern0),
             (sel!(openRequests:), crate::ui::seerr::open_requests as Extern0),
             (sel!(onboardPick:), crate::ui::onboarding::onboard_pick as Extern0),
             (sel!(onboardContinue:), crate::ui::onboarding::onboard_continue as Extern0),

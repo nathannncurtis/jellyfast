@@ -1526,8 +1526,8 @@ fn s_home_clicks() {
     let sid = unsafe { UI.get().unwrap().home.flat[series].id.clone() };
     unsafe { act(sel!(homeItemClicked:), tagged_button(series as isize)) };
     state_check(
-        "home: series card opens its episodes",
-        take_cmds().iter().any(|c| matches!(c, UiCmd::Episodes { series_id, .. } if *series_id == sid)),
+        "home: series card opens its detail page",
+        take_cmds().iter().any(|c| matches!(c, UiCmd::OpenDetail { item_id } if *item_id == sid)),
     );
     unsafe {
         state_check("home: still on Home after a card click", UI.get().unwrap().home.active);

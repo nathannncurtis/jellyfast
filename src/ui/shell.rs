@@ -606,14 +606,6 @@ pub(crate) unsafe fn set_layout_mode(mode: crate::config::LayoutMode) {
     }
 }
 
-/// Sidebar "Search": put the caret in the search field.
-pub(crate) extern "C" fn focus_search(_t: &mut Object, _c: Sel, _s: *mut Object) {
-    unsafe {
-        let ui = UI.get_mut().unwrap();
-        let _: BOOL = msg_send![ui.win.get(), makeFirstResponder: ui.search.get()];
-    }
-}
-
 /// Rebuild the sidebar rows from `ui.views`. Callers set `ui.views` first.
 pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Option<String>)], has_live_tv: bool) {
     let ui = UI.get_mut().unwrap();
