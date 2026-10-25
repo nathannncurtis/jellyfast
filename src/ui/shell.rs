@@ -171,6 +171,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     autorel(sc);
     ui.lib_scroll = Ptr(sc);
     crate::ui::home::build_scroll(content_host, grid_area);
+    crate::ui::seerr::build_host(content_host, grid_area);
 
     let grid_cls = *GRID_CLASS.get().unwrap();
     let grid: *mut Object = msg_send![grid_cls, alloc];
@@ -557,6 +558,9 @@ pub(crate) unsafe fn sidebar_refresh_selection() {
     if !ui.browse_row.get().is_null() {
         row_set_selected(ui.browse_row.get(), ui.browse_active);
     }
+    if !ui.seerr.row.get().is_null() {
+        row_set_selected(ui.seerr.row.get(), ui.seerr.active);
+    }
     for (i, (row, _)) in ui.rows.iter().enumerate() {
         row_set_selected(*row, ui.selected_view == Some(i));
     }
@@ -635,20 +639,28 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
     ui.browse_row = Ptr(nil());
 
     if unified {
-        // One big library: Browse, Search and Requests replace the library list.
+        // One big library: Browse replaces the library list.
         let browse = sidebar_row("Browse", "square.grid.2x2", sel!(browseSelected:), -1);
         let _: () = msg_send![stack, addView: browse inGravity: 1isize];
         ui.side_dyn.push(browse);
         ui.browse_row = Ptr(browse);
         row_set_selected(browse, ui.browse_active);
-        for (title, symbol_name, action) in [
-            ("Search", "magnifyingglass", sel!(focusSearch:)),
-            ("Requests", "tray.full", sel!(openRequests:)),
-        ] {
-            let r = sidebar_row(title, symbol_name, action, -1);
-            let _: () = msg_send![stack, addView: r inGravity: 1isize];
-            ui.side_dyn.push(r);
-        }
+    }
+    // Requests: a full-size tab in both layouts, present once Seerr is set up.
+    let configured = crate::ui::seerr::is_configured(&ui.cfg.settings);
+    ui.seerr.in_sidebar = configured;
+    ui.seerr.row = Ptr(nil());
+    if configured {
+        let req = sidebar_row("Requests", "tray.full", sel!(requestsSelected:), -1);
+        let _: () = msg_send![stack, addView: req inGravity: 1isize];
+        ui.side_dyn.push(req);
+        ui.seerr.row = Ptr(req);
+        row_set_selected(req, ui.seerr.active);
+    }
+    if unified {
+        let r = sidebar_row("Search", "magnifyingglass", sel!(focusSearch:), -1);
+        let _: () = msg_send![stack, addView: r inGravity: 1isize];
+        ui.side_dyn.push(r);
     }
     if !unified {
         // Library list (separate layout): a header, then one row per library.
@@ -680,12 +692,7 @@ pub(crate) unsafe fn sidebar_rebuild(user: String, views: &[(String, String, Opt
         }
     }
 
-    // Footer (bottom gravity): Request (separate layout only), hairline, user row.
-    if !unified {
-        let req = sidebar_row("Request…", "plus.magnifyingglass", sel!(openSeerr:), 0);
-        let _: () = msg_send![stack, addView: req inGravity: 3isize];
-        ui.side_dyn.push(req);
-    }
+    // Footer (bottom gravity): hairline, user row.
     let hl = hairline(rect(0., 0., SIDEBAR_W - 2. * SP3, 1.));
     fix_height(hl, 1.);
     let _: () = msg_send![stack, addView: hl inGravity: 3isize];
@@ -986,6 +993,7 @@ pub(crate) unsafe fn sync_sort_popup() {
 /// what is on screen and spin in the header.
 pub(crate) unsafe fn begin_load(first: bool) {
     crate::ui::home::leave();
+    crate::ui::seerr::leave();
     let ui = UI.get_mut().unwrap();
     ui.sort_applies = true;
     hide_state();

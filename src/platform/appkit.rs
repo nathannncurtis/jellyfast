@@ -512,7 +512,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(homeItemClicked:), home_item_clicked as Extern0),
             (sel!(homeSelected:), crate::ui::home::home_selected as Extern0),
             (sel!(browseSelected:), crate::ui::home::browse_selected as Extern0),
-            (sel!(openRequests:), crate::ui::seerr::open_requests as Extern0),
+            (sel!(requestsSelected:), crate::ui::seerr::requests_selected as Extern0),
             (sel!(onboardPick:), crate::ui::onboarding::onboard_pick as Extern0),
             (sel!(onboardContinue:), crate::ui::onboarding::onboard_continue as Extern0),
             (sel!(markWatched:), mark_watched as Extern0),
@@ -819,6 +819,12 @@ pub(crate) extern "C" fn sign_out(_t: &mut Object, _c: Sel, _s: *mut Object) {
 }
 pub(crate) extern "C" fn refresh(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
+        // Requests tab reloads its own data; library/Home/Browse keep the
+        // sort-filter behaviour (re-run an active filter, else reload the place).
+        if UI.get_mut().unwrap().seerr.active {
+            crate::ui::seerr::refresh();
+            return;
+        }
         load_filtered_or_place();
     }
 }
@@ -866,7 +872,7 @@ pub(crate) unsafe fn clear_filter() {
 pub(crate) extern "C" fn go_back(_t: &mut Object, _c: Sel, _s: *mut Object) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        if ui.home.active {
+        if ui.home.active || ui.seerr.active {
             return;
         }
         // Back from filter results: clear the filter and show the place again.

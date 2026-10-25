@@ -57,6 +57,11 @@ pub(crate) fn handle_main(msg: MainMsg) {
                     None if unified && last.as_deref() == Some(crate::ui::home::BROWSE_ID) => {
                         crate::ui::home::enter_browse()
                     }
+                    None if last.as_deref() == Some(crate::ui::seerr::REQUESTS_ID)
+                        && crate::ui::seerr::is_configured(&ui.cfg.settings) =>
+                    {
+                        crate::ui::seerr::enter()
+                    }
                     None => crate::ui::home::enter(),
                 }
                 // First successful login with no layout chosen yet: ask how to browse.

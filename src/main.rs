@@ -63,7 +63,7 @@
 //!   src/ui/login.rs, settings.rs ← login card & settings sheet in UI section
 //!   src/app/controller.rs    ← SECTION: Application Controller (message pump)
 //!   src/app/worker.rs        ← SECTION: Background Worker (tokio loop)
-//!   src/ui/seerr.rs          ← SECTION: Seerr request window
+//!   src/ui/seerr.rs          ← SECTION: Requests tab (Seerr)
 //!   `mod sys` is the only unsafe code; everything else is safe Rust under
 //!   #![deny(unsafe_code)].
 //!
