@@ -171,6 +171,8 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::SeerrRequestList(v) => crate::ui::seerr::on_request_list(v),
         MainMsg::SeerrPoster { path, bytes } => crate::ui::seerr::on_poster(path, &bytes),
         MainMsg::SeerrError(m) => crate::ui::seerr::on_error(m),
+        MainMsg::SessionsLoaded(list) => crate::ui::cast::on_sessions(list),
+        MainMsg::CastError(e) => crate::ui::cast::on_error(e),
         MainMsg::SeerrStatus { ok, message } => unsafe {
             crate::ui::seerr::on_save_status(ok, message);
         },

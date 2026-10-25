@@ -1,5 +1,6 @@
 use crate::config::{Config, HomeSection, LayoutMode};
 use crate::jellyfin::models::ListItem;
+use crate::jellyfin::sessions::{RemoteAction, RemoteSession};
 use crate::seerr::models::{SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
 use serde::{Deserialize, Serialize};
@@ -129,6 +130,27 @@ pub enum UiCmd {
         password: Option<String>,
         api_key: Option<String>,
     },
+    /// Play On: fetch the other devices this user can control. Answered with
+    /// `MainMsg::SessionsLoaded`. `silent` (the remote bar's poll) reports no errors.
+    LoadSessions {
+        silent: bool,
+    },
+    /// Play On: start `item_id` on another session, from `start_secs` (`PlayNow`).
+    CastPlay {
+        session_id: String,
+        item_id: String,
+        start_secs: f64,
+    },
+    /// Play On a series: the server picks its Next Up episode (else the first one) and starts it.
+    CastSeries {
+        session_id: String,
+        series_id: String,
+    },
+    /// Remote control (pause, unpause, stop, seek) for another session.
+    CastControl {
+        session_id: String,
+        action: RemoteAction,
+    },
     QuitSaving,
 }
 
@@ -197,6 +219,10 @@ pub enum MainMsg {
     },
     /// Search/request/list failure, "already requested", or Seerr disabled/unconfigured.
     SeerrError(String),
+    /// Controllable sessions on the server, without this app's own.
+    SessionsLoaded(Vec<RemoteSession>),
+    /// A Play On request or remote command failed (shown as a toast).
+    CastError(String),
     /// Outcome of `SaveSeerr` (ok=false: nothing was persisted).
     SeerrStatus {
         ok: bool,
@@ -310,6 +336,8 @@ pub struct DetailView {
     pub played: bool,
     /// Has a saved position and is not finished: the button says "Resume".
     pub resume: bool,
+    /// Saved position (ticks), where Play On starts the item.
+    pub resume_ticks: i64,
     pub poster_key: Option<u64>,
     pub backdrop_key: Option<u64>,
     pub people: Vec<DetailPerson>,

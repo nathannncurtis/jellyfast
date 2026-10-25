@@ -69,6 +69,7 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Controls", "Next Audio Track", "audioCycle:", "a", 0, 0),
     s("Controls", "Enter / Exit Full Screen", "fullscreen:", "f", 0, 0),
     s("Controls", "Picture in Picture", "togglePiP:", "p", ALT | CMD, 0),
+    s("Controls", "Cast to a Device…", "showCastMenu:", "c", CMD | SHIFT, 0),
     // Playback speed (submenu of Controls)
     s("Speed", "0.5×", "setSpeed:", "1", CTRL | CMD, 50),
     s("Speed", "0.75×", "setSpeed:", "2", CTRL | CMD, 75),

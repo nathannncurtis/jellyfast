@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::jellyfin::models::{ImageTags, ListItem, UserData};
 use crate::platform::appkit::*;
 use crate::platform::avkit::*;
+use crate::ui::cast::STRIP_H;
 use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
 use crate::transcode::decision::PlaybackMethod;
 use std::sync::Mutex;
@@ -202,6 +203,10 @@ fn steps() -> Vec<Step> {
         ("detail: series page", s_detail_series, 150),
         ("detail: seasons (picker, episodes, play)", s_detail_seasons, 300),
         ("detail: error toast", s_detail_error, 50),
+        ("cast: detail Cast button and Play On menu", s_cast_detail, 150),
+        ("cast: remote bar controls and audit", s_cast_bar, 200),
+        ("cast: error strip in the library", s_cast_error, 150),
+        ("cast: series Cast button sends the series", s_cast_series, 150),
         ("stop when not playing", s_stop_idle, 50),
         ("playback error (idle)", s_playback_error, 50),
         ("server down/up while idle", s_server_idle, 50),
@@ -244,6 +249,7 @@ fn steps() -> Vec<Step> {
         ("player bar: auto-hide arm", s_pb_hide_arm, 600),
         ("player bar: auto-hide check", s_pb_hide_check, 50),
         ("playback: controls", s_play_controls, 300),
+        ("player: AirPlay button and external card", s_player_airplay, 150),
         ("playback: subtitle/audio cycle", s_play_cycle, 2300),
         ("playback: toast hides itself", s_toast_hidden, 50),
         ("audit: player (long title, toast, info)", s_audit_player, 200),
@@ -252,6 +258,7 @@ fn steps() -> Vec<Step> {
         ("playback: server down/up/error", s_play_net, 500),
         ("playback: replace item", s_play_start, 1500),
         ("playback: stop", s_play_stop, 200),
+        ("cast: player menu casts and stops local playback", s_player_cast, 200),
         ("audio: start (now-playing bar)", s_audio_start, 1500),
         ("audio: bar layout + audit", s_audio_bar, 100),
         ("audio: stop", s_audio_stop, 200),
@@ -260,6 +267,303 @@ fn steps() -> Vec<Step> {
         ("signed out", s_signed_out, 100),
         ("quit", s_quit_prep, 50),
     ]
+}
+
+
+// ---- casting ----------------------------------------------------------------
+const OWN_DEVICE: &str = "dev-self";
+
+/// `GET /Sessions` body: this app's own session, a TV playing an episode, and a web browser.
+fn sessions_json(paused: bool) -> String {
+    serde_json::json!([
+        {"Id": "sess-me", "DeviceId": OWN_DEVICE, "DeviceName": "This Mac", "Client": "Jellyfast", "SupportsRemoteControl": true},
+        {"Id": "sess-tv", "DeviceId": "tv-1", "DeviceName": "Living Room", "Client": "Jellyfin Android TV",
+         "SupportsRemoteControl": true,
+         "NowPlayingItem": {"Id": "ep-1", "Name": "Pilot", "SeriesName": "Show", "RunTimeTicks": 1_200_000_000i64},
+         "PlayState": {"PositionTicks": 300_000_000i64, "IsPaused": paused}},
+        {"Id": "sess-web", "DeviceId": "web-1", "DeviceName": "Office", "Client": "Jellyfin Web", "SupportsRemoteControl": true}
+    ])
+    .to_string()
+}
+
+/// The list the worker would send: parsed by the real filter, with this app's device as own.
+fn own_device_sessions(paused: bool) -> Vec<crate::jellyfin::sessions::RemoteSession> {
+    unsafe {
+        UI.get_mut().unwrap().cfg.device_id = OWN_DEVICE.into();
+    }
+    crate::jellyfin::sessions::parse_sessions(&sessions_json(paused), OWN_DEVICE).unwrap()
+}
+
+/// First NSButton under `v` whose action is `action`.
+unsafe fn find_action(v: *mut Object, action: objc::runtime::Sel, depth: u32) -> *mut Object {
+    if v.is_null() || depth > 8 {
+        return nil();
+    }
+    let is: BOOL = msg_send![v, isKindOfClass: class!(NSButton)];
+    if is == YES {
+        let a: objc::runtime::Sel = msg_send![v, action];
+        if a == action {
+            return v;
+        }
+    }
+    let subs: *mut Object = msg_send![v, subviews];
+    let n: NSUInteger = msg_send![subs, count];
+    for i in 0..n {
+        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let f = find_action(c, action, depth + 1);
+        if !f.is_null() {
+            return f;
+        }
+    }
+    nil()
+}
+
+fn s_cast_detail() {
+    take_cmds();
+    handle_main(MainMsg::DetailLoaded(Box::new(detail_view(false))));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let btn = find_action(ui.detail.doc.get(), sel!(detailCast:), 0);
+        state_check("detail: Cast button sits in the Play row", !btn.is_null());
+        act_with(detail_host(), sel!(detailCast:), btn);
+        state_check(
+            "cast: opening the menu asks the server for sessions",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::LoadSessions { silent: false })),
+        );
+        handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+        let (titles, n) = crate::ui::cast::menu_titles();
+        state_check(
+            "cast menu lists the other Jellyfin devices",
+            titles.iter().any(|t| t == "Living Room · Jellyfin Android TV") && titles.iter().any(|t| t == "Office · Jellyfin Web"),
+        );
+        state_check("cast menu excludes this device", !titles.iter().any(|t| t.contains("This Mac")));
+        state_check("cast menu has no AirPlay row off the player", !titles.iter().any(|t| t == "AirPlay"));
+        state_check("cast menu: header plus two devices", n == 3);
+        let picked = crate::ui::cast::choose_row_for_test(0);
+        state_check(
+            "choosing the first device picks the TV session",
+            picked.as_ref().map(|s| s.id.as_str()) == Some("sess-tv"),
+        );
+        let sent = take_cmds();
+        state_check(
+            "choosing a device sends PlayNow for the item from the start",
+            sent.iter().any(|c| matches!(c, UiCmd::CastPlay { session_id, item_id, start_secs }
+                if session_id == "sess-tv" && item_id == "detail-long" && *start_secs == 0.0)),
+        );
+        state_check("remote bar shows after a cast", crate::ui::cast::remote_visible());
+        let r = crate::ui::cast::remote_state();
+        state_check("remote bar names the device", r.as_ref().map(|r| r.device.as_str()) == Some("Living Room · Jellyfin Android TV"));
+    }
+    strip_no_overlap("detail page");
+    audit("cast/detail page with remote bar");
+}
+
+/// The remote strip sits below the library side: the content host stops at its top edge,
+/// so nothing under it is covered.
+fn strip_no_overlap(what: &str) {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let host = frame_of(ui.content_host.get());
+        let bar = frame_of(ui.cast.bar.get());
+        state_check(
+            &format!("{}: library side stops above the remote bar", what),
+            (host.origin.y - STRIP_H).abs() < 0.5 && bar.origin.y + bar.size.h <= host.origin.y + 0.5,
+        );
+        let c: *mut Object = msg_send![ui.cast.bar.get(), superview];
+        let cb = bounds_of(c);
+        state_check(
+            &format!("{}: remote bar is inside the window", what),
+            bar.origin.x >= 0.0 && bar.origin.x + bar.size.w <= cb.size.w + 0.5 && bar.origin.y >= 0.0,
+        );
+        state_check(
+            &format!("{}: remote strip spans the full window width", what),
+            bar.origin.x.abs() < 0.5 && (bar.size.w - cb.size.w).abs() < 0.5,
+        );
+    }
+}
+
+fn s_cast_bar() {
+    take_cmds();
+    // The poll reports the episode playing, 30 s in, of 120 s.
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    let r = crate::ui::cast::remote_state().expect("remote state");
+    state_check("remote: title from the session's now playing", r.title.as_deref() == Some("Show · Pilot"));
+    state_check("remote: position and length from the session", (r.pos_secs - 30.0).abs() < 0.01 && (r.run_secs - 120.0).abs() < 0.01);
+    state_check("remote: playing, not paused", !r.paused && r.online);
+    state_check("remote bar visible", crate::ui::cast::remote_visible());
+    let (bar, play, stop, scrub, close, title) = {
+        let ui = UI.get().unwrap();
+        (ui.cast.bar.get(), ui.cast.play.get(), ui.cast.stop.get(), ui.cast.scrub.get(), ui.cast.close.get(), ui.cast.title.get())
+    };
+    unsafe {
+        let a: objc::runtime::Sel = msg_send![play, action];
+        state_check("remote: play button wired", a == sel!(jrCastPlayPause:));
+        state_check("remote: scrubber enabled with a length", { let e: BOOL = msg_send![scrub, isEnabled]; e == YES });
+        state_check("remote: title shown", read_field(title) == "Show · Pilot");
+        act(sel!(jrCastPlayPause:), nil());
+        state_check(
+            "remote: play/pause sends Pause while playing",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { session_id, action: crate::jellyfin::sessions::RemoteAction::Pause } if session_id == "sess-tv")),
+        );
+        act(sel!(jrCastPlayPause:), nil());
+        state_check(
+            "remote: play/pause sends Unpause after that",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { action: crate::jellyfin::sessions::RemoteAction::Unpause, .. })),
+        );
+        let _: () = msg_send![scrub, setDoubleValue: 0.5f64];
+        act_with(ctl(), sel!(jrCastScrub:), scrub);
+        state_check(
+            "remote: scrub to half sends a seek to 60 s",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { action: crate::jellyfin::sessions::RemoteAction::SeekSecs(s), .. } if (*s - 60.0).abs() < 0.01)),
+        );
+    }
+    audit("cast/remote bar (playing)");
+    unsafe {
+        act(sel!(jrCastStop:), nil());
+        state_check(
+            "remote: stop sends Stop",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { action: crate::jellyfin::sessions::RemoteAction::Stop, .. })),
+        );
+        state_check("remote: stopped shows nothing playing", read_field(title) == "Nothing playing");
+        let _: () = msg_send![stop, setEnabled: YES];
+    }
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(true)));
+    state_check("remote: poll reports a paused session", crate::ui::cast::remote_state().map(|r| r.paused).unwrap_or(false));
+    // The device drops off the server's list: the bar says so rather than showing stale state.
+    let only_web: Vec<_> = own_device_sessions(false).into_iter().filter(|s| s.id != "sess-tv").collect();
+    handle_main(MainMsg::SessionsLoaded(only_web));
+    state_check("remote: offline device says so", unsafe { read_field(title) } == "Not available right now");
+    audit("cast/remote bar (offline)");
+    // Over the library grid: the grid's bottom edge moves up, so no card sits under the strip.
+    crate::ui::detail::hide();
+    strip_no_overlap("library grid");
+    audit("cast/remote bar over library grid");
+    unsafe {
+        act(sel!(jrCastClose:), nil());
+        state_check("remote bar hides on close", !crate::ui::cast::remote_visible() && is_hidden_or_gone(bar));
+        let _ = close;
+    }
+    let host = unsafe { UI.get().unwrap().content_host.get() };
+    state_check("library side returns to full height on close", unsafe { frame_of(host).origin.y.abs() < 0.5 });
+}
+
+fn s_cast_error() {
+    crate::ui::cast::on_error("Couldn't reach Living Room: the session has ended".into());
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("cast error: strip shows in the library", crate::ui::cast::remote_visible());
+        state_check(
+            "cast error: the message is the strip's text",
+            read_field(ui.cast.title.get()).starts_with("Couldn't reach Living Room"),
+        );
+        state_check("cast error: controls step aside", is_hidden(ui.cast.play.get()));
+    }
+    strip_no_overlap("error strip");
+    audit("cast/error strip (library)");
+    unsafe { act(sel!(jrCastClose:), nil()) };
+    state_check("cast error: × dismisses it", !crate::ui::cast::remote_visible());
+    let host = unsafe { UI.get().unwrap().content_host.get() };
+    state_check("cast error: library returns to full height", unsafe { frame_of(host).origin.y.abs() < 0.5 });
+}
+
+fn s_cast_series() {
+    take_cmds();
+    let series = detail_view(true);
+    let series_id = series.id.clone();
+    handle_main(MainMsg::DetailLoaded(Box::new(series)));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let btn = find_action(ui.detail.doc.get(), sel!(detailCast:), 0);
+        state_check("series page: Cast button shown", !btn.is_null());
+        act_with(detail_host(), sel!(detailCast:), btn);
+    }
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    let picked = crate::ui::cast::choose_row_for_test(0);
+    state_check("series cast: picks the TV", picked.map(|s| s.id == "sess-tv").unwrap_or(false));
+    state_check(
+        "series cast sends CastSeries (server resolves Next Up)",
+        take_cmds().iter().any(|c| matches!(c, UiCmd::CastSeries { session_id, series_id: sid } if session_id == "sess-tv" && *sid == series_id)),
+    );
+    crate::ui::detail::hide();
+    unsafe { act(sel!(jrCastClose:), nil()) };
+}
+
+fn is_hidden_or_gone(v: *mut Object) -> bool {
+    v.is_null() || unsafe { is_hidden(v) }
+}
+
+fn s_player_airplay() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let route = ui.pbar.route.get();
+        let is_route: BOOL = msg_send![route, isKindOfClass: class!(AVRoutePickerView)];
+        state_check("player bar: AirPlay route picker built", is_route == YES);
+        let sup: *mut Object = msg_send![route, superview];
+        state_check("player bar: route picker sits in the bar", sup == ui.pbar.bar.get());
+        state_check("player bar: route picker visible", !is_hidden(route));
+        let cast = ui.pbar.cast.get();
+        let a: objc::runtime::Sel = msg_send![cast, action];
+        state_check("player bar: cast button opens the cast menu", a == sel!(showCastMenu:));
+        state_check("player bar: cast button visible", !is_hidden(cast));
+        let cfg: BOOL = msg_send![ui.player.get(), allowsExternalPlayback];
+        state_check("AVPlayer allows external (AirPlay) playback", cfg == YES);
+        state_check("AirPlay card hidden while playing here", is_hidden(ui.ext.view.get()));
+    }
+    unsafe { crate::ui::player::set_external(true) };
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("AirPlay card covers the video while external", !is_hidden(ui.ext.view.get()));
+        state_check("AirPlay card says where it plays", read_field(ui.ext.label.get()).starts_with("Playing on "));
+    }
+    audit("player/airplay card");
+    unsafe { crate::ui::player::set_external(false) };
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("AirPlay card hides when playback comes back", is_hidden(ui.ext.view.get()));
+    }
+}
+
+fn s_player_cast() {
+    handle_main(playback(0.0, 6.0));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        state_check("cast from player: playing", ui.playing.is_some());
+        let cast = ui.pbar.cast.get();
+        take_cmds();
+        act_with(ctl(), sel!(showCastMenu:), cast);
+        state_check(
+            "player cast: asks for sessions",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::LoadSessions { silent: false })),
+        );
+    }
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    let (titles, n) = crate::ui::cast::menu_titles();
+    state_check("player cast menu starts with AirPlay", titles.first().map(String::as_str) == Some("AirPlay"));
+    state_check("player cast menu: AirPlay, header, two devices", n == 5 && titles.len() == 4);
+    state_check("player cast menu lists devices after AirPlay", titles.iter().any(|t| t == "Office · Jellyfin Web"));
+    take_cmds();
+    let _ = crate::ui::cast::choose_row_for_test(0);
+    let sent = take_cmds();
+    state_check(
+        "player cast sends PlayNow for the playing item",
+        sent.iter().any(|c| matches!(c, UiCmd::CastPlay { session_id, item_id, .. } if session_id == "sess-tv" && item_id == "movie-1")),
+    );
+    let (idle, library) = unsafe { (UI.get().unwrap().playing.is_none(), !is_hidden(UI.get().unwrap().content_host.get())) };
+    state_check("casting stops local playback", idle);
+    state_check("library is back after casting", library);
+    state_check("remote bar shows after a player cast", crate::ui::cast::remote_visible());
+    // Video fills the window: the strip steps away (its state is kept) and comes back afterwards.
+    handle_main(playback(0.0, 6.0));
+    state_check("strip hides while video fills the window", !crate::ui::cast::remote_visible());
+    state_check("library side is full height while video plays", unsafe { frame_of(UI.get().unwrap().content_host.get()).origin.y.abs() < 0.5 });
+    handle_main(MainMsg::SessionsLoaded(own_device_sessions(false)));
+    state_check("video: remote session still tracked", crate::ui::cast::remote_state().is_some());
+    unsafe { act(sel!(stopPlayback:), nil()) };
+    state_check("strip returns when video stops", crate::ui::cast::remote_visible());
+    strip_no_overlap("after video");
+    unsafe {
+        act_with(ctl(), sel!(jrCastClose:), nil());
+    }
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -1521,6 +1825,7 @@ fn detail_view(series: bool) -> DetailView {
         overview: Some(OVERVIEW.into()),
         played: false,
         resume: !series,
+        resume_ticks: 0,
         poster_key: Some(poster_key(id)),
         backdrop_key: Some(poster_key(&format!("{}#backdrop", id))),
         people: detail_people(14),

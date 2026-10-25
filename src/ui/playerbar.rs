@@ -56,7 +56,10 @@ pub struct PlayerBar {
     pub speed: Ptr,
     pub pip: Ptr,
     pub full: Ptr,
-    /// Owned Picture in Picture controller for the player layer, created when a video starts.
+    /// AirPlay route picker (AVKit) and the Play On cast menu button.
+    pub route: Ptr,
+    pub cast: Ptr,
+    /// Owned Picture in Picture controller for the player layer, created on first use.
     pub pip_ctl: Ptr,
     /// The AVPlayerLayer the controller was built for (not owned; AVPlayerView owns the layer).
     pub pip_layer: Ptr,
@@ -99,6 +102,8 @@ impl PlayerBar {
             speed: n(),
             pip: n(),
             full: n(),
+            route: n(),
+            cast: n(),
             pip_ctl: n(),
             pip_layer: n(),
             pip_delegate: n(),
@@ -258,11 +263,25 @@ pub(crate) unsafe fn build(ph: *mut Object, b: NSRect) {
     ui.pbar.pip = Ptr(pip);
     let full = ctl_button(bar, "arrow.up.left.and.arrow.down.right", 20., "Full screen", sel!(fullscreen:));
     ui.pbar.full = Ptr(full);
+    let route = route_button(bar);
+    ui.pbar.route = Ptr(route);
+    let cast = ctl_button(bar, "tv", 20., "Cast to a device", sel!(showCastMenu:));
+    ui.pbar.cast = Ptr(cast);
 
     relayout();
 }
 
-unsafe fn ctl_button(bar: *mut Object, name: &str, pt: f64, tip: &str, action: Sel) -> *mut Object {
+/// AirPlay route picker: AVKit's own button, so the system lists AirPlay receivers.
+unsafe fn route_button(bar: *mut Object) -> *mut Object {
+    let v: *mut Object = msg_send![class!(AVRoutePickerView), alloc];
+    let v: *mut Object = msg_send![v, initWithFrame: rect(0., 0., BTN, BTN)];
+    // The icon follows the player's dark appearance; there is no colour setter on macOS.
+    let _: () = msg_send![v, setToolTip: ns("AirPlay")];
+    add_sub(bar, v);
+    autorel(v)
+}
+
+pub(crate) unsafe fn ctl_button(bar: *mut Object, name: &str, pt: f64, tip: &str, action: Sel) -> *mut Object {
     let ui = UI.get().unwrap();
     let b: *mut Object = msg_send![class!(NSButton), buttonWithTitle: ns("") target: ui.ctl.get() action: action];
     let _: () = msg_send![b, setBordered: NO];
@@ -303,16 +322,18 @@ pub(crate) unsafe fn relayout() {
     set_frame(p.back.get(), rect(back_x, cy - BTN / 2., BTN, BTN));
     set_frame(p.fwd.get(), rect(back_x + BTN + SP1, cy - BTN / 2., BTN, BTN));
 
-    // Right cluster, counted from the right edge: slot 0 is full screen, slot 4 is subtitles.
+    // Right cluster, counted from the right edge: slot 0 is full screen, slot 6 is subtitles.
     let slot = |i: f64| w - EDGE - BTN - i * (BTN + SP1);
     set_frame(p.full.get(), rect(slot(0.), cy - BTN / 2., BTN, BTN));
     set_frame(p.pip.get(), rect(slot(1.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.speed.get(), rect(slot(2.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.audio.get(), rect(slot(3.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.subs.get(), rect(slot(4.), cy - BTN / 2., BTN, BTN));
+    set_frame(p.cast.get(), rect(slot(2.), cy - BTN / 2., BTN, BTN));
+    set_frame(p.route.get(), rect(slot(3.), cy - BTN / 2., BTN, BTN));
+    set_frame(p.speed.get(), rect(slot(4.), cy - BTN / 2., BTN, BTN));
+    set_frame(p.audio.get(), rect(slot(5.), cy - BTN / 2., BTN, BTN));
+    set_frame(p.subs.get(), rect(slot(6.), cy - BTN / 2., BTN, BTN));
 
     // Volume sits just left of the subtitle button: mute, then the slider.
-    let vol_x = slot(4.) - SP4 - VOL_W;
+    let vol_x = slot(6.) - SP4 - VOL_W;
     set_frame(p.vol.get(), rect(vol_x, cy - 8., VOL_W, 16.));
     set_frame(p.mute.get(), rect(vol_x - SP1 - BTN, cy - BTN / 2., BTN, BTN));
 }

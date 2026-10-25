@@ -368,6 +368,51 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     c.report_stopped(&item_id, ticks).await;
                 }
             }
+            UiCmd::LoadSessions { silent } => {
+                if let Some(c) = &client {
+                    match c.controllable_sessions().await {
+                        Ok(v) => {
+                            let _ = main_tx.send(MainMsg::SessionsLoaded(v));
+                        }
+                        Err(e) => {
+                            if !silent {
+                                let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                            }
+                        }
+                    }
+                }
+            }
+            UiCmd::CastPlay { session_id, item_id, start_secs } => {
+                if let Some(c) = &client {
+                    if let Err(e) = c.play_on_session(&session_id, &item_id, start_secs).await {
+                        let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                    }
+                }
+            }
+            UiCmd::CastSeries { session_id, series_id } => {
+                if let Some(c) = &client {
+                    let target = match c.series_next_up(&series_id).await {
+                        Ok(Some(ep)) => Ok(Some(ep.id)),
+                        Ok(None) => first_episode_id(c, &series_id).await,
+                        Err(e) => Err(e),
+                    };
+                    let result = match target {
+                        Ok(Some(id)) => c.play_on_session(&session_id, &id, 0.0).await,
+                        Ok(None) => Err(crate::jellyfin::client::JFError::Api(404, "no episodes to play".into())),
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = result {
+                        let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                    }
+                }
+            }
+            UiCmd::CastControl { session_id, action } => {
+                if let Some(c) = &client {
+                    if let Err(e) = c.remote_control(&session_id, action).await {
+                        let _ = main_tx.send(MainMsg::CastError(format!("{}", e)));
+                    }
+                }
+            }
             UiCmd::MarkPlayed { item_id, played } => {
                 if let Some(c) = &client {
                     if let Err(e) = c.set_played(&item_id, played).await {
@@ -757,6 +802,17 @@ async fn save_seerr(
     }
 }
 
+/// The first episode of a series' first season, for Play On when nothing is Next Up.
+async fn first_episode_id(
+    c: &JellyfinClient,
+    series_id: &str,
+) -> Result<Option<String>, crate::jellyfin::client::JFError> {
+    let seasons = c.seasons(series_id).await?;
+    let Some(season) = seasons.first() else { return Ok(None) };
+    let eps = c.season_episodes(series_id, &season.id).await?;
+    Ok(eps.first().map(|e| e.id.clone()))
+}
+
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1023,6 +1079,7 @@ pub(crate) fn plan_detail(c: &JellyfinClient, d: &DetailItem) -> (DetailView, Ve
         overview: d.overview.clone().filter(|o| !o.trim().is_empty()),
         played,
         resume: !played && position > 0,
+        resume_ticks: if played { 0 } else { position },
         poster_key,
         backdrop_key,
         people,
@@ -1494,6 +1551,18 @@ mod tests {
             }
             ("GET", ["Items", _, "Images", _]) => Resp { status: 200, body: vec![0x89, b'P', b'N', b'G', 1, 2, 3] },
             ("POST", ["Sessions", "Playing", ..]) => status(204),
+            ("GET", ["Sessions"]) => json(serde_json::json!([
+                {"Id": "sess-mine", "DeviceId": "dev-test", "DeviceName": "This Mac", "Client": "Jellyfast", "SupportsRemoteControl": true},
+                {"Id": "sess-tv", "DeviceId": "tv-1", "DeviceName": "Living Room", "Client": "Jellyfin Android TV",
+                 "SupportsRemoteControl": true,
+                 "NowPlayingItem": {"Id": "ep-9", "Name": "Pilot", "SeriesName": "Show", "RunTimeTicks": 27_000_000_000i64},
+                 "PlayState": {"PositionTicks": 1_200_000_000i64, "IsPaused": true}},
+                {"Id": "sess-web", "DeviceId": "web-1", "DeviceName": "Office", "Client": "Jellyfin Web", "SupportsRemoteControl": true},
+                {"Id": "sess-locked", "DeviceId": "x-1", "DeviceName": "Kiosk", "Client": "Other", "SupportsRemoteControl": false},
+            ])),
+            ("POST", ["Sessions", sid, "Playing"]) | ("POST", ["Sessions", sid, "Playing", _]) => {
+                if *sid == "sess-gone" { status(404) } else { status(204) }
+            }
             ("POST", ["Users", _, "PlayedItems", id]) | ("DELETE", ["Users", _, "PlayedItems", id]) => {
                 if *id == "boom" {
                     status(500)
@@ -2677,6 +2746,86 @@ mod tests {
         assert_eq!(m.find("POST", "/Users/u1/PlayedItems/i1").len(), 1);
         assert_eq!(m.find("DELETE", "/Users/u1/PlayedItems/i1").len(), 1);
         assert_eq!(m.find("POST", "/Users/u1/PlayedItems/boom").len(), 1);
+    }
+
+    // ------------------------------------------------------------ play on
+    #[tokio::test]
+    async fn sessions_list_excludes_own_device_and_uncontrollable() {
+        use crate::app::messages::MainMsg;
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::LoadSessions { silent: false });
+        match h.next().await {
+            MainMsg::SessionsLoaded(v) => {
+                let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
+                assert_eq!(ids, vec!["sess-tv", "sess-web"]);
+                assert_eq!(v[0].label(), "Living Room · Jellyfin Android TV");
+                assert_eq!(v[0].now_playing.as_ref().unwrap().title, "Show · Pilot");
+                assert!(v[1].now_playing.is_none());
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+        let q = m.find("GET", "/Sessions");
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].qp("ControllableByUserId"), Some("u1"));
+        assert_eq!(q[0].headers.get("x-emby-token").map(String::as_str), Some("tok123"));
+        assert!(q[0].headers.get("authorization").map(|a| a.contains("DeviceId=\"dev-test\"")).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn play_on_and_remote_commands_hit_session_routes() {
+        use crate::app::messages::MainMsg;
+        use crate::jellyfin::sessions::RemoteAction;
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::CastPlay { session_id: "sess-tv".into(), item_id: "m1".into(), start_secs: 61.0 });
+        h.send(UiCmd::CastControl { session_id: "sess-tv".into(), action: RemoteAction::Pause });
+        h.send(UiCmd::CastControl { session_id: "sess-tv".into(), action: RemoteAction::Unpause });
+        h.send(UiCmd::CastControl { session_id: "sess-tv".into(), action: RemoteAction::SeekSecs(30.0) });
+        h.send(UiCmd::CastControl { session_id: "sess-tv".into(), action: RemoteAction::Stop });
+        h.send(UiCmd::CastControl { session_id: "sess-gone".into(), action: RemoteAction::Stop });
+        let rest = h.drain_via_probe().await;
+        assert_eq!(rest.len(), 1, "only the gone session fails");
+        assert!(matches!(&rest[0], MainMsg::CastError(_)));
+
+        let play: Vec<_> = m.reqs().into_iter().filter(|r| r.method == "POST" && r.path == "/Sessions/sess-tv/Playing").collect();
+        assert_eq!(play.len(), 1);
+        assert_eq!(play[0].qp("playCommand"), Some("PlayNow"));
+        assert_eq!(play[0].qp("itemIds"), Some("m1"));
+        assert_eq!(play[0].qp("startPositionTicks"), Some("610000000"));
+        assert_eq!(play[0].headers.get("x-emby-token").map(String::as_str), Some("tok123"));
+
+        let cmd = |name: &str| m.reqs().into_iter().filter(|r| r.method == "POST" && r.path == format!("/Sessions/sess-tv/Playing/{}", name)).count();
+        assert_eq!(cmd("Pause"), 1);
+        assert_eq!(cmd("Unpause"), 1);
+        assert_eq!(cmd("Stop"), 1);
+        let seek: Vec<_> = m.reqs().into_iter().filter(|r| r.path == "/Sessions/sess-tv/Playing/Seek").collect();
+        assert_eq!(seek.len(), 1);
+        assert_eq!(seek[0].qp("seekPositionTicks"), Some("300000000"));
+        assert_eq!(m.find("POST", "/Sessions/sess-gone/Playing/Stop").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn play_on_series_uses_next_up_then_first_episode() {
+        use crate::app::messages::MainMsg;
+        let (_e, m, mut h) = connected().await;
+        // sr1 has a Next Up episode; sr4 has none, so the first episode of its first season is used;
+        // noseasons has nothing to play.
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "sr1".into() });
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "sr4".into() });
+        h.send(UiCmd::CastSeries { session_id: "sess-tv".into(), series_id: "noseasons".into() });
+        let rest = h.drain_via_probe().await;
+        assert_eq!(rest.len(), 1, "only the empty series fails");
+        assert!(matches!(&rest[0], MainMsg::CastError(_)));
+        let plays: Vec<_> = m
+            .reqs()
+            .into_iter()
+            .filter(|r| r.method == "POST" && r.path == "/Sessions/sess-tv/Playing")
+            .collect();
+        assert_eq!(plays.len(), 2);
+        assert_eq!(plays[0].qp("playCommand"), Some("PlayNow"));
+        assert_eq!(plays[0].qp("itemIds"), Some("nx1"));
+        assert_eq!(plays[0].qp("startPositionTicks"), Some("0"));
+        assert!(plays[1].qp("itemIds").map(|v| !v.is_empty()).unwrap_or(false));
+        assert_eq!(m.find("GET", "/Shows/sr4/Episodes").len(), 1);
     }
 
     // ------------------------------------------------- settings / sign-out

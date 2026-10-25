@@ -11,3 +11,4 @@ pub mod home;
 pub mod onboarding;
 pub mod playerbar;
 pub mod palettes;
+pub mod cast;

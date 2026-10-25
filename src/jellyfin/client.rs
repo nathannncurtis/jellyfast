@@ -2,6 +2,7 @@ use crate::*;
 
 use super::urls as u;
 use super::models::*;
+use super::sessions::{parse_sessions, play_now_path, playstate_path, sessions_path, RemoteAction, RemoteSession};
 use crate::jellyfin::urls::enc;
 
 /// `Fields` requested for the item detail page.
@@ -581,6 +582,59 @@ impl JellyfinClient {
             .send()
             .await;
     }
+    /// This app's device id. Its own session is never offered for Play On.
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Other devices this user can control: `GET /Sessions?ControllableByUserId=`.
+    pub async fn controllable_sessions(&self) -> Result<Vec<RemoteSession>, JFError> {
+        let (path, pairs) = sessions_path(&self.user_id);
+        let r = self
+            .http
+            .get(format!("{}{}", self.base, path))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .query(&pairs)
+            .send()
+            .await
+            .map_err(map_err)?;
+        let r = check(r).await?;
+        let body = r.text().await.map_err(map_err)?;
+        parse_sessions(&body, &self.device_id).map_err(JFError::Parse)
+    }
+
+    /// Play On: start `item_id` on another session from `start_secs` (`PlayNow`).
+    /// Read-only mode sends nothing.
+    pub async fn play_on_session(&self, session_id: &str, item_id: &str, start_secs: f64) -> Result<(), JFError> {
+        if read_only() {
+            return Ok(());
+        }
+        self.post_session(&play_now_path(session_id, item_id, start_secs)).await
+    }
+
+    /// Remote playstate command (pause, unpause, stop, seek) for another session.
+    /// Read-only mode sends nothing.
+    pub async fn remote_control(&self, session_id: &str, action: RemoteAction) -> Result<(), JFError> {
+        if read_only() {
+            return Ok(());
+        }
+        self.post_session(&playstate_path(session_id, action)).await
+    }
+
+    async fn post_session(&self, path: &str) -> Result<(), JFError> {
+        let r = self
+            .http
+            .post(format!("{}{}", self.base, path))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .send()
+            .await
+            .map_err(map_err)?;
+        check(r).await?;
+        Ok(())
+    }
+
     pub async fn set_played(&self, item_id: &str, played: bool) -> Result<(), JFError> {
         if read_only() {
             return Ok(());

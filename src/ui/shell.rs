@@ -256,8 +256,16 @@ pub(crate) unsafe fn build_window_and_ui() {
     // about:blank won't play; we replace the item on every real playback.
     ui.player = Ptr::retained(player);
     let _: () = msg_send![avv, setPlayer: player];
+    // AirPlay: the player may send video to an AirPlay receiver. While an external display is
+    // mirrored, keep playback here (NO), so a plugged-in monitor does not take the video.
+    let _: () = msg_send![player, setAllowsExternalPlayback: YES];
+    let _: () = msg_send![player, setUsesExternalPlaybackWhileExternalScreenIsActive: NO];
+    let _: () = msg_send![player, addObserver: ui.ctl.get()
+        forKeyPath: ns("externalPlaybackActive") options: 1usize context: nil()];
     let _: () = msg_send![player, setVolume: ui.cfg.volume.clamp(0.0, 1.0) as f32];
     crate::ui::player::build_player_chrome(ph, avv, b);
+    // Play On remote bar: above the player and the library, so it is added last.
+    crate::ui::cast::build(content, b);
 
     // --- Login card ---
     let card_w = 380.;
