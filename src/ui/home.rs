@@ -3,10 +3,10 @@
 //! cells, so hover lift, progress and posters behave the same. Selecting Home swaps
 //! the library grid for this scroll view; any library load swaps it back.
 #![allow(unsafe_code)]
-use crate::app::messages::{HomeRow, HomeRowKind, UiCmd};
+use crate::app::messages::{HomeRow, UiCmd};
 use crate::jellyfin::models::ListItem;
 use crate::platform::appkit::*;
-use crate::ui::library::{build_cell, free_cell_data, layout_cell, Metrics};
+use crate::ui::library::{build_cell_keyed, free_cell_data, layout_cell, poster_key, Metrics};
 use crate::ui::shell::{header_layout, hide_state, set_count, show_state, sidebar_refresh_selection};
 use crate::ui::theme::*;
 use objc::class;
@@ -26,6 +26,12 @@ const CARD_GAP: f64 = SP4;
 const STRIP_PAD: f64 = SP3;
 const ROW_TITLE_H: f64 = 24.;
 const ROW_GAP: f64 = SP6;
+
+/// Artwork key for a wide card. Separate from the poster key, because the same
+/// item can appear as a wide card and as a poster (Thumb/Backdrop vs Primary).
+pub fn wide_key(item_id: &str) -> u64 {
+    poster_key(&format!("wide:{item_id}"))
+}
 
 /// The cells of one laid-out row (kept so poster arrivals can update them).
 pub struct HomeRowView {
@@ -115,7 +121,7 @@ unsafe fn rebuild() {
     tx_begin_instant();
     let mut y = SP2;
     for r in ui.home_rows.iter() {
-        let wide = matches!(r.kind, HomeRowKind::ContinueWatching | HomeRowKind::NextUp);
+        let wide = r.kind.is_wide();
         let (tile_w, ratio) = if wide { (WIDE_W, WIDE_RATIO) } else { (POSTER_W, POSTER_ASPECT) };
         let poster_h = (tile_w * ratio).round();
         let m = Metrics { cols: 1, tile_w, poster_h, cell_h: poster_h + CELL_TEXT_H };
@@ -145,7 +151,8 @@ unsafe fn rebuild() {
         for (i, it) in r.items.iter().enumerate() {
             let tag = ui.home.flat.len();
             ui.home.flat.push(it.clone());
-            let c = build_cell(cards, it, tag as NSInteger, sel!(homeItemClicked:), scale, &m);
+            let key = if wide { wide_key(&it.id) } else { poster_key(&it.id) };
+            let c = build_cell_keyed(cards, it, tag as NSInteger, sel!(homeItemClicked:), scale, &m, key);
             set_frame(c.container, rect(EDGE + i as f64 * (tile_w + CARD_GAP), STRIP_PAD, tile_w, m.cell_h));
             layout_cell(&c, &m);
             cells.push(c);

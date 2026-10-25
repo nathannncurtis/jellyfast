@@ -371,10 +371,9 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     let (dir, http) = (poster_dir.clone(), http_poster.clone());
                     tokio::spawn(async move {
                         let rows = crate::app::home::load_home(&c).await;
-                        // Poster results arrive as PosterReady and fill cells built from the cache.
-                        let items: Vec<crate::jellyfin::models::ListItem> = rows.rows.iter().flat_map(|r| r.items.iter().cloned()).collect();
-                        fetch_posters(&c, &tx, &items, &dir, http.as_ref()).await;
-                        let _ = tx.send(MainMsg::HomeLoaded(rows));
+                        // Rows first, so Home is usable at once; artwork follows as PosterReady.
+                        let _ = tx.send(MainMsg::HomeLoaded(rows.clone()));
+                        fetch_home_art(&c, &tx, &rows.rows, &dir, http.as_ref());
                     });
                 }
             }
@@ -673,40 +672,93 @@ pub(crate) async fn fetch_posters(
     poster_dir: &std::path::Path,
     http: Option<&reqwest::Client>,
 ) {
+    let jobs = items
+        .iter()
+        .take(200)
+        .filter(|it| it.has_image())
+        .map(|it| ArtJob {
+            key: sys_key(&it.id),
+            url: crate::jellyfin::urls::build_image_url(&c.base, &it.id, &c.token, 400),
+        })
+        .collect();
+    spawn_art(main_tx, poster_dir, http, jobs);
+}
+
+/// One image to fetch: its UI key (also the cache file name) and its URL.
+pub(crate) struct ArtJob {
+    pub key: u64,
+    pub url: String,
+}
+
+/// Fetch Home artwork after `HomeLoaded` has been sent. Poster rows get Primary
+/// art; wide rows (Continue Watching, Next Up) get Thumb, else Backdrop, else
+/// Primary. Each arrives as `PosterReady` under the key its card was built with.
+pub(crate) fn fetch_home_art(
+    c: &JellyfinClient,
+    main_tx: &UnboundedSender<MainMsg>,
+    rows: &[crate::app::messages::HomeRow],
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    let mut jobs = Vec::new();
+    for row in rows {
+        let wide = row.kind.is_wide();
+        for it in &row.items {
+            if jobs.len() >= 200 {
+                break;
+            }
+            let job = if wide {
+                it.wide_art_kind().map(|kind| ArtJob {
+                    key: crate::ui::home::wide_key(&it.id),
+                    url: crate::jellyfin::urls::build_typed_image_url(&c.base, &it.id, kind, &c.token, 600),
+                })
+            } else {
+                it.has_image().then(|| ArtJob {
+                    key: sys_key(&it.id),
+                    url: crate::jellyfin::urls::build_image_url(&c.base, &it.id, &c.token, 400),
+                })
+            };
+            // Cards repeat across rows (an episode in Continue Watching and Next Up).
+            if let Some(job) = job.filter(|j| seen.insert(j.key)) {
+                jobs.push(job);
+            }
+        }
+    }
+    spawn_art(main_tx, poster_dir, http, jobs);
+}
+
+/// Fetch each job on its own task, reading the disk cache first. Returns at once.
+fn spawn_art(
+    main_tx: &UnboundedSender<MainMsg>,
+    poster_dir: &std::path::Path,
+    http: Option<&reqwest::Client>,
+    jobs: Vec<ArtJob>,
+) {
     let Some(http) = http.cloned() else {
         return;
     };
-    let client = c.clone();
     let tx = main_tx.clone();
     let dir = poster_dir.to_path_buf();
-    // Spawn a bounded set of concurrent poster fetches (first 200 items).
-    for it in items.iter().take(200) {
-        if !it.has_image() {
-            continue;
-        }
-        let client = client.clone();
+    for job in jobs {
         let tx = tx.clone();
         let dir = dir.clone();
-        let id = it.id.clone();
         let http = http.clone();
         tokio::spawn(async move {
-            let key = sys_key(&id);
+            let key = job.key;
             let path = dir.join(format!("{:016x}.img", key));
             let bytes = match tokio::fs::read(&path).await {
                 Ok(b) => Some(b),
-                Err(_) => {
-                    let url = crate::jellyfin::urls::build_image_url(&client.base, &id, &client.token, 400);
-                    match http.get(url).send().await {
-                        Ok(r) if r.status().is_success() => match r.bytes().await {
-                            Ok(b) => {
-                                let _ = tokio::fs::write(&path, &b).await;
-                                Some(b.to_vec())
-                            }
-                            Err(_) => None,
-                        },
-                        _ => None,
-                    }
-                }
+                Err(_) => match http.get(&job.url).send().await {
+                    Ok(r) if r.status().is_success() => match r.bytes().await {
+                        Ok(b) => {
+                            let _ = tokio::fs::write(&path, &b).await;
+                            Some(b.to_vec())
+                        }
+                        Err(_) => None,
+                    },
+                    _ => None,
+                },
             };
             if let Some(b) = bytes {
                 let _ = tx.send(MainMsg::PosterReady { key, bytes: b });

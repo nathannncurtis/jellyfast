@@ -101,10 +101,19 @@ pub fn build_hls_url(
 }
 
 pub fn build_image_url(base: &str, item_id: &str, token: &str, max_w: u32) -> String {
+    build_typed_image_url(base, item_id, "Primary", token, max_w)
+}
+
+/// Image URL for a given Jellyfin image type (`Primary`, `Thumb`, `Backdrop`).
+pub fn build_typed_image_url(base: &str, item_id: &str, kind: &str, token: &str, max_w: u32) -> String {
+    // Backdrops are a list, so they take an explicit index; the others are single.
+    let index = if kind == "Backdrop" { "/0" } else { "" };
     format!(
-        "{}/Items/{}/Images/Primary?{}",
+        "{}/Items/{}/Images/{}{}?{}",
         base,
         item_id,
+        kind,
+        index,
         qs(&[
             ("maxWidth", max_w.to_string()),
             ("quality", "85".into()),

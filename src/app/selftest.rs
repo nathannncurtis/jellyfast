@@ -101,7 +101,7 @@ fn steps() -> Vec<Step> {
         ("connect error", s_connect_error, 50),
         ("connected (views + livetv)", s_connected, 100),
         ("connected again (sidebar rebuild)", s_connected, 100),
-        ("connected: remembered library wins", s_connected_library, 100),
+        ("connected: Home wins over a remembered library", s_connected_library, 100),
         ("items: movies", s_items_movies, 100),
         ("worker->UI path (WORKER_TX)", s_worker_path, 400),
         ("worker->UI path check", s_worker_check, 50),
@@ -200,7 +200,8 @@ fn item(id: &str, name: &str, ty: &str, played: bool, pos: i64, run: i64) -> Lis
         episode: Some(2),
         user_data: Some(UserData { played, position_ticks: pos }),
         aspect: Some(0.667),
-        image_tags: Some(ImageTags { primary: Some("tag".into()) }),
+        image_tags: Some(ImageTags { primary: Some("tag".into()), thumb: None }),
+        backdrop_tags: None,
         run_time_ticks: Some(run),
     }
 }
@@ -647,6 +648,7 @@ fn s_connected() {
         state_check("home scroll shown, library grid hidden", visible(ui.home.scroll.get()) && !visible(ui.lib_scroll.get()));
         state_check("home scroll shown, library grid hidden", !visible(ui.home.scroll.get()) == false && !visible(ui.lib_scroll.get()));
         state_check("Home sidebar row selected on launch", row_selected(ui.home.row.get()));
+        state_check("no library row selected on launch", selected_rows() == 0);
         state_check("window is opaque", { let o: BOOL = msg_send![ui.win.get(), isOpaque]; o == YES });
         state_check("library canvas draws background", { let o: BOOL = msg_send![ui.lib_scroll.get(), drawsBackground]; o == YES });
         state_check("login backdrop hidden once connected", { let o: BOOL = msg_send![ui.bgfx.get(), isHidden]; o == YES });
@@ -656,6 +658,7 @@ fn s_connected() {
     }
 }
 fn s_connected_library() {
+    // A library was the last place, but login still lands on Home.
     unsafe { UI.get_mut().unwrap().cfg.last_view = Some("v2".into()) };
     handle_main(MainMsg::Connected {
         user_name: "tester".into(),
@@ -670,12 +673,12 @@ fn s_connected_library() {
     });
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("remembered library is selected", ui.mode_stack.len() == 1 && ui.mode_stack[0].0 == "v2");
-        state_check("remembered library: selected_view set", ui.selected_view == Some(1));
-        state_check("remembered library: Home not active", !ui.home.active);
+        state_check("login over remembered library: Home active", ui.home.active);
+        state_check("login over remembered library: no library selected", ui.selected_view.is_none());
+        state_check("login over remembered library: Home row selected", row_selected(ui.home.row.get()));
         let cmds = take_cmds();
-        state_check("remembered library: LoadView sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadView { view_id, .. } if view_id == "v2")));
-        state_check("remembered library: LoadHome still sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
+        state_check("login over remembered library: no LoadView", !cmds.iter().any(|c| matches!(c, UiCmd::LoadView { .. })));
+        state_check("login over remembered library: LoadHome sent", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
     }
 }
 fn s_worker_path() {
@@ -843,7 +846,6 @@ fn s_sidebar_click() {
             "sidebar stack leaves the title bar band free",
             sf.origin.y + sf.size.h <= sb.size.h - crate::ui::theme::TITLEBAR_H + 0.5,
         );
-        state_check("one row selected after auto-select", selected_rows() == 1);
         for (i, _) in rows.iter().enumerate() {
             act(sel!(viewSelected:), tagged_button(i as isize));
             state_check("exactly one row selected after click", selected_rows() == 1);
@@ -1115,9 +1117,11 @@ fn s_home_fake() {
         state_check("home: recently added uses poster cards", frame_of(rec.container).size.w == crate::ui::home::POSTER_W);
         state_check("home: scroll visible while rows are on screen", visible(ui.home.scroll.get()));
     }
-    // Posters for two cards: one wide, one poster.
+    // Art for two cards: one wide (its own key), one poster.
     let png = image_bytes(0, 200, 300, 90);
-    handle_main(MainMsg::PosterReady { key: poster_key("Episode-0"), bytes: png.clone() });
+    state_check("home: wide card uses the wide art key", unsafe { UI.get().unwrap().home.views[0].cells[0].key } == crate::ui::home::wide_key("Episode-0"));
+    state_check("home: wide and poster keys differ for one item", crate::ui::home::wide_key("Movie-0") != poster_key("Movie-0"));
+    handle_main(MainMsg::PosterReady { key: crate::ui::home::wide_key("Episode-0"), bytes: png.clone() });
     handle_main(MainMsg::PosterReady { key: poster_key("Movie-0"), bytes: png });
     unsafe {
         let ui = UI.get().unwrap();

@@ -143,6 +143,13 @@ pub enum HomeRowKind {
     Recommended,
 }
 
+impl HomeRowKind {
+    /// Wide (16:9) cards with a progress bar; every other row uses posters.
+    pub fn is_wide(self) -> bool {
+        matches!(self, HomeRowKind::ContinueWatching | HomeRowKind::NextUp)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HomeRow {
     pub title: String,

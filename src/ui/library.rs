@@ -128,6 +128,20 @@ pub(crate) unsafe fn build_cell(
     scale: f64,
     m: &Metrics,
 ) -> CellHandle {
+    build_cell_keyed(grid, it, tag, click, scale, m, poster_key(&it.id))
+}
+
+/// Like `build_cell`, but the artwork is looked up and filled under `key`
+/// (Home's wide cards use their own key, so they never show poster art).
+pub(crate) unsafe fn build_cell_keyed(
+    grid: *mut Object,
+    it: &ListItem,
+    tag: NSInteger,
+    click: Sel,
+    scale: f64,
+    m: &Metrics,
+    key: u64,
+) -> CellHandle {
     let ui = UI.get_mut().unwrap();
     let cell_cls = *CELL_CLASS.get().unwrap();
     let container: *mut Object = msg_send![cell_cls, alloc];
@@ -259,7 +273,6 @@ pub(crate) unsafe fn build_cell(
     autorel(ta);
     let _: () = msg_send![grid, addSubview: container];
     autorel(container);
-    let key = poster_key(&it.id);
     let mut handle = CellHandle {
         container,
         art,
