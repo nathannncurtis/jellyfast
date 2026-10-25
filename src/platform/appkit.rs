@@ -401,6 +401,8 @@ pub struct Ui {
     pub pbar: crate::ui::playerbar::PlayerBar,
     /// Skip-segment button and Up Next card (see ui::skip).
     pub skip: crate::ui::skip::SkipUi,
+    /// Subtitle overlay above the video (see ui::subtitles).
+    pub subs: crate::ui::subtitles::SubtitleUi,
     /// Play On: cast menu state and the remote-control bar.
     pub cast: crate::ui::cast::CastUi,
     /// AirPlay card shown over the video while it plays on another screen.
@@ -1357,6 +1359,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         now: crate::ui::nowbar::NowBar::new(),
         pbar: crate::ui::playerbar::PlayerBar::new(),
         skip: crate::ui::skip::SkipUi::new(),
+        subs: crate::ui::subtitles::SubtitleUi::new(),
         cast: crate::ui::cast::CastUi::new(),
         ext: crate::ui::player::ExtUi::new(),
         tint_cache: HashMap::new(),

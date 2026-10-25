@@ -24,6 +24,7 @@ const INFO_TOP: f64 = TOAST_TOP + 32. + SP2;
 pub(crate) unsafe fn register_player_classes() {
     let mut d = ClassDecl::new("JRPlayerHost", class!(NSView)).unwrap();
     d.add_method(sel!(mouseMoved:), host_mouse_moved as extern "C" fn(&mut Object, Sel, *mut Object));
+    crate::ui::subtitles::register_classes();
     PLAYER_HOST_CLASS.set(d.register()).ok();
     let mut g = ClassDecl::new("JRGradientView", class!(NSView)).unwrap();
     g.add_method(sel!(makeBackingLayer), gradient_layer as extern "C" fn(&mut Object, Sel) -> *mut Object);
@@ -149,6 +150,8 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     let _: () = msg_send![avv, setControlsStyle: 0isize];
     let _: () = msg_send![avv, setUpdatesNowPlayingInfoCenter: YES];
 
+    // Subtitle overlay first, so the AirPlay card, the bars and the skip stack stay above it.
+    crate::ui::subtitles::build(ph);
     build_external(ph, b);
 
     // ---- top bar (gradient) ----
@@ -284,6 +287,7 @@ pub(crate) unsafe fn show_bars() {
         ui.bar_shown = true;
         fade(ui.top_bar.get(), 1.0, M_FAST);
         fade_transport(1.0, M_FAST);
+        crate::ui::subtitles::update();
     }
 }
 /// The bottom transport bar fades together with the top bar.
@@ -307,6 +311,7 @@ pub(crate) unsafe fn show_bars_instant() {
     if !ui.pbar.bar.get().is_null() {
         let _: () = msg_send![ui.pbar.bar.get(), setAlphaValue: 1.0f64];
     }
+    crate::ui::subtitles::update();
 }
 pub(crate) unsafe fn hide_bars_if_idle() {
     let ui = UI.get_mut().unwrap();
@@ -324,6 +329,7 @@ pub(crate) unsafe fn hide_bars_if_idle() {
             ui.bar_shown = false;
             fade(ui.top_bar.get(), 0.0, M_STD);
             fade_transport(0.0, M_STD);
+            crate::ui::subtitles::update();
             let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: YES];
         }
     }
