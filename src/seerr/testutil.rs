@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use serde_json::json;
 
 #[derive(Clone, Debug)]
 pub struct Req {
@@ -143,16 +144,24 @@ pub async fn start(handler: impl Fn(&Req) -> Resp + Send + Sync + 'static) -> Mo
     MockSeerr { addr, log, task }
 }
 
+/// One page of a list endpoint, echoing the requested `page`.
+fn page(query: &HashMap<String, String>, results: serde_json::Value) -> Resp {
+    let page: u32 = query.get("page").and_then(|p| p.parse().ok()).unwrap_or(1);
+    Resp::json(200, json!({"page": page, "totalPages": 5, "totalResults": 100, "results": results}))
+}
+
 /// A well-behaved fake Seerr. API key "good-key". Special request ids:
 /// 999 -> 409, 998 -> 500 "already requested" message, 997 -> 403, 996 -> 500 boom.
 pub fn default_route(r: &Req) -> Resp {
     if r.method == "GET" && r.path == "/api/v1/status" {
         return Resp::json(200, serde_json::json!({"version": "2.7.2", "commitTag": "x", "updateAvailable": false}));
     }
-    // Seerr's image proxy needs no credentials.
-    if let Some(p) = r.path.strip_prefix("/imageproxy/tmdb/t/p/w92") {
+    // Seerr's image proxy needs no credentials; every TMDB size it serves is accepted.
+    if let Some(rest) = r.path.strip_prefix("/imageproxy/tmdb/t/p/") {
+        let (size, p) = rest.find('/').map(|i| rest.split_at(i)).unwrap_or((rest, ""));
+        let known = ["w92", "w185", "w342", "w500", "w780", "w1280"].contains(&size);
         return match p {
-            "/inc.jpg" | "/got.jpg" => Resp::text(200, &format!("IMG{}", p)),
+            "/inc.jpg" | "/got.jpg" if known => Resp::text(200, &format!("IMG{}", p)),
             _ => Resp::text(404, "nope"),
         };
     }
@@ -182,7 +191,7 @@ pub fn default_route(r: &Req) -> Resp {
         ("POST", "/api/v1/request") => {
             let b: serde_json::Value = serde_json::from_str(&r.body).unwrap_or_default();
             let id = b["mediaId"].as_u64().unwrap_or(0);
-            if b["mediaType"] == "tv" && b["seasons"] != "all" {
+            if b["mediaType"] == "tv" && !b["seasons"].is_array() {
                 return Resp::json(400, serde_json::json!({"message": "seasons required"}));
             }
             match id {
@@ -203,8 +212,45 @@ pub fn default_route(r: &Req) -> Resp {
                 {"id": 5, "status": 3, "type": "movie", "media": {"tmdbId": 555, "mediaType": "movie", "status": 1}}
             ]}),
         ),
-        ("GET", "/api/v1/movie/27205") => Resp::json(200, serde_json::json!({"id": 27205, "title": "Inception", "releaseDate": "2010-07-16", "posterPath": "/inc.jpg"})),
-        ("GET", "/api/v1/tv/1399") => Resp::json(200, serde_json::json!({"id": 1399, "name": "Game of Thrones", "firstAirDate": "2011-04-17", "posterPath": "/got.jpg"})),
+        ("GET", "/api/v1/movie/27205") => Resp::json(200, serde_json::json!({
+            "id": 27205, "title": "Inception", "releaseDate": "2010-07-16", "posterPath": "/inc.jpg",
+            "backdropPath": "/bk.jpg", "runtime": 148, "voteAverage": 8.4, "tagline": "Your mind is the scene of the crime.",
+            "genres": [{"id": 28, "name": "Action"}, {"id": 878, "name": "Science Fiction"}],
+            "credits": {"cast": [{"id": 6193, "name": "Leonardo DiCaprio", "character": "Cobb", "profilePath": "/l.jpg"}]},
+            "relatedVideos": [{"key": "yt-inception", "name": "Trailer", "site": "YouTube", "type": "Trailer"}],
+            "mediaInfo": {"status": 5, "requests": []}
+        })),
+        ("GET", "/api/v1/tv/1399") => Resp::json(200, serde_json::json!({
+            "id": 1399, "name": "Game of Thrones", "firstAirDate": "2011-04-17", "posterPath": "/got.jpg",
+            "episodeRunTime": [0, 57], "tagline": "Winter is coming.", "voteAverage": 8.3,
+            "genres": [{"id": 18, "name": "Drama"}],
+            "seasons": [
+                {"id": 100, "seasonNumber": 0, "name": "Specials", "episodeCount": 2},
+                {"id": 101, "seasonNumber": 1, "name": "Season 1", "episodeCount": 10},
+                {"id": 102, "seasonNumber": 2, "name": "Season 2", "episodeCount": 10}
+            ],
+            "mediaInfo": {"status": 4, "requests": [{"status": 2}],
+                "seasons": [{"seasonNumber": 1, "status": 5}, {"seasonNumber": 2, "status": 2}]}
+        })),
+        ("GET", "/api/v1/discover/trending") => page(&r.query, json!([
+            {"id": 27205, "mediaType": "movie", "title": "Inception", "releaseDate": "2010-07-16", "posterPath": "/inc.jpg",
+             "backdropPath": "/bk.jpg", "voteAverage": 8.4, "genreIds": [28, 878]},
+            {"id": 1399, "mediaType": "tv", "name": "Game of Thrones", "firstAirDate": "2011-04-17", "posterPath": "/got.jpg"},
+            {"id": 31, "mediaType": "person", "name": "Leonardo DiCaprio", "profilePath": "/l.jpg"}
+        ])),
+        // Movie and tv lists omit mediaType; the endpoint supplies it.
+        ("GET", "/api/v1/discover/movies") => page(&r.query, json!([{"id": 603, "title": "The Matrix", "releaseDate": "1999-03-31"}])),
+        ("GET", "/api/v1/discover/movies/upcoming") => page(&r.query, json!([{"id": 157336, "title": "Interstellar", "releaseDate": "2014-11-05"}])),
+        ("GET", "/api/v1/discover/tv") => page(&r.query, json!([{"id": 1396, "mediaType": "tv", "name": "Breaking Bad", "firstAirDate": "2008-01-20"}])),
+        ("GET", "/api/v1/discover/tv/upcoming") => page(&r.query, json!([{"id": 94997, "name": "House of the Dragon", "firstAirDate": "2022-08-21"}])),
+        ("GET", "/api/v1/discover/movies/genre/28") => page(&r.query, json!([{"id": 603, "mediaType": "movie", "title": "The Matrix", "genreIds": [28]}])),
+        ("GET", "/api/v1/discover/tv/genre/10759") => page(&r.query, json!([{"id": 1396, "mediaType": "tv", "name": "Breaking Bad"}])),
+        ("GET", "/api/v1/genres/movie") => Resp::json(200, json!([{"id": 28, "name": "Action"}, {"id": 18, "name": "Drama"}])),
+        ("GET", "/api/v1/genres/tv") => Resp::json(200, json!([{"id": 10759, "name": "Action & Adventure"}])),
+        ("GET", "/api/v1/movie/27205/recommendations") => page(&r.query, json!([{"id": 157336, "mediaType": "movie", "title": "Interstellar"}])),
+        ("GET", "/api/v1/movie/27205/similar") => page(&r.query, json!([{"id": 577922, "mediaType": "movie", "title": "Tenet"}])),
+        ("GET", "/api/v1/tv/1399/recommendations") => page(&r.query, json!([{"id": 1396, "mediaType": "tv", "name": "Breaking Bad"}])),
+        ("GET", "/api/v1/tv/1399/similar") => page(&r.query, json!([])),
         _ => Resp::json(404, serde_json::json!({"message": "not found"})),
     }
 }

@@ -95,6 +95,15 @@ fn check(code: u16, body: &str, what: &str) -> Result<(), SeerrError> {
     }
 }
 
+/// "movie" or "tv", the only media types the discovery endpoints take.
+fn media_kind(media_type: &str) -> Result<&'static str, SeerrError> {
+    match media_type {
+        "movie" => Ok("movie"),
+        "tv" => Ok("tv"),
+        other => Err(SeerrError::Invalid(format!("Unknown media type \"{}\".", other))),
+    }
+}
+
 /// For a plain `http://` address, probes whether the server redirects to https
 /// on the same host. `Ok(Some(base))` is that https base (path kept), `Ok(None)`
 /// means no such redirect, and `Err` means the probe itself failed. Sends one
@@ -404,50 +413,72 @@ impl SeerrClient {
 
     /// GET /api/v1/search: keeps movie and tv hits, drops people.
     pub async fn search(&self, query: &str, page: u32) -> Result<SearchPage, SeerrError> {
-        let body = self
-            .get(&format!("/api/v1/search?query={}&page={}", enc(query.trim()), page.max(1)))
-            .await?;
+        self.page(&format!("/api/v1/search?query={}&page={}", enc(query.trim()), page.max(1)), None).await
+    }
+
+    /// GET one paged media list; `kind` labels items that omit `mediaType`.
+    async fn page(&self, path: &str, kind: Option<&str>) -> Result<SearchPage, SeerrError> {
+        let body = self.get(path).await?;
         let raw: RawSearch = serde_json::from_str(&body).map_err(|e| SeerrError::Parse(e.to_string()))?;
-        let results = raw
-            .results
+        Ok(page_of(raw, kind))
+    }
+
+    /// One home-page discover row: GET /api/v1/discover/{trending|movies|tv|movies/upcoming|tv/upcoming}.
+    pub async fn discover(&self, row: DiscoverRow, page: u32) -> Result<SearchPage, SeerrError> {
+        let (path, kind) = match row {
+            DiscoverRow::Trending => ("trending", None),
+            DiscoverRow::Movies => ("movies", Some("movie")),
+            DiscoverRow::Tv => ("tv", Some("tv")),
+            DiscoverRow::UpcomingMovies => ("movies/upcoming", Some("movie")),
+            DiscoverRow::UpcomingTv => ("tv/upcoming", Some("tv")),
+        };
+        self.page(&format!("/api/v1/discover/{}?page={}", path, page.max(1)), kind).await
+    }
+
+    /// GET /api/v1/discover/{movies|tv}/genre/{id}.
+    pub async fn discover_genre(&self, media_type: &str, genre_id: u32, page: u32) -> Result<SearchPage, SeerrError> {
+        let kind = media_kind(media_type)?;
+        let seg = if kind == "movie" { "movies" } else { "tv" };
+        self.page(&format!("/api/v1/discover/{}/genre/{}?page={}", seg, genre_id, page.max(1)), Some(kind)).await
+    }
+
+    /// GET /api/v1/genres/{movie|tv}.
+    pub async fn genres(&self, media_type: &str) -> Result<Vec<Genre>, SeerrError> {
+        let kind = media_kind(media_type)?;
+        let body = self.get(&format!("/api/v1/genres/{}", kind)).await?;
+        let raw: Vec<RawGenre> = serde_json::from_str(&body).map_err(|e| SeerrError::Parse(e.to_string()))?;
+        Ok(raw
             .into_iter()
-            .filter_map(|r| {
-                let mt = r.media_type.clone()?;
-                let (title, date) = match mt.as_str() {
-                    "movie" => (r.title.or(r.name), r.release_date),
-                    "tv" => (r.name.or(r.title), r.first_air_date),
-                    _ => return None,
-                };
-                let (avail, req) = match &r.media_info {
-                    Some(mi) => (
-                        Availability::from_code(mi.status),
-                        mi.requests.first().map(|q| RequestStatus::from_code(q.status)),
-                    ),
-                    None => (Availability::NotRequested, None),
-                };
-                Some(SeerrResult {
-                    media_type: mt,
-                    tmdb_id: r.id,
-                    title: title.unwrap_or_default(),
-                    year: year_of(date.as_deref()),
-                    poster_path: r.poster_path.filter(|p| !p.is_empty()),
-                    overview: r.overview.unwrap_or_default(),
-                    availability: avail,
-                    request_status: req,
-                })
-            })
-            .collect();
-        Ok(SearchPage {
-            page: raw.page,
-            total_pages: raw.total_pages,
-            total_results: raw.total_results,
-            results,
-        })
+            .filter_map(|g| Some(Genre { id: g.id, name: g.name.filter(|n| !n.is_empty())? }))
+            .collect())
+    }
+
+    /// GET /api/v1/{movie|tv}/{id}/recommendations.
+    pub async fn recommendations(&self, media_type: &str, tmdb_id: u64, page: u32) -> Result<SearchPage, SeerrError> {
+        self.related(media_type, tmdb_id, "recommendations", page).await
+    }
+
+    /// GET /api/v1/{movie|tv}/{id}/similar.
+    pub async fn similar(&self, media_type: &str, tmdb_id: u64, page: u32) -> Result<SearchPage, SeerrError> {
+        self.related(media_type, tmdb_id, "similar", page).await
+    }
+
+    async fn related(&self, media_type: &str, tmdb_id: u64, what: &str, page: u32) -> Result<SearchPage, SeerrError> {
+        let kind = media_kind(media_type)?;
+        self.page(&format!("/api/v1/{}/{}/{}?page={}", kind, tmdb_id, what, page.max(1)), Some(kind)).await
+    }
+
+    /// Full detail for a title: GET /api/v1/{movie|tv}/{id}.
+    pub async fn title(&self, media_type: &str, tmdb_id: u64) -> Result<TitleDetail, SeerrError> {
+        let kind = media_kind(media_type)?;
+        let body = self.get(&format!("/api/v1/{}/{}", kind, tmdb_id)).await?;
+        let raw: RawDetail = serde_json::from_str(&body).map_err(|e| SeerrError::Parse(e.to_string()))?;
+        Ok(detail_of(raw, kind))
     }
 
     /// Poster bytes through this server's image proxy (needs no credentials).
     pub async fn poster(&self, path: &str) -> Result<Vec<u8>, SeerrError> {
-        let r = self.exec(self.http.get(poster_url(&self.base, path))).await?;
+        let r = self.exec(self.http.get(image_url(&self.base, ImageSize::Thumb, path))).await?;
         let code = r.status().as_u16();
         if !(200..300).contains(&code) {
             return Err(SeerrError::Api(code, "poster".into()));
@@ -459,11 +490,12 @@ impl SeerrClient {
         Ok(b.to_vec())
     }
 
-    /// POST /api/v1/request. TV requests ask for every season (`"seasons":"all"`).
-    pub async fn request(&self, media_type: &str, tmdb_id: u64) -> Result<CreatedRequest, SeerrError> {
+    /// POST /api/v1/request. A TV request names its seasons by number; movies take none.
+    pub async fn request(&self, media_type: &str, tmdb_id: u64, seasons: &[u32]) -> Result<CreatedRequest, SeerrError> {
         let body = match media_type {
             "movie" => serde_json::json!({"mediaType": "movie", "mediaId": tmdb_id}),
-            "tv" => serde_json::json!({"mediaType": "tv", "mediaId": tmdb_id, "seasons": "all"}),
+            "tv" if seasons.is_empty() => return Err(SeerrError::Invalid("Pick at least one season.".into())),
+            "tv" => serde_json::json!({"mediaType": "tv", "mediaId": tmdb_id, "seasons": seasons}),
             other => return Err(SeerrError::Invalid(format!("Cannot request media type \"{}\".", other))),
         };
         let text = self
@@ -478,14 +510,8 @@ impl SeerrClient {
 
     /// Title/year/poster for a TMDB id via GET /api/v1/{movie|tv}/{id}.
     async fn details(&self, media_type: &str, tmdb_id: u64) -> Result<(String, Option<u16>, Option<String>), SeerrError> {
-        let body = self.get(&format!("/api/v1/{}/{}", media_type, tmdb_id)).await?;
-        let r: RawResult = serde_json::from_str(&body).map_err(|e| SeerrError::Parse(e.to_string()))?;
-        let (t, d) = if media_type == "tv" {
-            (r.name.or(r.title), r.first_air_date)
-        } else {
-            (r.title.or(r.name), r.release_date)
-        };
-        Ok((t.unwrap_or_default(), year_of(d.as_deref()), r.poster_path.filter(|p| !p.is_empty())))
+        let d = self.title(media_type, tmdb_id).await?;
+        Ok((d.title, d.year, d.poster_path))
     }
 
     /// GET /api/v1/request: newest first. The list endpoint carries no titles,
@@ -547,13 +573,6 @@ mod tests {
 
     async fn client(m: &MockSeerr) -> SeerrClient {
         SeerrClient::new(&m.url(), KEY).unwrap()
-    }
-
-    #[test]
-    fn poster_url_uses_the_seerr_image_proxy() {
-        assert_eq!(poster_url("http://s:5055", "/a.jpg"), "http://s:5055/imageproxy/tmdb/t/p/w92/a.jpg");
-        assert_eq!(poster_url("http://s:5055/", "a.jpg"), "http://s:5055/imageproxy/tmdb/t/p/w92/a.jpg");
-        assert!(!poster_url("http://s", "/a.jpg").contains("tmdb.org"));
     }
 
     #[tokio::test]
@@ -670,15 +689,16 @@ mod tests {
     async fn request_movie_and_tv_bodies() {
         let m = start(default_route).await;
         let c = client(&m).await;
-        let r = c.request("movie", 27205).await.unwrap();
+        let r = c.request("movie", 27205, &[]).await.unwrap();
         assert_eq!((r.request_id, r.status), (42, RequestStatus::Pending));
-        let r = c.request("tv", 1399).await.unwrap();
+        let r = c.request("tv", 1399, &[1, 3]).await.unwrap();
         assert_eq!(r.request_id, 42);
+        assert!(matches!(c.request("tv", 1399, &[]).await, Err(SeerrError::Invalid(m)) if m.contains("season")));
         let posts = m.find("POST", "/api/v1/request");
         let b0: serde_json::Value = serde_json::from_str(&posts[0].body).unwrap();
         assert_eq!(b0, serde_json::json!({"mediaType": "movie", "mediaId": 27205}));
         let b1: serde_json::Value = serde_json::from_str(&posts[1].body).unwrap();
-        assert_eq!(b1, serde_json::json!({"mediaType": "tv", "mediaId": 1399, "seasons": "all"}));
+        assert_eq!(b1, serde_json::json!({"mediaType": "tv", "mediaId": 1399, "seasons": [1, 3]}));
         assert_eq!(posts[1].headers["content-type"], "application/json");
         assert_eq!(posts[1].headers["x-api-key"], KEY);
     }
@@ -687,14 +707,14 @@ mod tests {
     async fn request_error_mapping() {
         let m = start(default_route).await;
         let c = client(&m).await;
-        match c.request("movie", 999).await.unwrap_err() {
+        match c.request("movie", 999, &[]).await.unwrap_err() {
             SeerrError::AlreadyRequested(msg) => assert!(msg.contains("already exists")),
             e => panic!("{:?}", e),
         }
-        assert!(matches!(c.request("movie", 998).await, Err(SeerrError::AlreadyRequested(_))));
-        assert!(matches!(c.request("movie", 997).await, Err(SeerrError::Auth(_))));
-        assert!(matches!(c.request("movie", 996).await, Err(SeerrError::Api(500, m)) if m == "boom"));
-        assert!(matches!(c.request("person", 1).await, Err(SeerrError::Invalid(_))));
+        assert!(matches!(c.request("movie", 998, &[]).await, Err(SeerrError::AlreadyRequested(_))));
+        assert!(matches!(c.request("movie", 997, &[]).await, Err(SeerrError::Auth(_))));
+        assert!(matches!(c.request("movie", 996, &[]).await, Err(SeerrError::Api(500, m)) if m == "boom"));
+        assert!(matches!(c.request("person", 1, &[]).await, Err(SeerrError::Invalid(_))));
         // invalid type never hits the network
         assert_eq!(m.find("POST", "/api/v1/request").len(), 4);
     }
@@ -716,6 +736,67 @@ mod tests {
         assert_eq!(items[1].poster_path.as_deref(), Some("/inc.jpg"));
         // detail lookup 404 -> placeholder title, still listed
         assert_eq!((items[2].title.as_str(), items[2].status), ("TMDB #555", RequestStatus::Declined));
+    }
+
+    #[tokio::test]
+    async fn discover_rows_hit_their_endpoints() {
+        let m = start(default_route).await;
+        let c = client(&m).await;
+        let t = c.discover(DiscoverRow::Trending, 2).await.unwrap();
+        assert_eq!(m.find("GET", "/api/v1/discover/trending")[0].query["page"], "2");
+        assert_eq!(t.page, 2);
+        assert_eq!(t.results.iter().map(|r| r.media_type.as_str()).collect::<Vec<_>>(), ["movie", "tv"], "person dropped");
+        let first = &t.results[0];
+        assert_eq!((first.backdrop_path.as_deref(), first.vote_average, first.genre_ids.clone()), (Some("/bk.jpg"), Some(8.4), vec![28, 878]));
+        let cases = [
+            (DiscoverRow::Movies, "/api/v1/discover/movies", "movie", "The Matrix"),
+            (DiscoverRow::Tv, "/api/v1/discover/tv", "tv", "Breaking Bad"),
+            (DiscoverRow::UpcomingMovies, "/api/v1/discover/movies/upcoming", "movie", "Interstellar"),
+            (DiscoverRow::UpcomingTv, "/api/v1/discover/tv/upcoming", "tv", "House of the Dragon"),
+        ];
+        for (row, path, kind, title) in cases {
+            // lists that omit mediaType take it from the endpoint; page 0 is clamped to 1
+            let p = c.discover(row, 0).await.unwrap();
+            assert_eq!(m.find("GET", path)[0].query["page"], "1", "{}", path);
+            assert_eq!((p.results[0].media_type.as_str(), p.results[0].title.as_str()), (kind, title), "{}", path);
+        }
+    }
+
+    #[tokio::test]
+    async fn genres_genre_discover_and_related_titles() {
+        let m = start(default_route).await;
+        let c = client(&m).await;
+        assert_eq!(c.genres("movie").await.unwrap(), vec![Genre { id: 28, name: "Action".into() }, Genre { id: 18, name: "Drama".into() }]);
+        assert_eq!(c.genres("tv").await.unwrap()[0].name, "Action & Adventure");
+        let gd = c.discover_genre("movie", 28, 3).await.unwrap();
+        assert_eq!(m.find("GET", "/api/v1/discover/movies/genre/28")[0].query["page"], "3");
+        assert_eq!(gd.results[0].title, "The Matrix");
+        assert_eq!(c.discover_genre("tv", 10759, 1).await.unwrap().results[0].media_type, "tv");
+        let rec = c.recommendations("movie", 27205, 1).await.unwrap();
+        assert_eq!(rec.results[0].title, "Interstellar");
+        assert_eq!(m.find("GET", "/api/v1/movie/27205/recommendations").len(), 1);
+        assert_eq!(c.similar("movie", 27205, 1).await.unwrap().results[0].title, "Tenet");
+        assert_eq!(c.recommendations("tv", 1399, 1).await.unwrap().results[0].media_type, "tv");
+        assert!(c.similar("tv", 1399, 1).await.unwrap().results.is_empty());
+        assert!(matches!(c.recommendations("person", 1, 1).await, Err(SeerrError::Invalid(_))));
+        assert!(matches!(c.discover_genre("person", 1, 1).await, Err(SeerrError::Invalid(_))));
+    }
+
+    #[tokio::test]
+    async fn title_detail_for_movies_and_series() {
+        let m = start(default_route).await;
+        let c = client(&m).await;
+        let mv = c.title("movie", 27205).await.unwrap();
+        assert_eq!((mv.title.as_str(), mv.runtime), ("Inception", Some(148)));
+        assert_eq!(mv.tagline, "Your mind is the scene of the crime.");
+        assert_eq!(mv.cast[0].name, "Leonardo DiCaprio");
+        assert_eq!(mv.trailers[0].key, "yt-inception");
+        let tv = c.title("tv", 1399).await.unwrap();
+        assert_eq!(tv.runtime, Some(57));
+        let seasons: Vec<(u32, Availability)> = tv.seasons.iter().map(|s| (s.number, s.availability)).collect();
+        assert_eq!(seasons, vec![(0, Availability::NotRequested), (1, Availability::Available), (2, Availability::Pending)]);
+        assert!(matches!(c.title("person", 1).await, Err(SeerrError::Invalid(_))));
+        assert!(matches!(c.title("movie", 555).await, Err(SeerrError::Api(404, _))));
     }
 
     #[tokio::test]
@@ -748,7 +829,7 @@ mod tests {
         assert_eq!((st.version.as_str(), me.display_name.as_str()), ("2.7.2", "Nathan"));
         c.search("x", 1).await.unwrap();
         c.requests(20, 0).await.unwrap(); // concurrent detail calls must not log in again
-        c.request("movie", 27205).await.unwrap();
+        c.request("movie", 27205, &[]).await.unwrap();
         let l = logins(&m);
         assert_eq!(l.len(), 1);
         let body: serde_json::Value = serde_json::from_str(&l[0].body).unwrap();
@@ -817,11 +898,11 @@ mod tests {
         assert_eq!(searches[1].headers["cookie"], "connect.sid=s1; locale=en");
         // a POST body survives the retry intact
         st.expire_sessions();
-        c.request("tv", 1399).await.unwrap();
+        c.request("tv", 1399, &[1, 2]).await.unwrap();
         let posts = m.find("POST", "/api/v1/request");
         assert_eq!(posts.len(), 2);
         assert_eq!(posts[0].body, posts[1].body);
-        assert!(posts[1].body.contains("\"seasons\":\"all\""));
+        assert!(posts[1].body.contains("\"seasons\":[1,2]"));
         assert_eq!(logins(&m).len(), 3);
         // the new session is reused afterwards
         c.me().await.unwrap();
@@ -839,7 +920,7 @@ mod tests {
         assert_eq!(logins(&m).len(), 2); // initial + exactly one retry
         st.deny_login.store(false, std::sync::atomic::Ordering::SeqCst);
         // a genuine permission error (403 even with a fresh session) is reported after one relogin
-        match c.request("movie", 997).await.unwrap_err() {
+        match c.request("movie", 997, &[]).await.unwrap_err() {
             SeerrError::Api(403, msg) => assert!(msg.contains("quota"), "{}", msg),
             e => panic!("{:?}", e),
         }
@@ -851,7 +932,7 @@ mod tests {
     async fn login_permission_403_is_not_reported_as_sign_in_failure() {
         let (m, _st) = login_mock().await;
         let c = SeerrClient::with_login(&m.url(), "nathan", "pw").unwrap();
-        let err = c.request("movie", 997).await.unwrap_err();
+        let err = c.request("movie", 997, &[]).await.unwrap_err();
         assert!(matches!(err, SeerrError::Api(403, _)), "{:?}", err);
         assert!(!err.to_string().contains("sign-in"), "{}", err);
         // a refused session (401 with a fresh login) is still a sign-in problem
@@ -906,7 +987,7 @@ mod tests {
         let c = SeerrClient::with_login(&format!("{}/old", m.url()), "nathan", "pw").unwrap();
         let me = c.me().await.expect("me through redirect");
         assert_eq!(me.display_name, "Nathan");
-        c.request("movie", 27205).await.expect("POST through redirect");
+        c.request("movie", 27205, &[]).await.expect("POST through redirect");
         let target: Vec<_> = m.reqs().into_iter().filter(|r| !r.path.starts_with("/old") && r.path != "/api/v1/status").collect();
         assert_eq!(logins(&m).len(), 1);
         for r in target.iter().filter(|r| r.path != "/api/v1/auth/jellyfin") {
@@ -933,8 +1014,8 @@ mod tests {
     async fn login_mode_maps_other_errors_like_key_mode() {
         let (m, _st) = login_mock().await;
         let c = SeerrClient::with_login(&m.url(), "nathan", "pw").unwrap();
-        assert!(matches!(c.request("movie", 999).await, Err(SeerrError::AlreadyRequested(_))));
-        assert!(matches!(c.request("movie", 996).await, Err(SeerrError::Api(500, _))));
+        assert!(matches!(c.request("movie", 999, &[]).await, Err(SeerrError::AlreadyRequested(_))));
+        assert!(matches!(c.request("movie", 996, &[]).await, Err(SeerrError::Api(500, _))));
     }
 
     /// Sign-in only, against a real server: status (public), then /auth/me with
@@ -1020,7 +1101,7 @@ mod tests {
                 }
                 if let Some(p) = &r.poster_path {
                     assert!(p.starts_with('/'), "{:?}", r);
-                    assert!(poster_url(&c.base, p).contains("/imageproxy/tmdb/t/p/"));
+                    assert!(image_url(&c.base, ImageSize::Thumb, p).contains("/imageproxy/tmdb/t/p/"));
                 }
             }
             // availability/request_status must agree with each other

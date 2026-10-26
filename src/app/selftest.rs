@@ -3479,7 +3479,7 @@ fn seerr_result(media: &str, id: u64, title: &str, year: Option<u16>, a: Availab
         poster_path: if id == 11 || id == 22 { Some(format!("/p{}.jpg", id)) } else { None },
         overview: "overview".into(),
         availability: a,
-        request_status: None,
+        ..Default::default()
     }
 }
 fn seerr_mixed() -> Vec<SeerrResult> {

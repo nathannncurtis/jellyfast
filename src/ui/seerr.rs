@@ -1028,10 +1028,9 @@ mod tests {
             tmdb_id: 1,
             title: "T".into(),
             year,
-            poster_path: None,
             overview: String::new(),
             availability: a,
-            request_status: None,
+            ..Default::default()
         }
     }
 

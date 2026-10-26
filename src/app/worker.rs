@@ -460,7 +460,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.request(&media_type, tmdb_id).await {
+                Ok(c) => match request_title(&seerr_secure(c, &mut seerr, &mut seerr_plain).await, &media_type, tmdb_id).await {
                     Ok(_) => {
                         let _ = main_tx.send(MainMsg::SeerrRequested { title });
                     }
@@ -484,6 +484,45 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     }
                     Err(e) => {
                         let _ = main_tx.send(MainMsg::SeerrError(e.to_string()));
+                    }
+                },
+            },
+            UiCmd::SeerrDiscover { row, page } => match seerr_client(&cfg, &mut seerr) {
+                Err(m) => {
+                    let _ = main_tx.send(MainMsg::SeerrBrowseError(m));
+                }
+                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.discover(row, page).await {
+                    Ok(page) => {
+                        let _ = main_tx.send(MainMsg::SeerrDiscover { row, page });
+                    }
+                    Err(e) => {
+                        let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
+                    }
+                },
+            },
+            UiCmd::SeerrTitle { media_type, tmdb_id } => match seerr_client(&cfg, &mut seerr) {
+                Err(m) => {
+                    let _ = main_tx.send(MainMsg::SeerrBrowseError(m));
+                }
+                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.title(&media_type, tmdb_id).await {
+                    Ok(d) => {
+                        let _ = main_tx.send(MainMsg::SeerrTitle(Box::new(d)));
+                    }
+                    Err(e) => {
+                        let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
+                    }
+                },
+            },
+            UiCmd::SeerrRecommendations { media_type, tmdb_id } => match seerr_client(&cfg, &mut seerr) {
+                Err(m) => {
+                    let _ = main_tx.send(MainMsg::SeerrBrowseError(m));
+                }
+                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.recommendations(&media_type, tmdb_id, 1).await {
+                    Ok(page) => {
+                        let _ = main_tx.send(MainMsg::SeerrRecommendations { media_type, tmdb_id, results: page.results });
+                    }
+                    Err(e) => {
+                        let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
                     }
                 },
             },
@@ -714,6 +753,16 @@ async fn seerr_secure(c: SeerrClient, cache: &mut Option<SeerrClient>, plain: &m
         }
         Err(_) => c,
     }
+}
+
+/// Request a title. A series asks for every regular season (season 0 is specials), so
+/// its season numbers are looked up first.
+async fn request_title(c: &SeerrClient, media_type: &str, tmdb_id: u64) -> Result<crate::seerr::models::CreatedRequest, SeerrError> {
+    if media_type != "tv" {
+        return c.request(media_type, tmdb_id, &[]).await;
+    }
+    let seasons: Vec<u32> = c.title("tv", tmdb_id).await?.seasons.iter().map(|s| s.number).filter(|n| *n > 0).collect();
+    c.request("tv", tmdb_id, &seasons).await
 }
 
 /// Handle SaveSeerr: validate before persisting anything when enabling.
@@ -1221,6 +1270,7 @@ pub(crate) fn sys_key(item_id: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seerr::models::DiscoverRow;
     use crate::config::test_env::TestEnv;
     use crate::transcode::decision::PlaybackMethod;
     use std::collections::HashMap;
@@ -3148,7 +3198,9 @@ mod tests {
         h.send(UiCmd::SeerrRequest { media_type: "tv".into(), tmdb_id: 1399, title: "GoT".into() });
         assert!(matches!(h.next().await, MainMsg::SeerrRequested { title } if title == "GoT"));
         let posts = m.find("POST", "/api/v1/request");
-        assert!(posts[1].body.contains("\"seasons\":\"all\""));
+        // season 0 (specials) is left out; the season numbers come from the series detail
+        assert!(posts[1].body.contains("\"seasons\":[1,2]"), "{}", posts[1].body);
+        assert_eq!(m.find("GET", "/api/v1/tv/1399").len(), 1);
     }
 
     #[tokio::test]
@@ -3163,6 +3215,53 @@ mod tests {
         assert!(seerr_err(h.next().await).contains("quota"));
         h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 996, title: "B".into() });
         assert!(seerr_err(h.next().await).contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn seerr_discover_title_and_recommendations() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut h = H::start(seerr_cfg(&m));
+        h.send(UiCmd::SeerrDiscover { row: DiscoverRow::Trending, page: 2 });
+        match h.next().await {
+            MainMsg::SeerrDiscover { row, page } => {
+                assert_eq!(row, DiscoverRow::Trending);
+                assert_eq!((page.page, page.results.len()), (2, 2), "person dropped");
+            }
+            o => panic!("{:?}", o),
+        }
+        assert_eq!(m.find("GET", "/api/v1/discover/trending")[0].query["page"], "2");
+        h.send(UiCmd::SeerrTitle { media_type: "tv".into(), tmdb_id: 1399 });
+        match h.next().await {
+            MainMsg::SeerrTitle(d) => {
+                assert_eq!((d.title.as_str(), d.runtime), ("Game of Thrones", Some(57)));
+                assert_eq!(d.seasons.len(), 3);
+            }
+            o => panic!("{:?}", o),
+        }
+        h.send(UiCmd::SeerrRecommendations { media_type: "movie".into(), tmdb_id: 27205 });
+        match h.next().await {
+            MainMsg::SeerrRecommendations { media_type, tmdb_id, results } => {
+                assert_eq!((media_type.as_str(), tmdb_id), ("movie", 27205));
+                assert_eq!(results[0].title, "Interstellar");
+            }
+            o => panic!("{:?}", o),
+        }
+        // a title the server does not know is a browse error, not a search error
+        h.send(UiCmd::SeerrTitle { media_type: "movie".into(), tmdb_id: 555 });
+        assert!(matches!(h.next().await, MainMsg::SeerrBrowseError(_)));
+    }
+
+    #[tokio::test]
+    async fn seerr_discover_without_seerr_reports_browse_error() {
+        let _env = TestEnv::new();
+        let m = start_seerr(default_route).await;
+        let mut cfg = seerr_cfg(&m);
+        cfg.settings.seerr_enabled = false;
+        let mut h = H::start(cfg);
+        h.send(UiCmd::SeerrDiscover { row: DiscoverRow::Tv, page: 1 });
+        assert!(matches!(h.next().await, MainMsg::SeerrBrowseError(m) if m.contains("turned off")));
+        assert!(m.reqs().is_empty());
     }
 
     #[tokio::test]
