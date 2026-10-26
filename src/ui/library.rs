@@ -62,6 +62,9 @@ pub(crate) struct CellData {
     dim: *mut AnyObject,
     circle: *mut AnyObject,
     play_icon: *mut AnyObject,
+    /// Home cards only: a dark gradient at the foot of the art, and the title on it.
+    scrim: *mut AnyObject,
+    overlay: *mut AnyObject,
 }
 
 unsafe fn new_layer() -> *mut AnyObject {
@@ -174,6 +177,22 @@ pub(crate) unsafe fn build_cell_keyed(
     let _: () = msg_send![circle, setOpacity: 0.0f32];
     add_layer(art, circle);
 
+    // Home cards: a title overlay that fades in with the play button.
+    let home_card = click == sel!(homeItemClicked:);
+    let scrim = if home_card {
+        let g: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
+        let cols = [cg_black(0.0) as *mut AnyObject, cg_black(0.7) as *mut AnyObject];
+        let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObjects: cols.as_ptr(), count: 2usize];
+        let _: () = msg_send![g, setColors: arr];
+        let _: () = msg_send![g, setStartPoint: NSPoint { x: 0., y: 1. }];
+        let _: () = msg_send![g, setEndPoint: NSPoint { x: 0., y: 0. }];
+        let _: () = msg_send![g, setOpacity: 0.0f32];
+        add_layer(art, g);
+        g
+    } else {
+        std::ptr::null_mut()
+    };
+
     // Placeholder glyph.
     let glyph: *mut AnyObject = msg_send![class!(NSImageView), alloc];
     let glyph: *mut AnyObject = msg_send![glyph, initWithFrame: rect(0., 0., 40., 40.)];
@@ -207,6 +226,20 @@ pub(crate) unsafe fn build_cell_keyed(
     let _: () = msg_send![btn, setTag: tag];
     let _: () = msg_send![btn, setToolTip: ns(&it.name)];
     add_sub(container, btn);
+    // Home cards: the play button sits in the centre, above the click target.
+    let (overlay, play_btn) = if home_card {
+        let ov = label(&it.name, T_BODY_EM, C_ON_MEDIA, ALIGN_LEFT);
+        let _: () = msg_send![ov, setAlphaValue: 0.0f64];
+        add_sub(container, ov);
+        let pb: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: sel!(homeCardPlay:)];
+        let _: () = msg_send![pb, setBordered: Bool::NO];
+        let _: () = msg_send![pb, setTag: tag];
+        let _: () = msg_send![pb, setToolTip: ns("Play")];
+        add_sub(container, pb);
+        (ov, pb)
+    } else {
+        (std::ptr::null_mut(), std::ptr::null_mut())
+    };
     // Context menu.
     let menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
     let menu: *mut AnyObject = msg_send![menu, initWithTitle: ns(&it.name)];
@@ -234,7 +267,7 @@ pub(crate) unsafe fn build_cell_keyed(
     let _: () = msg_send![btn, setMenu: menu];
     autorel(menu);
 
-    let cd = Box::into_raw(Box::new(CellData { shadow: host, dim, circle, play_icon: play }));
+    let cd = Box::into_raw(Box::new(CellData { shadow: host, dim, circle, play_icon: play, scrim, overlay }));
     *ivar_ptr::<*mut c_void>(&*container, c"jrCell") = cd as *mut c_void;
     let ta: *mut AnyObject = msg_send![class!(NSTrackingArea), alloc];
     let ta: *mut AnyObject = msg_send![ta,
@@ -257,6 +290,9 @@ pub(crate) unsafe fn build_cell_keyed(
         title,
         sub,
         btn,
+        scrim,
+        overlay,
+        play_btn,
         skel_title: nil(),
         skel_sub: nil(),
         key,
@@ -321,6 +357,9 @@ pub fn grid_set_skeleton(n: usize) {
                 title: nil(),
                 sub: nil(),
                 btn: nil(),
+                scrim: nil(),
+                overlay: nil(),
+                play_btn: nil(),
                 skel_title: t,
                 skel_sub: s2,
                 key: 0,
@@ -364,7 +403,7 @@ pub(crate) extern "C" fn cell_layout(this: *mut AnyObject, _cmd: Sel) {
     }
 }
 
-unsafe fn hover(this: *mut AnyObject, on: bool) {
+pub(crate) unsafe fn hover(this: *mut AnyObject, on: bool) {
     let cd = *ivar_ptr::<*mut c_void>(&*this, c"jrCell") as *mut CellData;
     if cd.is_null() {
         return;
@@ -382,10 +421,17 @@ unsafe fn hover(this: *mut AnyObject, on: bool) {
     let o = if on { 1.0f32 } else { 0.0f32 };
     let _: () = msg_send![cd.dim, setOpacity: o];
     let _: () = msg_send![cd.circle, setOpacity: o];
+    if !cd.scrim.is_null() {
+        let _: () = msg_send![cd.scrim, setOpacity: o];
+    }
     tx_end();
     let anim: *mut AnyObject = msg_send![cd.play_icon, animator];
     anim_begin(if on { M_FAST } else { M_STD }, timing_ease_out());
     let _: () = msg_send![anim, setAlphaValue: if on { 1.0f64 } else { 0.0f64 }];
+    if !cd.overlay.is_null() {
+        let ov: *mut AnyObject = msg_send![cd.overlay, animator];
+        let _: () = msg_send![ov, setAlphaValue: if on { 1.0f64 } else { 0.0f64 }];
+    }
     anim_end();
 }
 pub(crate) extern "C" fn cell_hover(this: *mut AnyObject, _cmd: Sel, _ev: *mut AnyObject) {
@@ -408,6 +454,13 @@ pub(crate) unsafe fn layout_cell(c: &CellHandle, m: &Metrics) {
         let _: () = msg_send![c.dim, setFrame: rect(0., 0., w, h)];
         let _: () = msg_send![c.circle, setFrame: rect(w / 2. - 22., h / 2. - 22., 44., 44.)];
         let _: () = msg_send![c.prog_track, setFrame: rect(SP2, h - SP2 - 3., tw, 3.)];
+        if !c.scrim.is_null() {
+            let _: () = msg_send![c.scrim, setFrame: rect(0., h * 0.45, w, h * 0.55)];
+        }
+        if !c.overlay.is_null() {
+            set_frame(c.overlay, rect(SP2, h - SP2 - 3. - SP2 - 20., tw, 20.));
+            set_frame(c.play_btn, rect(w / 2. - 22., h / 2. - 22., 44., 44.));
+        }
         let _: () = msg_send![c.prog_fill, setFrame: rect(0., 0., tw * c.prog_frac, 3.)];
         set_frame(c.glyph, rect(w / 2. - 20., h / 2. - 20., 40., 40.));
         set_frame(c.play_icon, rect(w / 2. - 12., h / 2. - 12., 24., 24.));
@@ -590,6 +643,7 @@ pub fn poster_ready(key: u64, bytes: &[u8]) {
             }
         }
         crate::ui::detail::image_ready(key);
+        crate::ui::home::billboard_ready(key);
         for row in ui.home.views.iter_mut() {
             for c in row.cells.iter_mut() {
                 if c.key == key {

@@ -232,6 +232,12 @@ fn steps() -> Vec<Step> {
         ("audit: home (long titles)", s_audit_home, 200),
         ("home: card clicks", s_home_clicks, 50),
         ("home: empty state, then rows again", s_home_empty, 100),
+        ("home: billboard slides", s_home_billboard, 300),
+        ("home: billboard next slide", s_home_billboard_next, 500),
+        ("audit: home billboard, slide 2", s_home_billboard_two, 300),
+        ("home: rows scrolled into view", s_home_rows_scroll, 300),
+        ("home: card hover and billboard pause", s_home_hover, 300),
+        ("home: see all page", s_home_see_all, 200),
         ("home: back to a library", s_home_leave, 100),
         ("settings: open+cancel", s_settings_cancel, 600),
         ("settings: open+save", s_settings_save, 600),
@@ -1177,7 +1183,7 @@ fn s_home_rows() {
     handle_main(MainMsg::HomeLoaded(HomeRows {
         rows: vec![
             HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: items_of("Movie", 2) },
-            HomeRow { title: "Recently Added in Movies".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 3) },
+            HomeRow { title: "Recently Added Movies".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 3) },
         ],
         ..Default::default()
     }));
@@ -1425,13 +1431,13 @@ fn s_states() {
         let hh: Bool = msg_send![ui.state_host.get(), isHidden];
         state_check("error state shown", hh == Bool::NO);
         let bb: Bool = msg_send![ui.state_btn.get(), isHidden];
-        state_check("Try Again visible on error", bb == Bool::NO);
+        state_check("Retry visible on error", bb == Bool::NO);
         // empty search state, centred on the grid area
         set_text(ui.search.get(), "zzz");
         send_items("Results", vec![], false);
         let _: () = msg_send![ui.win.get(), layoutIfNeeded];
         let hb: Bool = msg_send![ui.state_btn.get(), isHidden];
-        state_check("no Try Again on empty", hb == Bool::YES);
+        state_check("no Retry on empty", hb == Bool::YES);
         state_check("empty search body", read_field(ui.state_body.get()).contains("No results for"));
         let sf = frame_of(ui.status_label.get());
         let win_r: NSRect = msg_send![ui.status_label.get(), convertRect: bounds_of(ui.status_label.get()), toView: nil()];
@@ -2111,9 +2117,95 @@ fn home_fake_rows() -> Vec<HomeRow> {
     vec![
         HomeRow { title: "Continue Watching".into(), kind: HomeRowKind::ContinueWatching, items: long(items_of("Episode", 6)) },
         HomeRow { title: "Next Up".into(), kind: HomeRowKind::NextUp, items: items_of("Episode", 4) },
-        HomeRow { title: format!("Recently Added in {}", HOME_LONG), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 9) },
-        HomeRow { title: format!("Because you watched {}", HOME_LONG), kind: HomeRowKind::Recommended, items: long(items_of("Movie", 12)) },
-        HomeRow { title: "Recently Added in Shows".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Series", 3) },
+        HomeRow { title: "Recently Added Movies".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Movie", 9) },
+        HomeRow { title: format!("Because You Watched {}", HOME_LONG), kind: HomeRowKind::Recommended, items: long(items_of("Movie", 12)) },
+        HomeRow { title: "Recently Added TV".into(), kind: HomeRowKind::RecentlyAdded, items: items_of("Series", 3) },
+        HomeRow { title: "Top Rated".into(), kind: HomeRowKind::TopRated, items: items_of("Movie", 5) },
+        HomeRow { title: "Drama".into(), kind: HomeRowKind::Genre, items: items_of("Series", 4) },
+    ]
+}
+
+/// Home rows with artwork metadata for the billboard: a resumable episode, a
+/// next-up episode, two movies (one with a logo), a recommendation and a top rated show.
+fn billboard_fake_rows() -> Vec<HomeRow> {
+    let v = |j: serde_json::Value| -> ListItem { serde_json::from_value(j).expect("fixture item") };
+    let overview = "A ferry captain who has never left the harbour finds a stowaway, a map and a debt that a whole town has been keeping quiet.";
+    vec![
+        HomeRow {
+            title: "Continue Watching".into(),
+            kind: HomeRowKind::ContinueWatching,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-ep", "Name": "The Pilot", "Type": "Episode", "SeriesName": "Harbour Lights",
+                "ParentIndexNumber": 2, "IndexNumber": 4, "RunTimeTicks": 24000000000i64,
+                "UserData": {"PlaybackPositionTicks": 8400000000i64, "Played": false},
+                "BackdropImageTags": ["b"], "ImageTags": {"Thumb": "t"}, "Overview": overview
+            }))],
+        },
+        HomeRow {
+            title: "Next Up".into(),
+            kind: HomeRowKind::NextUp,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-next", "Name": "Second Tide", "Type": "Episode", "SeriesName": "Night Shift",
+                "ParentIndexNumber": 1, "IndexNumber": 3, "RunTimeTicks": 24000000000i64,
+                "BackdropImageTags": ["b"], "Overview": overview
+            }))],
+        },
+        HomeRow {
+            title: "Recently Added Movies".into(),
+            kind: HomeRowKind::RecentlyAdded,
+            items: vec![
+                v(serde_json::json!({
+                    "Id": "bb-movie", "Name": "Northern Lights", "Type": "Movie", "ProductionYear": 2024,
+                    "OfficialRating": "PG-13", "CommunityRating": 7.9, "RunTimeTicks": 76800000000i64,
+                    "Genres": ["Drama", "Thriller", "Mystery"], "Overview": overview,
+                    "BackdropImageTags": ["b"], "ImageTags": {"Logo": "lg", "Primary": "p"}
+                })),
+                v(serde_json::json!({
+                    "Id": "bb-long", "Name": HOME_LONG, "Type": "Movie", "ProductionYear": 2023,
+                    "BackdropImageTags": ["b"], "Overview": overview
+                })),
+            ],
+        },
+        HomeRow {
+            title: "Recently Added TV".into(),
+            kind: HomeRowKind::RecentlyAdded,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-tv", "Name": "Lantern Row", "Type": "Series", "ProductionYear": 2025,
+                "BackdropImageTags": ["b"], "ImageTags": {"Primary": "p"}, "Overview": overview
+            }))],
+        },
+        HomeRow {
+            title: "Because You Watched Northern Lights".into(),
+            kind: HomeRowKind::Recommended,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-dune", "Name": "Dune Part Two", "Type": "Movie", "ProductionYear": 2024,
+                "BackdropImageTags": ["b"], "Overview": overview
+            }))],
+        },
+        HomeRow {
+            title: "Top Rated".into(),
+            kind: HomeRowKind::TopRated,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-show", "Name": "Long Show", "Type": "Series", "ProductionYear": 2019,
+                "BackdropImageTags": ["b"], "Overview": overview
+            }))],
+        },
+        HomeRow {
+            title: "Drama".into(),
+            kind: HomeRowKind::Genre,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-drama", "Name": "Quiet Harbour", "Type": "Movie", "ProductionYear": 2022,
+                "Genres": ["Drama"], "BackdropImageTags": ["b"], "Overview": overview
+            }))],
+        },
+        HomeRow {
+            title: "Thriller".into(),
+            kind: HomeRowKind::Genre,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-thriller", "Name": "Cold Signal", "Type": "Movie", "ProductionYear": 2021,
+                "Genres": ["Thriller"], "BackdropImageTags": ["b"], "Overview": overview
+            }))],
+        },
     ]
 }
 fn s_home_open() {
@@ -2123,7 +2215,7 @@ fn s_home_open() {
         state_check("home: sidebar opens Home", ui.home.active);
         state_check("home: library grid hidden", !visible(ui.lib_scroll.get()));
         state_check("home: Home scroll shown", visible(ui.home.scroll.get()));
-        state_check("home: header reads Home", read_field(ui.header_title.get()) == "Home");
+        state_check("home: header has no title (the billboard heads the page)", read_field(ui.header_title.get()).is_empty());
         state_check("home: sort popup hidden", !visible(ui.sort_popup.get()));
         state_check("home: Home row selected", row_selected(ui.home.row.get()));
         state_check("home: no library row selected", selected_rows() == 0);
@@ -2135,9 +2227,9 @@ fn s_home_fake() {
     handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("home: five rows built", ui.home.views.len() == 5);
+        state_check("home: seven rows built", ui.home.views.len() == 7);
         let total: usize = ui.home.rows.iter().map(|r| r.items.len()).sum();
-        state_check("home: one card per item", ui.home.flat.len() == total && total == 34);
+        state_check("home: one card per item", ui.home.flat.len() == total && total == 43);
         let cw = &ui.home.views[0].cells[0];
         state_check("home: continue watching uses wide cards", frame_of(cw.container).size.w == crate::ui::home::WIDE_W);
         state_check("home: continue watching shows progress", cw.prog_frac > 0.49);
@@ -2181,6 +2273,130 @@ fn s_home_clicks() {
         state_check("home: still on Home after a card click", UI.get().unwrap().home.active);
     }
 }
+/// Pause the billboard timer for the checks (the pointer is "on" it).
+unsafe fn pause_billboard() {
+    crate::ui::home::billboard_hover(true);
+}
+fn s_home_billboard() {
+    let rows = billboard_fake_rows();
+    let slides = crate::app::home::billboard_items(&rows);
+    for (i, it) in slides.iter().enumerate() {
+        handle_main(MainMsg::PosterReady {
+            key: crate::ui::home::billboard_key(&it.id),
+            bytes: image_bytes(0, 1280, 720, (40 + i * 35) as u8),
+        });
+    }
+    for id in ["bb-movie", "bb-show"] {
+        handle_main(MainMsg::PosterReady { key: crate::ui::home::logo_key(id), bytes: image_bytes(1, 600, 160, 230) });
+    }
+    // Card art for every row item: wide cards use the wide key, poster cards the poster key.
+    let row_count = rows.len();
+    for (n, r) in rows.iter().enumerate() {
+        for (i, it) in r.items.iter().enumerate() {
+            let key = if r.kind.is_wide() { crate::ui::home::wide_key(&it.id) } else { poster_key(&it.id) };
+            handle_main(MainMsg::PosterReady { key, bytes: image_bytes(0, 320, 180, (60 + n * 20 + i * 9) as u8) });
+        }
+    }
+    handle_main(MainMsg::HomeLoaded(HomeRows { rows, ..Default::default() }));
+    unsafe {
+        pause_billboard();
+        let ui = UI.get().unwrap();
+        let b = &ui.home.billboard;
+        state_check("billboard: one slide per title", b.items.len() == 6);
+        state_check("billboard: on screen above the rows", !b.host.is_null() && frame_of(b.host).origin.y == 0.);
+        state_check("billboard: at least 360pt tall", frame_of(b.host).size.h >= 360.);
+        state_check("billboard: rows start below it", ui.home.views.len() == row_count && frame_of(ui.home.heads[0].0).origin.y >= frame_of(b.host).size.h);
+        state_check("billboard: first slide is the resume item", b.items[0].id == "bb-ep");
+        state_check("billboard: title names the series", read_field(b.title) == "Harbour Lights");
+        state_check("billboard: resume button shows time left", read_field(b.play.label) == "Resume · 26m left");
+        state_check("billboard: More Info button", read_field(b.info.label) == "More Info");
+        state_check("billboard: one page dot per slide", b.dots.len() == 6);
+        state_check("billboard: timer paused by the pointer", b.hovered);
+    }
+    audit_both("home billboard");
+}
+fn s_home_billboard_next() {
+    unsafe { crate::ui::home::billboard_step(1) };
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("billboard: arrow moves to the next slide", ui.home.billboard.index == 1);
+        state_check("billboard: next slide's title", read_field(ui.home.billboard.title) == "Night Shift");
+        state_check("billboard: episode button names the episode", read_field(ui.home.billboard.play.label) == "Play S1:E3");
+    }
+}
+fn s_home_billboard_two() {
+    audit_both("home billboard slide 2");
+    unsafe {
+        crate::ui::home::billboard_step(1);
+        let ui = UI.get().unwrap();
+        let b = &ui.home.billboard;
+        state_check("billboard: logo slide has a logo", b.index == 2 && b.logo_aspect > 0.);
+        state_check("billboard: logo slide hides the text title", crate::ui::shell::is_hidden(b.title));
+    }
+}
+/// Scroll the Home rows so the given document y sits at the top of the visible area.
+unsafe fn scroll_home_to(y: f64) {
+    let ui = UI.get().unwrap();
+    let sv = ui.home.scroll.get();
+    let clip: *mut AnyObject = msg_send![sv, contentView];
+    let _: () = msg_send![clip, scrollToPoint: NSPoint { x: 0., y: y.max(0.) }];
+    let _: () = msg_send![sv, reflectScrolledClipView: clip];
+}
+/// Rows below the billboard, captured after scrolling each one into view.
+fn s_home_rows_scroll() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let heads: Vec<f64> = ui.home.heads.iter().map(|h| frame_of(h.0).origin.y).collect();
+        let last = heads.len().saturating_sub(1);
+        scroll_home_to(heads[1] - 12.);
+        audit_both("home rows: next up");
+        scroll_home_to(heads[last] - 12.);
+        audit_both("home rows: genres");
+        scroll_home_to(0.);
+    }
+}
+fn s_home_hover() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        // Bring the hovered card into view first so the capture shows it.
+        scroll_home_to(frame_of(ui.home.heads[2].0).origin.y - 12.);
+        let cell = &ui.home.views[2].cells[0];
+        crate::ui::library::hover(cell.container, true);
+    }
+    audit_both("home card hover");
+    unsafe {
+        let ui = UI.get().unwrap();
+        let cell = &ui.home.views[2].cells[0];
+        let alpha = |v: *mut AnyObject| -> f64 { msg_send![v, alphaValue] };
+        state_check("hover: title overlay fades in", !cell.overlay.is_null() && alpha(cell.overlay) > 0.99);
+        state_check("hover: centred play button fades in", !cell.play_btn.is_null() && alpha(cell.play_btn) > 0.99);
+        crate::ui::library::hover(cell.container, false);
+        crate::ui::home::billboard_hover(false);
+        state_check("billboard: timer resumes after the pointer leaves", !ui.home.billboard.hovered);
+    }
+    unsafe {
+        let ui = UI.get().unwrap();
+        let cell = &ui.home.views[2].cells[0];
+        let alpha = |v: *mut AnyObject| -> f64 { msg_send![v, alphaValue] };
+        state_check("hover: title overlay hides on leave", cell.overlay.is_null() || alpha(cell.overlay) < 0.01);
+        scroll_home_to(0.);
+    }
+}
+fn s_home_see_all() {
+    unsafe { act(sel!(homeSeeAll:), tagged_button(2)) };
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("see all: opens the row", ui.home.see_all.as_deref() == Some("Recently Added Movies"));
+        state_check("see all: the row's grid, one card per item", ui.home.views.len() == 1 && ui.home.views[0].cells.len() == 2);
+        state_check("see all: no billboard on that page", ui.home.billboard.host.is_null());
+    }
+    audit_both("home see all");
+    unsafe { act(sel!(homeSeeAllBack:), nil()) };
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("see all: back to the rows", ui.home.see_all.is_none() && ui.home.views.len() == ui.home.rows.len());
+    }
+}
 fn s_home_empty() {
     handle_main(MainMsg::HomeLoaded(HomeRows::default()));
     unsafe {
@@ -2188,12 +2404,13 @@ fn s_home_empty() {
         state_check("home: empty rows clear the cards", ui.home.views.is_empty());
         state_check("home: empty state shown", visible(ui.state_host.get()));
         state_check("home: empty title", read_field(ui.status_label.get()) == "Nothing here yet");
+        state_check("home: empty state offers Retry", visible(ui.state_btn.get()));
     }
     audit_both("home empty");
     handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("home: rows back, state hidden", !visible(ui.state_host.get()) && ui.home.views.len() == 5);
+        state_check("home: rows back, state hidden", !visible(ui.state_host.get()) && ui.home.views.len() == 7);
     }
     // Reopening Home keeps it as the remembered place and asks for fresh rows.
     unsafe { act(sel!(homeSelected:), nil()) };
@@ -2499,7 +2716,7 @@ fn s_tabs_home() {
         let idx: NSInteger = msg_send![ui.home.seg.get(), selectedSegment];
         state_check("tabs: Home selected", idx == 0 && ui.home.section == crate::config::HomeSection::Home);
         state_check("tabs: Home has no grid", ui.home.grid.is_empty());
-        state_check("tabs: Home rows built", ui.home.views.len() == 5);
+        state_check("tabs: Home rows built", ui.home.views.len() == 7);
     }
     take_cmds();
     audit_both("unified home tabs");
@@ -2605,7 +2822,7 @@ fn s_tabs_home_again() {
         state_check("tabs: Home selected in the control", idx == 0);
     }
     handle_main(MainMsg::HomeLoaded(HomeRows { rows: home_fake_rows(), ..Default::default() }));
-    unsafe { state_check("tabs: Home rows back", UI.get().unwrap().home.views.len() == 5 && UI.get().unwrap().home.grid.is_empty()) };
+    unsafe { state_check("tabs: Home rows back", UI.get().unwrap().home.views.len() == 7 && UI.get().unwrap().home.grid.is_empty()) };
 }
 fn s_tabs_remember() {
     use crate::config::HomeSection;

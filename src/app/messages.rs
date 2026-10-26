@@ -275,9 +275,13 @@ pub enum MainMsg {
 pub enum HomeRowKind {
     ContinueWatching,
     NextUp,
-    /// One library's newest items; the title names the library.
+    /// Newest items of one kind (Movies or TV); the title names the kind.
     RecentlyAdded,
     Recommended,
+    /// Highest rated movies and shows.
+    TopRated,
+    /// Highest rated movies and shows in one genre; the title is the genre.
+    Genre,
 }
 
 impl HomeRowKind {
