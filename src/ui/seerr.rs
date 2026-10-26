@@ -569,7 +569,7 @@ unsafe fn make_pill(text: &str, role: &str, max_w: f64) -> (*mut AnyObject, f64)
     let b = surface(rect(0., 0., w, PILL_H), C_FILL_SEL, PILL_H / 2.);
     let _: () = msg_send![b, setFillColor: fill];
     let cv: *mut AnyObject = msg_send![b, contentView];
-    set_frame(l, rect(SP2, 3., w - 2. * SP2, 14.));
+    set_frame(l, rect(SP2, 2., w - 2. * SP2, 16.));
     add_sub(cv, l);
     (b, w)
 }

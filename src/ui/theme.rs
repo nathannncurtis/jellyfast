@@ -25,11 +25,11 @@ pub const TITLEBAR_H: f64 = 52.;
 /// Content left/right gutter.
 pub const EDGE: f64 = SP6;
 pub const GRID_COL_GAP: f64 = SP5;
-pub const GRID_ROW_GAP: f64 = SP6;
+pub const GRID_ROW_GAP: f64 = 32.;
 pub const TILE_MIN_W: f64 = 160.;
 pub const POSTER_ASPECT: f64 = 1.5;
 /// 8 gap + 17 title + 1 + 14 subtitle + 4.
-pub const CELL_TEXT_H: f64 = 44.;
+pub const CELL_TEXT_H: f64 = 48.;
 pub const SIDEBAR_ROW_H: f64 = 28.;
 pub const NOW_BAR_H: f64 = 72.;
 pub const PLAYER_BAR_H: f64 = 52.;
@@ -38,7 +38,7 @@ pub const PLAYER_CTRL_H: f64 = 128.;
 pub const HEADER_H: f64 = 44.;
 
 // ---- Radii -----------------------------------------------------------------
-pub const R_POSTER: f64 = 8.;
+pub const R_POSTER: f64 = 10.;
 pub const R_THUMB: f64 = 6.;
 pub const R_ROW: f64 = 6.;
 pub const R_CARD: f64 = 16.;
@@ -78,15 +78,17 @@ pub struct TypeStyle {
     pub weight: Weight,
     pub mono: bool,
 }
-pub const T_DISPLAY: TypeStyle = TypeStyle { size: 26., weight: Weight::Bold, mono: false };
-pub const T_TITLE: TypeStyle = TypeStyle { size: 20., weight: Weight::Semibold, mono: false };
-pub const T_HEADLINE: TypeStyle = TypeStyle { size: 15., weight: Weight::Semibold, mono: false };
-pub const T_BODY: TypeStyle = TypeStyle { size: 13., weight: Weight::Regular, mono: false };
-pub const T_BODY_EM: TypeStyle = TypeStyle { size: 13., weight: Weight::Medium, mono: false };
-pub const T_CALLOUT: TypeStyle = TypeStyle { size: 12., weight: Weight::Regular, mono: false };
-pub const T_CAPTION: TypeStyle = TypeStyle { size: 11., weight: Weight::Regular, mono: false };
-pub const T_CAPTION_EM: TypeStyle = TypeStyle { size: 11., weight: Weight::Semibold, mono: false };
-pub const T_MONO: TypeStyle = TypeStyle { size: 11., weight: Weight::Medium, mono: true };
+pub const T_DISPLAY: TypeStyle = TypeStyle { size: 34., weight: Weight::Bold, mono: false };
+/// Negative tracking for display sizes (applied by `tracked`), so big titles sit tighter.
+pub const TRACK_DISPLAY: f64 = -0.6;
+pub const T_TITLE: TypeStyle = TypeStyle { size: 24., weight: Weight::Semibold, mono: false };
+pub const T_HEADLINE: TypeStyle = TypeStyle { size: 20., weight: Weight::Semibold, mono: false };
+pub const T_BODY: TypeStyle = TypeStyle { size: 15., weight: Weight::Regular, mono: false };
+pub const T_BODY_EM: TypeStyle = TypeStyle { size: 15., weight: Weight::Medium, mono: false };
+pub const T_CALLOUT: TypeStyle = TypeStyle { size: 13., weight: Weight::Regular, mono: false };
+pub const T_CAPTION: TypeStyle = TypeStyle { size: 12., weight: Weight::Regular, mono: false };
+pub const T_CAPTION_EM: TypeStyle = TypeStyle { size: 12., weight: Weight::Semibold, mono: false };
+pub const T_MONO: TypeStyle = TypeStyle { size: 12., weight: Weight::Medium, mono: true };
 /// Elapsed / remaining clock on the video transport bar (10-foot sizing).
 pub const T_PLAYER_TIME: TypeStyle = TypeStyle { size: 14., weight: Weight::Medium, mono: true };
 
@@ -377,7 +379,7 @@ pub struct Shadow {
     pub dy: f64,
 }
 pub const SH_REST: Shadow = Shadow { opacity: 0.18, radius: 6., dy: -2. };
-pub const SH_HOVER: Shadow = Shadow { opacity: 0.32, radius: 14., dy: -6. };
+pub const SH_HOVER: Shadow = Shadow { opacity: 0.45, radius: 24., dy: -6. };
 pub const SH_CARD: Shadow = Shadow { opacity: 0.25, radius: 24., dy: -8. };
 
 // ---- Materials (NSVisualEffectView.h) --------------------------------------------
@@ -492,6 +494,21 @@ pub unsafe fn label(text: &str, t: TypeStyle, c: Col, align: usize) -> *mut AnyO
     v
 }
 /// Multi-line label that wraps (autoreleased).
+/// Applies letter-spacing (`kern`, points) to a label, keeping its font and text.
+pub unsafe fn tracked(v: *mut AnyObject, kern: f64) {
+    let text: *mut AnyObject = msg_send![v, stringValue];
+    let font_obj: *mut AnyObject = msg_send![v, font];
+    let kern_n: *mut AnyObject = msg_send![class!(NSNumber), numberWithDouble: kern];
+    let attrs: *mut AnyObject = msg_send![class!(NSMutableDictionary), dictionary];
+    let _: () = msg_send![attrs, setObject: kern_n, forKey: ns("NSKern")];
+    let _: () = msg_send![attrs, setObject: font_obj, forKey: ns("NSFont")];
+    let astr: *mut AnyObject = msg_send![class!(NSAttributedString), alloc];
+    let astr: *mut AnyObject = msg_send![astr, initWithString: text, attributes: attrs];
+    let _: () = msg_send![v, setAttributedStringValue: astr];
+    // Setting an attributed string drops the cell's truncation, so restore tail truncation.
+    let cell: *mut AnyObject = msg_send![v, cell];
+    let _: () = msg_send![cell, setLineBreakMode: 4usize];
+}
 pub unsafe fn wrapping_label(text: &str, t: TypeStyle, c: Col, align: usize) -> *mut AnyObject {
     let v: *mut AnyObject = msg_send![class!(NSTextField), wrappingLabelWithString: ns(text)];
     let _: () = msg_send![v, setFont: font(t)];

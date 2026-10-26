@@ -287,7 +287,6 @@ pub struct CellHandle {
     pub circle: *mut AnyObject,
     pub glyph: *mut AnyObject,
     pub play_icon: *mut AnyObject,
-    pub badge: *mut AnyObject,
     pub title: *mut AnyObject,
     pub sub: *mut AnyObject,
     pub btn: *mut AnyObject,

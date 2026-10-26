@@ -70,20 +70,6 @@ unsafe fn new_layer() -> *mut AnyObject {
 unsafe fn add_layer(parent: *mut AnyObject, child: *mut AnyObject) {
     let _: () = msg_send![parent, addSublayer: child];
 }
-unsafe fn palette_symbol(name: &str, pt: f64, colors: &[*mut AnyObject]) -> *mut AnyObject {
-    let img: *mut AnyObject =
-        msg_send![class!(NSImage), imageWithSystemSymbolName: ns(name), accessibilityDescription: nil()];
-    if img.is_null() {
-        return img;
-    }
-    let base: *mut AnyObject = msg_send![class!(NSImageSymbolConfiguration),
-        configurationWithPointSize: pt, weight: Weight::Medium.value()];
-    let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObjects: colors.as_ptr(), count: colors.len()];
-    let pal: *mut AnyObject = msg_send![class!(NSImageSymbolConfiguration), configurationWithPaletteColors: arr];
-    let cfg: *mut AnyObject = msg_send![base, configurationByApplyingConfiguration: pal];
-    let out: *mut AnyObject = msg_send![img, imageWithSymbolConfiguration: cfg];
-    if out.is_null() { img } else { out }
-}
 
 pub fn grid_set_items(items: &[ListItem]) {
     unsafe {
@@ -209,19 +195,6 @@ pub(crate) unsafe fn build_cell_keyed(
     let _: () = msg_send![play, setAlphaValue: 0.0f64];
     add_sub(container, play);
     autorel(play);
-    // Watched badge.
-    let badge: *mut AnyObject = msg_send![class!(NSImageView), alloc];
-    let badge: *mut AnyObject = msg_send![badge, initWithFrame: rect(0., 0., 20., 20.)];
-    let white = color(C_ON_MEDIA);
-    let acc = color(C_ACCENT);
-    let bimg = palette_symbol("checkmark.circle.fill", 16., &[white, acc]);
-    if !bimg.is_null() {
-        let _: () = msg_send![badge, setImage: bimg];
-    }
-    set_hidden(badge, !it.user_data.as_ref().map(|u| u.played).unwrap_or(false));
-    add_sub(container, badge);
-    autorel(badge);
-
     // Title + subtitle.
     let title = label(&it.name, T_BODY_EM, C_TEXT, ALIGN_LEFT);
     add_sub(container, title);
@@ -281,7 +254,6 @@ pub(crate) unsafe fn build_cell_keyed(
         circle,
         glyph,
         play_icon: play,
-        badge,
         title,
         sub,
         btn,
@@ -346,7 +318,6 @@ pub fn grid_set_skeleton(n: usize) {
                 circle: nil(),
                 glyph: nil(),
                 play_icon: nil(),
-                badge: nil(),
                 title: nil(),
                 sub: nil(),
                 btn: nil(),
@@ -440,9 +411,8 @@ pub(crate) unsafe fn layout_cell(c: &CellHandle, m: &Metrics) {
         let _: () = msg_send![c.prog_fill, setFrame: rect(0., 0., tw * c.prog_frac, 3.)];
         set_frame(c.glyph, rect(w / 2. - 20., h / 2. - 20., 40., 40.));
         set_frame(c.play_icon, rect(w / 2. - 12., h / 2. - 12., 24., 24.));
-        set_frame(c.badge, rect(w - SP2 - 20., SP2, 20., 20.));
-        set_frame(c.title, rect(0., h + SP2, w, 17.));
-        set_frame(c.sub, rect(0., h + SP2 + 18., w, 14.));
+        set_frame(c.title, rect(0., h + SP2, w, 20.));
+        set_frame(c.sub, rect(0., h + SP2 + 21., w, 16.));
         set_frame(c.btn, rect(0., 0., w, m.cell_h));
     }
     if !c.skel_title.is_null() {

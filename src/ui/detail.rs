@@ -564,10 +564,11 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut AnyObject, host: *mut AnyObject, ite
     let rw = (w - RIGHT_X - EDGE).max(160.);
     let mut y = hero_h + SP4;
     let title = label(&item.name, T_DISPLAY, C_TEXT, ALIGN_LEFT);
+    tracked(title, TRACK_DISPLAY);
     let _: () = msg_send![title, setToolTip: ns(&item.name)];
-    set_frame(title, rect(RIGHT_X, y, rw, 32.));
+    set_frame(title, rect(RIGHT_X, y, rw, 44.));
     add_sub(doc, title);
-    y += 40.;
+    y += 52.;
     let meta = meta_line(item);
     if !meta.is_empty() {
         place_text(doc, &meta, T_CALLOUT, C_TEXT2, rect(RIGHT_X, y, rw, 18.));
@@ -626,9 +627,9 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut AnyObject, host: *mut AnyObject, ite
     // Cast & Crew: one horizontally scrolling row of circular portraits.
     if !item.people.is_empty() {
         let head = label("Cast & Crew", T_TITLE, C_TEXT, ALIGN_LEFT);
-        set_frame(head, rect(EDGE, sy, w - 2. * EDGE, 24.));
+        set_frame(head, rect(EDGE, sy, w - 2. * EDGE, 30.));
         add_sub(doc, head);
-        sy += 24. + SP4;
+        sy += 30. + SP4;
         let n = item.people.len();
         let inner_w = EDGE * 2. + n as f64 * CAST_W + (n as f64 - 1.) * CAST_GAP;
         let row_h = CAST_H + SP4; // room for a legacy horizontal scroller
@@ -667,7 +668,7 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut AnyObject, host: *mut AnyObject, ite
 unsafe fn build_seasons(ui: &mut Ui, doc: *mut AnyObject, host: *mut AnyObject, w: f64, mut y: f64) -> f64 {
     let st = ui.detail.seasons.clone();
     let content_w = w - 2. * EDGE;
-    let head_h = 24.;
+    let head_h = 30.;
     let line = |y: f64| y + 18. + SP8;
     let mut head_w = content_w;
     ui.detail.season_popup = Ptr(std::ptr::null_mut());

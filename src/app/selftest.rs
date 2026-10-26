@@ -1251,7 +1251,7 @@ fn s_hover_model() {
         let c = &ui.grid_data.as_ref().unwrap().cells[0];
         let _: () = msg_send![c.container, mouseEntered: nil()];
         let so: f32 = msg_send![c.shadow, shadowOpacity];
-        state_check("hover raises shadow to 0.32", (so - 0.32).abs() < 0.001);
+        state_check("hover raises shadow to 0.45", (so - 0.45).abs() < 0.001);
         let _: () = msg_send![c.container, mouseExited: nil()];
         let so: f32 = msg_send![c.shadow, shadowOpacity];
         state_check("unhover restores shadow", (so - 0.18).abs() < 0.001);
@@ -3528,6 +3528,13 @@ unsafe fn seerr_subviews(row: *mut AnyObject, cls: &str, pred: &dyn Fn(*mut AnyO
     }
     k
 }
+/// A status pill: a 20 pt tall box with radius 10. Poster placeholders share the radius,
+/// so the height tells them apart.
+unsafe fn seerr_is_pill(b: *mut AnyObject) -> bool {
+    let rad: f64 = msg_send![b, cornerRadius];
+    let f: NSRect = msg_send![b, frame];
+    (rad - 10.).abs() < 0.01 && (f.size.h - 20.).abs() < 0.01
+}
 /// Number of rows in the Seerr list that carry a Request button.
 fn seerr_button_rows() -> usize {
     unsafe {
@@ -3543,10 +3550,7 @@ fn seerr_pills() -> usize {
             .cards
             .iter()
             .map(|r| {
-                seerr_subviews(*r, "NSBox", &|b| {
-                    let rad: f64 = msg_send![b, cornerRadius];
-                    (rad - 10.).abs() < 0.01
-                })
+                seerr_subviews(*r, "NSBox", &|b| seerr_is_pill(b))
             })
             .sum()
     }
@@ -3570,10 +3574,7 @@ fn seerr_kinds_match() -> bool {
             && ui.seerr.cards.iter().zip(ui.seerr.results.iter()).all(|(card, r)| {
                 let want_button = r.availability == Availability::NotRequested;
                 let has_button = seerr_subviews(*card, "NSButton", &|_| true) > 0;
-                let has_pill = seerr_subviews(*card, "NSBox", &|b| {
-                    let rad: f64 = msg_send![b, cornerRadius];
-                    (rad - 10.).abs() < 0.01
-                }) > 0;
+                let has_pill = seerr_subviews(*card, "NSBox", &|b| seerr_is_pill(b)) > 0;
                 has_button == want_button && has_pill == !want_button
             })
     }
@@ -4160,7 +4161,10 @@ fn s_themes_restore() {
 fn active_theme_is_builtin() -> bool {
     unsafe {
         let text = srgb(crate::ui::theme::color(crate::ui::theme::Col::Text));
+        // The default dark is a fixed near-black palette now; the system label colour
+        // is still accepted for the light built-in.
         let label: *mut AnyObject = msg_send![class!(NSColor), labelColor];
-        text == srgb(label)
+        let dark_text: *mut AnyObject = msg_send![class!(NSColor), colorWithSRGBRed: 242. / 255., green: 242. / 255., blue: 247. / 255., alpha: 1.0f64];
+        text == srgb(label) || text == srgb(dark_text)
     }
 }
