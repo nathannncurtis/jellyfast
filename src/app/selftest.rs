@@ -3128,6 +3128,15 @@ fn s_skip_audit() {
     unsafe {
         state_check("skip: button shown inside the intro", crate::ui::skip::button_visible());
         state_check("skip: label is Skip Intro", crate::ui::skip::button_label() == "Skip Intro");
+        let m = crate::ui::skip::button_metrics();
+        state_check(&format!("skip: button at least 44 pt tall (panel {:.0}, button {:.0})", m.pill_h, m.btn_h), m.pill_h >= 44.0 && m.btn_h >= 44.0);
+        state_check("skip: label fits the button, not truncated", m.label_fits);
+        state_check(&format!("skip: button 32 pt in from the right edge (at {:.0})", m.right_gap), (m.right_gap - 32.0).abs() < 1.0);
+        state_check(&format!("skip: button clears the transport bar (gap {:.0})", m.bottom_gap), m.bottom_gap >= 12.0);
+        // Hover in and out exercises the button's own pointer handling (its press path needs a real event).
+        let btn = UI.get().unwrap().skip.button.get();
+        let _: () = msg_send![btn, mouseEntered: nil()];
+        let _: () = msg_send![btn, mouseExited: nil()];
         // Resume seek (1.5 s) must land there, not at 0: about 0.7 s has played since.
         let p = in_segment_pos();
         state_check(&format!("resume: playhead landed near 1.5 s (at {:.2}s)", p), p >= 1.2 && p <= 3.2);
@@ -3203,6 +3212,7 @@ fn s_upnext_play() {
         let text = crate::ui::skip::card_text();
         state_check(&format!("up next: card names the next episode ({})", text), text.contains("The Next One") && text.contains("Playing in"));
         state_check("up next: no skip button on a plain episode", !crate::ui::skip::button_visible());
+        state_check("up next: title fits the card", crate::ui::skip::card_title_fits());
     }
     audit_both("up next card");
     unsafe {

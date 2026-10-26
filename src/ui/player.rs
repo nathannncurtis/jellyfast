@@ -19,7 +19,9 @@ pub(crate) static GRADIENT_CLASS: OnceLock<&'static Class> = OnceLock::new();
 pub const TL_RESERVE: f64 = 84.;
 /// Toast row sits just below the top bar; the info panel one row lower, so neither collides.
 const TOAST_TOP: f64 = PLAYER_BAR_H + SP2;
-const INFO_TOP: f64 = TOAST_TOP + 32. + SP2;
+/// Toast height: a 13 pt line with room to breathe, matching the skip button's panel.
+const TOAST_H: f64 = 40.;
+const INFO_TOP: f64 = TOAST_TOP + TOAST_H + SP2;
 
 pub(crate) unsafe fn register_player_classes() {
     let mut d = ClassDecl::new("JRPlayerHost", class!(NSView)).unwrap();
@@ -192,12 +194,10 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     crate::ui::skip::build(ph, b);
 
     // ---- toast ----
-    let chip = vev(MAT_HUD, BLEND_WITHIN);
-    set_frame(chip, rect(b.size.w / 2. - 100., b.size.h - TOAST_TOP - 32., 200., 32.));
+    // Same panel as the skip button: frosted HUD, continuous corners, light border.
+    let chip = crate::ui::skip::hud_panel(12.);
+    set_frame(chip, rect(b.size.w / 2. - 100., b.size.h - TOAST_TOP - TOAST_H, 200., TOAST_H));
     set_autoresize(chip, MARGIN_MINX | MARGIN_MAXX | MARGIN_MINY);
-    let cl = layer_of(chip);
-    set_corner(cl, 16.);
-    let _: () = msg_send![cl, setMasksToBounds: YES];
     let _: () = msg_send![chip, setAlphaValue: 0.0f64];
     add_sub(ph, chip);
     ui.chip = Ptr(chip);
@@ -208,7 +208,7 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut Object, avv: *mut Object, b: N
     add_sub(chip, ti);
     ui.toast_icon = Ptr(ti);
     let tl = label("", T_BODY_EM, C_ON_MEDIA, ALIGN_CENTER);
-    set_frame(tl, rect(SP4, 7., 168., 17.));
+    set_frame(tl, rect(SP4, (TOAST_H - 17.) / 2., 168., 17.));
     add_sub(chip, tl);
     ui.chip_label = Ptr(tl);
 
@@ -360,9 +360,9 @@ pub(crate) unsafe fn toast(text: &str, symbol_name: Option<&str>, is_err: bool) 
     let icon_w = if has_icon { 16. + SP2 } else { 0. };
     let w = (tsz.w.ceil() + 2. * SP4 + icon_w).clamp(96., 420.);
     let ph_b = bounds_of(ui.player_host.get());
-    set_frame(ui.chip.get(), rect((ph_b.size.w - w) / 2., ph_b.size.h - TOAST_TOP - 32., w, 32.));
-    set_frame(ui.toast_icon.get(), rect(SP3, 8., 16., 16.));
-    set_frame(ui.chip_label.get(), rect(SP4 + icon_w, 7., w - 2. * SP4 - icon_w, 17.));
+    set_frame(ui.chip.get(), rect((ph_b.size.w - w) / 2., ph_b.size.h - TOAST_TOP - TOAST_H, w, TOAST_H));
+    set_frame(ui.toast_icon.get(), rect(SP3, (TOAST_H - 16.) / 2., 16., 16.));
+    set_frame(ui.chip_label.get(), rect(SP4 + icon_w, (TOAST_H - 17.) / 2., w - 2. * SP4 - icon_w, 17.));
     fade(ui.chip.get(), 1.0, M_STD);
     let delay = if is_err { 6.0f64 } else { 1.8f64 };
     let _: () = msg_send![ctl, performSelector: sel!(jrHideToast:) withObject: nil() afterDelay: delay];
