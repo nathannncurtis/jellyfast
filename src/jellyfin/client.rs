@@ -7,7 +7,7 @@ use crate::jellyfin::urls::enc;
 
 /// `Fields` requested for the item detail page.
 const DETAIL_FIELDS: &str =
-    "People,Genres,Overview,CommunityRating,OfficialRating,ProductionYear,RunTimeTicks,BackdropImageTags";
+    "People,Genres,Overview,CommunityRating,OfficialRating,ProductionYear,RunTimeTicks,BackdropImageTags,MediaSources,RemoteTrailers,CriticRating,Taglines";
 
 #[derive(Debug)]
 pub enum JFError {
@@ -339,6 +339,14 @@ impl JellyfinClient {
         Ok(page.items.into_iter().next())
     }
 
+    /// Items the server considers similar to `item_id`, best match first.
+    pub async fn similar(&self, item_id: &str, limit: u32) -> Result<Vec<ListItem>, JFError> {
+        let path = format!("/Items/{}/Similar", enc(item_id));
+        let query = [("UserId", self.user_id.clone()), ("Limit", limit.to_string())];
+        let page: ItemsPage<ListItem> = self.get_json(&path, &query).await?;
+        Ok(page.items)
+    }
+
     /// Skip-button ranges of an item. A 404 means the server has none for it (older
     /// servers, or nothing analysed yet), which is an empty list, not an error.
     pub async fn media_segments(&self, item_id: &str) -> Result<Vec<MediaSegment>, JFError> {
@@ -654,6 +662,32 @@ impl JellyfinClient {
         let r = self
             .http
             .post(format!("{}{}", self.base, path))
+            .header("Authorization", self.auth_header())
+            .header("X-Emby-Token", &self.token)
+            .send()
+            .await
+            .map_err(map_err)?;
+        check(r).await?;
+        Ok(())
+    }
+
+    /// Adds or removes an item from the user's favourites.
+    pub async fn set_favorite(&self, item_id: &str, favorite: bool) -> Result<(), JFError> {
+        if read_only() {
+            return Ok(());
+        }
+        let m = if favorite { reqwest::Method::POST } else { reqwest::Method::DELETE };
+        let r = self
+            .http
+            .request(
+                m,
+                format!(
+                    "{}/Users/{}/FavoriteItems/{}",
+                    self.base,
+                    enc(&self.user_id),
+                    enc(item_id),
+                ),
+            )
             .header("Authorization", self.auth_header())
             .header("X-Emby-Token", &self.token)
             .send()
@@ -1684,6 +1718,42 @@ mod tests {
             err(client(&refused_base()).set_played("i", true).await),
             JFError::Network(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn set_favorite_posts_and_deletes_favorite_items() {
+        let m = serve(|_| status_only(200)).await;
+        client(&m.base).set_favorite("item-1", true).await.unwrap();
+        let r = m.last();
+        assert_eq!(r.method, "POST");
+        assert_eq!(r.path, format!("/Users/{}/FavoriteItems/item-1", USER));
+        assert_token_auth(&r);
+        client(&m.base).set_favorite("item-1", false).await.unwrap();
+        let r = m.last();
+        assert_eq!(r.method, "DELETE");
+        assert_eq!(r.path, format!("/Users/{}/FavoriteItems/item-1", USER));
+    }
+
+    #[tokio::test]
+    async fn set_favorite_error_mapping() {
+        let m = serve(|_| status_only(403)).await;
+        assert!(matches!(err(client(&m.base).set_favorite("i", true).await), JFError::Auth(_)));
+        let m = serve(|_| status_only(500)).await;
+        assert!(matches!(err(client(&m.base).set_favorite("i", false).await), JFError::Api(500, _)));
+    }
+
+    #[tokio::test]
+    async fn similar_path_query_and_parse() {
+        let body = r#"{"Items":[{"Id":"s1","Name":"Alike","Type":"Movie"},{"Id":"s2","Name":"Also","Type":"Series"}],"TotalRecordCount":2}"#;
+        let m = serve(|_| reply(200, body)).await;
+        let items = client(&m.base).similar("item 1", 12).await.unwrap();
+        assert_eq!(items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), vec!["Alike", "Also"]);
+        let r = m.last();
+        assert_eq!(r.method, "GET");
+        assert_eq!(r.path, "/Items/item%201/Similar");
+        assert_eq!(r.qp("Limit"), Some("12"));
+        assert_eq!(r.qp("UserId"), Some(USER));
+        assert_token_auth(&r);
     }
 
     #[tokio::test]

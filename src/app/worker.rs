@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use crate::app::messages::*;
 use crate::app::library_query::{browse_query, filter_query, library_query};
 use crate::jellyfin::client::JellyfinClient;
-use crate::jellyfin::models::{DetailItem, Episode, FullItem, Person, Season};
+use crate::jellyfin::models::{DetailItem, Episode, FullItem, ListItem, Person, Season};
 use crate::jellyfin::segments::{self, NextUp, Segment};
 use crate::jellyfin::urls::{build_art_url, build_image_url};
 use crate::config::{load_config, save_config, Config};
@@ -208,7 +208,10 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 if let Some(c) = &client {
                     match c.item_detail(&item_id).await {
                         Ok(d) => {
-                            let (view, jobs) = plan_detail(c, &d);
+                            // Both extras are optional: a failed request leaves its section out, not the page.
+                            let similar = c.similar(&item_id, SIMILAR_LIMIT).await.unwrap_or_default();
+                            let next = if d.item_type == "Series" { c.series_next_up(&item_id).await.ok().flatten() } else { None };
+                            let (view, jobs) = plan_detail(c, &d, similar, next);
                             let _ = main_tx.send(MainMsg::DetailLoaded(Box::new(view)));
                             fetch_art(jobs, &main_tx, &poster_dir, http_poster.as_ref());
                         }
@@ -424,6 +427,15 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     if let Err(e) = c.set_played(&item_id, played).await {
                         tracing::warn!("set_played failed: {}", e);
                     }
+                }
+            }
+            UiCmd::SetFavorite { item_id, favorite } => {
+                if let Some(c) = &client {
+                    let msg = match c.set_favorite(&item_id, favorite).await {
+                        Ok(()) => MainMsg::FavoriteChanged { item_id, favorite },
+                        Err(e) => MainMsg::FavoriteError(format!("{}", e)),
+                    };
+                    let _ = main_tx.send(msg);
                 }
             }
             UiCmd::SeerrSearch { q } => {
@@ -1041,9 +1053,18 @@ pub(crate) fn fetch_home_art(
 /// Cast and crew shown on the detail page (the first this many of `People`).
 const MAX_PEOPLE: usize = 30;
 
+/// Similar titles shown on the detail page.
+const SIMILAR_LIMIT: u32 = 12;
+
 /// Turn a detail response into the page's view plus the artwork to fetch
 /// as `(key, url)` jobs. Artwork is requested only where the server has it.
-pub(crate) fn plan_detail(c: &JellyfinClient, d: &DetailItem) -> (DetailView, Vec<(u64, String)>) {
+/// `similar` and `next_up` are the page's extra lookups (series only for `next_up`).
+pub(crate) fn plan_detail(
+    c: &JellyfinClient,
+    d: &DetailItem,
+    similar: Vec<ListItem>,
+    next_up: Option<Episode>,
+) -> (DetailView, Vec<(u64, String)>) {
     let mut jobs = Vec::new();
     let poster_key = d.image_tags.as_ref().and_then(|t| t.primary.as_ref()).map(|_| sys_key(&d.id));
     if let Some(k) = poster_key {
@@ -1076,6 +1097,19 @@ pub(crate) fn plan_detail(c: &JellyfinClient, d: &DetailItem) -> (DetailView, Ve
         .collect();
     let played = d.user_data.as_ref().map(|u| u.played).unwrap_or(false);
     let position = d.user_data.as_ref().map(|u| u.position_ticks).unwrap_or(0);
+    let trailer_urls = d.remote_trailers.iter().map(|t| t.url.clone()).filter(|u| !u.trim().is_empty()).collect();
+    let similar = similar
+        .into_iter()
+        .map(|i| SimilarItem { id: i.id, name: i.name, year: i.year })
+        .collect();
+    let next_up = next_up.map(|e| NextUpEpisode {
+        id: e.id,
+        name: e.name,
+        season: e.parent_index,
+        number: e.number,
+        position_ticks: e.user_data.as_ref().map(|u| u.position_ticks).unwrap_or(0),
+        run_time_ticks: e.run_time_ticks,
+    });
     let view = DetailView {
         id: d.id.clone(),
         name: d.name.clone(),
@@ -1092,6 +1126,13 @@ pub(crate) fn plan_detail(c: &JellyfinClient, d: &DetailItem) -> (DetailView, Ve
         poster_key,
         backdrop_key,
         people,
+        trailer_urls,
+        tagline: d.taglines.first().filter(|t| !t.trim().is_empty()).cloned(),
+        critic_rating: d.critic_rating,
+        badges: crate::jellyfin::models::quality_badges(d.media_sources.first()),
+        is_favorite: d.user_data.as_ref().map(|u| u.is_favorite).unwrap_or(false),
+        similar,
+        next_up,
     };
     (view, jobs)
 }
@@ -1566,8 +1607,17 @@ mod tests {
                         {"Id": "p-dir", "Name": "Dan Director", "Role": "", "Type": "Director"},
                         {"Id": "p-noimg", "Name": "No Image", "Role": "Extra", "Type": "Actor"}
                     ]);
+                    v["MediaSources"] = serde_json::json!([{"Id": "ms1", "MediaStreams": [
+                        {"Type": "Video", "Width": 3840, "VideoRange": "HDR", "VideoRangeType": "HDR10"},
+                        {"Type": "Audio", "Channels": 8, "DisplayTitle": "English TrueHD Atmos"},
+                        {"Type": "Subtitle", "IsHearingImpaired": true}
+                    ]}]);
+                    v["RemoteTrailers"] = serde_json::json!([{"Url": "https://example.test/trailer", "Name": "Trailer"}]);
+                    v["Taglines"] = serde_json::json!(["Tagline one"]);
+                    v["CriticRating"] = serde_json::json!(91);
                     match *id {
                         "det-series" => v["Type"] = "Series".into(),
+                        "det-fav" => v["UserData"] = serde_json::json!({"Played": false, "PlaybackPositionTicks": 0, "IsFavorite": true}),
                         "det-resume" => v["UserData"] = serde_json::json!({"Played": false, "PlaybackPositionTicks": 6_000_000_000i64}),
                         "det-played" => v["UserData"] = serde_json::json!({"Played": true, "PlaybackPositionTicks": 0}),
                         _ => {}
@@ -1579,6 +1629,7 @@ mod tests {
                 let items = match r.query.get("SeriesId").map(String::as_str) {
                     Some("sr1") => vec![serde_json::json!({"Id": "nx1", "Name": "Next", "Type": "Episode", "IndexNumber": 3, "ParentIndexNumber": 2, "SeasonId": "sea-b"})],
                     Some("sr2") => vec![serde_json::json!({"Id": "nx2", "Name": "Next", "Type": "Episode", "IndexNumber": 1, "ParentIndexNumber": 2})],
+                    Some("det-series") => vec![serde_json::json!({"Id": "nx-det", "Name": "Next Ep", "Type": "Episode", "IndexNumber": 4, "ParentIndexNumber": 2, "RunTimeTicks": 30_000_000_000i64, "UserData": {"Played": false, "PlaybackPositionTicks": 100_000_000i64}})],
                     Some("sr3") => return status(500),
                     _ => vec![],
                 };
@@ -1657,6 +1708,17 @@ mod tests {
             ])),
             ("POST", ["Sessions", sid, "Playing"]) | ("POST", ["Sessions", sid, "Playing", _]) => {
                 if *sid == "sess-gone" { status(404) } else { status(204) }
+            }
+            ("GET", ["Items", _, "Similar"]) => json(serde_json::json!({"Items": [
+                {"Id": "s1", "Name": "Alike", "Type": "Movie", "ProductionYear": 2001},
+                {"Id": "s2", "Name": "Also", "Type": "Series"}
+            ]})),
+            ("POST", ["Users", _, "FavoriteItems", id]) | ("DELETE", ["Users", _, "FavoriteItems", id]) => {
+                if *id == "boom" {
+                    status(500)
+                } else {
+                    json(serde_json::json!({"IsFavorite": true}))
+                }
             }
             ("POST", ["Users", _, "PlayedItems", id]) | ("DELETE", ["Users", _, "PlayedItems", id]) => {
                 if *id == "boom" {
@@ -2665,6 +2727,54 @@ mod tests {
     }
 
     // ------------------------------------------------------ item detail
+    #[tokio::test]
+    async fn open_detail_carries_badges_similar_and_favorite() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "det-fav".into() });
+        let v = match h.next().await {
+            MainMsg::DetailLoaded(v) => *v,
+            o => panic!("{:?}", o),
+        };
+        assert!(v.is_favorite);
+        assert_eq!(v.badges, vec!["4K", "HDR10", "Atmos", "CC/SDH"]);
+        assert_eq!(v.trailer_urls, vec!["https://example.test/trailer".to_string()]);
+        assert_eq!(v.tagline.as_deref(), Some("Tagline one"));
+        assert_eq!(v.critic_rating, Some(91.0));
+        assert_eq!(v.similar.iter().map(|s| (s.id.as_str(), s.year)).collect::<Vec<_>>(), vec![("s1", Some(2001)), ("s2", None)]);
+        assert!(v.next_up.is_none(), "only series carry a Next Up episode");
+        assert_eq!(m.find("GET", "/Items/det-fav/Similar").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_series_detail_carries_next_up() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::OpenDetail { item_id: "det-series".into() });
+        let v = match h.next().await {
+            MainMsg::DetailLoaded(v) => *v,
+            o => panic!("{:?}", o),
+        };
+        let n = v.next_up.expect("series has a next up episode");
+        assert_eq!(
+            (n.id.as_str(), n.name.as_str(), n.season, n.number, n.position_ticks, n.run_time_ticks),
+            ("nx-det", "Next Ep", Some(2), Some(4), 100_000_000, Some(30_000_000_000))
+        );
+        assert!(!v.is_favorite && v.badges.len() == 4);
+        assert_eq!(m.find("GET", "/Shows/NextUp").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_favorite_reports_change_or_error() {
+        let (_e, m, mut h) = connected().await;
+        h.send(UiCmd::SetFavorite { item_id: "det-movie".into(), favorite: true });
+        match h.next().await {
+            MainMsg::FavoriteChanged { item_id, favorite } => assert_eq!((item_id.as_str(), favorite), ("det-movie", true)),
+            o => panic!("{:?}", o),
+        }
+        assert_eq!(m.find("POST", "/Users/u1/FavoriteItems/det-movie").len(), 1);
+        h.send(UiCmd::SetFavorite { item_id: "boom".into(), favorite: false });
+        assert!(matches!(h.next().await, MainMsg::FavoriteError(_)));
+    }
+
     #[tokio::test]
     async fn open_detail_builds_view_and_fetches_art() {
         let (_e, m, mut h) = connected().await;

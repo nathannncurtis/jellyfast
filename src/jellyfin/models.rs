@@ -183,6 +183,8 @@ pub struct UserData {
     /// ISO 8601 time of the last play; used to order Continue Watching across libraries.
     #[serde(rename = "LastPlayedDate", default)]
     pub last_played_date: Option<String>,
+    #[serde(rename = "IsFavorite", default)]
+    pub is_favorite: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -273,6 +275,66 @@ pub struct MediaStream {
     pub language: Option<String>,
     #[serde(rename = "DisplayTitle", default)]
     pub display_title: Option<String>,
+    #[serde(rename = "Width", default)]
+    pub width: Option<u32>,
+    /// "SDR", "HDR" or "Unknown" on video streams.
+    #[serde(rename = "VideoRange", default)]
+    pub video_range: Option<String>,
+    /// Finer than VideoRange: "DOVI", "DOVIWithHDR10", "HDR10", "HDR10Plus", "HLG", ...
+    #[serde(rename = "VideoRangeType", default)]
+    pub video_range_type: Option<String>,
+    #[serde(rename = "Channels", default)]
+    pub channels: Option<u32>,
+    /// Audio profile, e.g. "Dolby Atmos" on TrueHD/E-AC-3 tracks.
+    #[serde(rename = "Profile", default)]
+    pub profile: Option<String>,
+    #[serde(rename = "IsHearingImpaired", default)]
+    pub is_hearing_impaired: bool,
+}
+
+/// Quality badges for the detail page, from the item's first media source:
+/// resolution, HDR format, audio layout, then captions. Empty when nothing is known.
+pub fn quality_badges(source: Option<&MediaSource>) -> Vec<&'static str> {
+    let Some(src) = source else { return Vec::new() };
+    let mut out = Vec::new();
+    let video = src.streams.iter().find(|s| s.stream_type == "Video");
+    if let Some(w) = video.and_then(|v| v.width) {
+        if w >= 3800 {
+            out.push("4K");
+        } else if w >= 1200 {
+            out.push("HD");
+        }
+    }
+    if let Some(v) = video {
+        let range_type = v.video_range_type.as_deref().unwrap_or("");
+        if range_type.starts_with("DOVI") {
+            out.push("Dolby Vision");
+        } else if range_type.starts_with("HDR10") || v.video_range.as_deref() == Some("HDR") {
+            out.push("HDR10");
+        }
+    }
+    if let Some(a) = src.streams.iter().find(|s| s.stream_type == "Audio") {
+        let atmos = [a.display_title.as_deref(), a.profile.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|t| t.to_ascii_lowercase().contains("atmos"));
+        if atmos {
+            out.push("Atmos");
+        } else if a.channels.unwrap_or(0) >= 8 {
+            out.push("7.1");
+        } else if a.channels == Some(6) {
+            out.push("5.1");
+        }
+    }
+    let captions = src.streams.iter().any(|s| {
+        s.stream_type == "Subtitle"
+            && (s.is_hearing_impaired
+                || s.display_title.as_deref().is_some_and(|t| t.contains("SDH") || t.contains("CC")))
+    });
+    if captions {
+        out.push("CC/SDH");
+    }
+    out
 }
 
 /// One entry of an item's `People` list (cast and crew).
@@ -321,6 +383,24 @@ pub struct DetailItem {
     pub image_tags: Option<ImageTags>,
     #[serde(rename = "BackdropImageTags", default)]
     pub backdrop_tags: Vec<String>,
+    #[serde(rename = "MediaSources", default)]
+    pub media_sources: Vec<MediaSource>,
+    #[serde(rename = "RemoteTrailers", default)]
+    pub remote_trailers: Vec<RemoteTrailer>,
+    /// Critic score (0-100, e.g. Rotten Tomatoes), when the server has one.
+    #[serde(rename = "CriticRating", default)]
+    pub critic_rating: Option<f64>,
+    #[serde(rename = "Taglines", default)]
+    pub taglines: Vec<String>,
+}
+
+/// One entry of an item's `RemoteTrailers` list (a trailer on an outside site).
+#[derive(Clone, Debug, Deserialize)]
+pub struct RemoteTrailer {
+    #[serde(rename = "Url")]
+    pub url: String,
+    #[serde(rename = "Name", default)]
+    pub name: Option<String>,
 }
 
 /// One season of a series (GET /Shows/{id}/Seasons).
@@ -447,6 +527,51 @@ mod wide_art_tests {
         assert_eq!(item(serde_json::json!({"Primary": "p"}), serde_json::json!(["b"])).wide_art_kind(), Some("Backdrop"));
         assert_eq!(item(serde_json::json!({"Primary": "p"}), serde_json::json!([])).wide_art_kind(), Some("Primary"));
         assert_eq!(item(serde_json::json!({}), serde_json::json!([])).wide_art_kind(), None);
+    }
+}
+
+#[cfg(test)]
+mod quality_badge_tests {
+    use super::*;
+
+    fn source(v: serde_json::Value) -> MediaSource {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn resolution_and_hdr_badges() {
+        let uhd = source(serde_json::json!({"Id": "a", "MediaStreams": [
+            {"Type": "Video", "Width": 3840, "VideoRange": "HDR", "VideoRangeType": "HDR10"}]}));
+        assert_eq!(quality_badges(Some(&uhd)), vec!["4K", "HDR10"]);
+        let dv = source(serde_json::json!({"Id": "b", "MediaStreams": [
+            {"Type": "Video", "Width": 1920, "VideoRange": "HDR", "VideoRangeType": "DOVIWithHDR10"}]}));
+        assert_eq!(quality_badges(Some(&dv)), vec!["HD", "Dolby Vision"]);
+        let sdr = source(serde_json::json!({"Id": "c", "MediaStreams": [
+            {"Type": "Video", "Width": 720, "VideoRange": "SDR", "VideoRangeType": "SDR"}]}));
+        assert!(quality_badges(Some(&sdr)).is_empty());
+    }
+
+    #[test]
+    fn audio_and_caption_badges() {
+        let atmos = source(serde_json::json!({"Id": "a", "MediaStreams": [
+            {"Type": "Audio", "Channels": 8, "DisplayTitle": "English - TRUEHD Atmos 7.1"},
+            {"Type": "Subtitle", "IsHearingImpaired": true}]}));
+        assert_eq!(quality_badges(Some(&atmos)), vec!["Atmos", "CC/SDH"]);
+        let surround = source(serde_json::json!({"Id": "b", "MediaStreams": [
+            {"Type": "Audio", "Channels": 8, "DisplayTitle": "English 7.1"},
+            {"Type": "Subtitle", "DisplayTitle": "English (SDH)"}]}));
+        assert_eq!(quality_badges(Some(&surround)), vec!["7.1", "CC/SDH"]);
+        let five = source(serde_json::json!({"Id": "c", "MediaStreams": [
+            {"Type": "Audio", "Channels": 6, "Profile": "Dolby Digital"},
+            {"Type": "Subtitle", "DisplayTitle": "English"}]}));
+        assert_eq!(quality_badges(Some(&five)), vec!["5.1"]);
+    }
+
+    #[test]
+    fn no_source_means_no_badges() {
+        assert!(quality_badges(None).is_empty());
+        let bare = source(serde_json::json!({"Id": "d", "MediaStreams": []}));
+        assert!(quality_badges(Some(&bare)).is_empty());
     }
 }
 

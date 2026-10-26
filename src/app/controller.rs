@@ -110,6 +110,11 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::PlaybackReady(ps) => unsafe {
             start_playback(&ps);
         },
+        // No favourite button yet, so a change needs no screen update.
+        MainMsg::FavoriteChanged { .. } => {}
+        MainMsg::FavoriteError(e) => unsafe {
+            crate::ui::player::toast(&e, Some("exclamationmark.triangle"), true);
+        },
         MainMsg::PlaybackError(e) => unsafe {
             let ui = UI.get_mut().unwrap();
             set_busy(false);
