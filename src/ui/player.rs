@@ -177,12 +177,12 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut AnyObject, avv: *mut AnyObject
 
     let tx = TL_RESERVE + 28. + SP2;
     let tt = label("", T_HEADLINE, C_ON_MEDIA, ALIGN_LEFT);
-    set_frame(tt, rect(tx, 26., b.size.w - tx - SP4, 18.));
+    set_frame(tt, rect(tx, 22., b.size.w - tx - SP4, 28.));
     set_autoresize(tt, RESIZE_W);
     add_sub(bar, tt);
     ui.top_title = Ptr(tt);
     let ts = label("", T_CAPTION, C_ON_MEDIA2, ALIGN_LEFT);
-    set_frame(ts, rect(tx, 9., b.size.w - tx - SP4, 14.));
+    set_frame(ts, rect(tx, 4., b.size.w - tx - SP4, 16.));
     set_autoresize(ts, RESIZE_W);
     add_sub(bar, ts);
     ui.top_sub = Ptr(ts);

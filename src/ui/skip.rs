@@ -38,7 +38,7 @@ const RISE: f64 = SP4;
 const CARD_W: f64 = 360.;
 /// 16:9 artwork across the card's top, then the title, the countdown and the buttons.
 const ART_H: f64 = CARD_W * 9. / 16.;
-const CARD_H: f64 = ART_H + SP3 + 20. + SP1 + 15. + SP3 + PILL_H + SP4;
+const CARD_H: f64 = ART_H + SP3 + 24. + SP1 + 15. + SP3 + PILL_H + SP4;
 const CARD_PAD: f64 = SP4;
 /// Play Now pill: a white pill with a countdown ring at its left.
 const PILL_H: f64 = 36.;
@@ -99,6 +99,8 @@ pub struct SkipUi {
     pub series_item: Ptr,
     pub card: Ptr,
     pub thumb: Ptr,
+    /// Film glyph over the artwork area until the still is set.
+    pub art_glyph: Ptr,
     pub title: Ptr,
     pub count: Ptr,
     pub play: Ptr,
@@ -110,7 +112,7 @@ pub struct SkipUi {
 impl SkipUi {
     pub fn new() -> SkipUi {
         let n = || Ptr(std::ptr::null_mut());
-        SkipUi { pill: n(), button: n(), timer: n(), series_item: n(), card: n(), thumb: n(), title: n(), count: n(), play: n(), cancel: n(), ring: n() }
+        SkipUi { pill: n(), button: n(), timer: n(), series_item: n(), card: n(), thumb: n(), art_glyph: n(), title: n(), count: n(), play: n(), cancel: n(), ring: n() }
     }
 }
 
@@ -204,6 +206,28 @@ extern "C" fn btn_cursor(this: *mut AnyObject, _c: Sel) {
     }
 }
 
+/// A centred glyph over an empty artwork area: the placeholder until a still arrives.
+pub(crate) unsafe fn art_placeholder(frame: NSRect, name: &str, pt: f64) -> *mut AnyObject {
+    let g: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let g: *mut AnyObject = autorel(msg_send![g, initWithFrame: rect(
+        frame.origin.x + (frame.size.w - pt) / 2., frame.origin.y + (frame.size.h - pt) / 2., pt, pt)]);
+    let img = symbol(name, pt, Weight::Regular);
+    if !img.is_null() {
+        let _: () = msg_send![g, setImage: img];
+    }
+    let _: () = msg_send![g, setContentTintColor: color(C_ON_MEDIA2)];
+    g
+}
+
+/// The Up Next card's artwork has been set (a real still, not the placeholder).
+pub fn card_art_shown() -> bool {
+    unsafe {
+        let Some(ui) = UI.get() else { return false };
+        let img: *mut AnyObject = msg_send![ui.skip.thumb.get(), image];
+        !img.is_null()
+    }
+}
+
 /// Builds the skip button and the Up Next card inside the player host, above the transport bar.
 pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
@@ -224,13 +248,18 @@ pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     set_corner(tl, PANEL_R);
     let _: () = msg_send![tl, setMasksToBounds: Bool::YES];
     let _: () = msg_send![tl, setMaskedCorners: 12usize]; // top corners only: the card's frame rounds the rest
+    let _: () = msg_send![tl, setBackgroundColor: cg_a(C_ON_MEDIA, 0.08)];
+    // Until the still is cached, a play glyph stands in for it so the artwork area is never blank.
+    let glyph = art_placeholder(rect(0., 0., CARD_W, ART_H), "play.rectangle", 40.);
+    add_sub(thumb, glyph);
+    ui.skip.art_glyph = Ptr(glyph);
     add_sub(card, thumb);
     ui.skip.thumb = Ptr(thumb);
 
     let text_w = CARD_W - 2. * CARD_PAD;
-    let title_y = CARD_H - ART_H - SP3 - 20.;
+    let title_y = CARD_H - ART_H - SP3 - 24.;
     let title = label("", T_HEADLINE, C_ON_MEDIA, ALIGN_LEFT);
-    set_frame(title, rect(CARD_PAD, title_y, text_w, 20.));
+    set_frame(title, rect(CARD_PAD, title_y, text_w, 24.));
     add_sub(card, title);
     ui.skip.title = Ptr(title);
     let count = label("", T_CALLOUT, C_ON_MEDIA2, ALIGN_LEFT);
@@ -628,6 +657,7 @@ pub(crate) unsafe fn update() {
                 let img = key.and_then(|k| ui.poster_cache.get(&k).copied());
                 if let Some(img) = img {
                     let _: () = msg_send![ui.skip.thumb.get(), setImage: img];
+                    set_hidden(ui.skip.art_glyph.get(), true);
                     st.image_applied = true;
                 }
             }

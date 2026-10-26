@@ -7,7 +7,7 @@ use objc2::runtime::{AnyObject, Bool, Sel};
 use objc2::{class, msg_send, sel};
 use crate::app::messages::SeasonEpisode;
 use crate::platform::appkit::*;
-use crate::ui::skip::hud_panel;
+use crate::ui::skip::{art_placeholder, hud_panel};
 use crate::ui::theme::*;
 
 /// Panel width. Other overlays move left by this plus `SP4` while the panel is open.
@@ -38,6 +38,8 @@ pub struct EpisodesUi {
     pub current: String,
     /// Season number of the list, for the header.
     pub season: Option<u32>,
+    /// Thumbnails still waiting for their still: (poster key, image view, placeholder glyph).
+    pub thumbs: Vec<(u64, Ptr, Ptr)>,
     /// The panel is on screen.
     pub open: bool,
 }
@@ -45,7 +47,7 @@ pub struct EpisodesUi {
 impl EpisodesUi {
     pub fn new() -> EpisodesUi {
         let n = || Ptr(std::ptr::null_mut());
-        EpisodesUi { panel: n(), scroll: n(), title: n(), items: Vec::new(), current: String::new(), season: None, open: false }
+        EpisodesUi { panel: n(), scroll: n(), title: n(), items: Vec::new(), current: String::new(), season: None, thumbs: Vec::new(), open: false }
     }
 }
 
@@ -59,7 +61,7 @@ pub(crate) unsafe fn build(ph: *mut AnyObject) {
     ui.episodes.panel = Ptr(panel);
 
     let title = label("", T_HEADLINE, C_ON_MEDIA, ALIGN_LEFT);
-    set_frame(title, rect(SP4, HEAD_H - SP4 - 22., PANEL_W - 2. * SP4 - 32., 22.));
+    set_frame(title, rect(SP4, HEAD_H - SP4 - 24., PANEL_W - 2. * SP4 - 32., 24.));
     add_sub(panel, title);
     ui.episodes.title = Ptr(title);
 
@@ -115,7 +117,7 @@ pub(crate) unsafe fn layout() {
     set_frame(p, rect(host.w - INSET - PANEL_W, PLAYER_CTRL_H + SP2, PANEL_W, h));
     let sv = ui.episodes.scroll.get();
     set_frame(sv, rect(0., 0., PANEL_W, h - HEAD_H));
-    set_frame(ui.episodes.title.get(), rect(SP4, h - SP4 - 22., PANEL_W - 2. * SP4 - 32., 22.));
+    set_frame(ui.episodes.title.get(), rect(SP4, h - SP4 - 24., PANEL_W - 2. * SP4 - 32., 24.));
     let close = find_close(p);
     if !close.is_null() {
         set_frame(close, rect(PANEL_W - SP4 - 24., h - SP4 - 24., 24., 24.));
@@ -196,11 +198,15 @@ unsafe fn rebuild() {
 
     let rows: Vec<SeasonEpisode> = ui.episodes.items.clone();
     let current = ui.episodes.current.clone();
+    let mut waiting = Vec::new();
     for (i, ep) in rows.iter().enumerate() {
         let y = doc_h - (i as f64 + 1.) * ROW_H;
         let is_now = ep.id == current;
-        add_row(doc, i, ep, is_now, y);
+        if let Some(w) = add_row(doc, i, ep, is_now, y) {
+            waiting.push(w);
+        }
     }
+    ui.episodes.thumbs = waiting;
     let _: () = msg_send![sv, setDocumentView: doc];
 
     // Scroll so the playing episode is the first row in view, or the list starts at the top.
@@ -214,7 +220,8 @@ unsafe fn rebuild() {
 }
 
 /// One row: thumbnail with progress strip, number, title, runtime, and a transparent button over it.
-unsafe fn add_row(doc: *mut AnyObject, index: usize, ep: &SeasonEpisode, is_now: bool, y: f64) {
+/// Returns the thumbnail's key, view and placeholder when its still is not cached yet.
+unsafe fn add_row(doc: *mut AnyObject, index: usize, ep: &SeasonEpisode, is_now: bool, y: f64) -> Option<(u64, Ptr, Ptr)> {
     let ui = UI.get().unwrap();
     let row: *mut AnyObject = msg_send![class!(NSView), alloc];
     let row: *mut AnyObject = autorel(msg_send![row, initWithFrame: rect(0., y, PANEL_W, ROW_H)]);
@@ -232,8 +239,19 @@ unsafe fn add_row(doc: *mut AnyObject, index: usize, ep: &SeasonEpisode, is_now:
     let _: () = msg_send![thumb, setImageScaling: 3isize];
     set_corner(layer_of(thumb), R_THUMB);
     let _: () = msg_send![layer_of(thumb), setMasksToBounds: Bool::YES];
-    if let Some(img) = ep.image_key.and_then(|k| ui.poster_cache.get(&k).copied()) {
-        let _: () = msg_send![thumb, setImage: img];
+    let _: () = msg_send![layer_of(thumb), setBackgroundColor: cg_a(C_ON_MEDIA, 0.08)];
+    // A film glyph on the card until the still is in the cache; it is hidden once the still is set.
+    let glyph = art_placeholder(rect(0., 0., THUMB_W, THUMB_H), "film", 22.);
+    add_sub(thumb, glyph);
+    let mut waiting = None;
+    if let Some(key) = ep.image_key {
+        match ui.poster_cache.get(&key).copied() {
+            Some(img) => {
+                let _: () = msg_send![thumb, setImage: img];
+                set_hidden(glyph, true);
+            }
+            None => waiting = Some((key, Ptr(thumb), Ptr(glyph))),
+        }
     }
     add_sub(row, thumb);
 
@@ -277,6 +295,22 @@ unsafe fn add_row(doc: *mut AnyObject, index: usize, ep: &SeasonEpisode, is_now:
     let _: () = msg_send![hit, setToolTip: ns(&format!("Play {}", ep.name))];
     set_frame(hit, rect(0., 0., PANEL_W, ROW_H));
     add_sub(row, hit);
+    waiting
+}
+
+/// A thumbnail's still arrived: fill every row waiting for it and drop its placeholder.
+pub(crate) unsafe fn image_ready(key: u64) {
+    let ui = match UI.get() {
+        Some(u) => u,
+        None => return,
+    };
+    let Some(img) = ui.poster_cache.get(&key).copied() else { return };
+    for (k, thumb, glyph) in ui.episodes.thumbs.iter() {
+        if *k == key {
+            let _: () = msg_send![thumb.get(), setImage: img];
+            set_hidden(glyph.get(), true);
+        }
+    }
 }
 
 /// Opens or closes the panel (E, the Episodes button, the close button).

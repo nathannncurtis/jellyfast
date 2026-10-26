@@ -3235,7 +3235,15 @@ fn intro_to(end: f64) -> Vec<Segment> {
     vec![Segment { kind: SegmentKind::Intro, start: 0.0, end }]
 }
 fn mock_next() -> NextUp {
-    NextUp { id: "ep-next".into(), name: "The Next One".into(), season: Some(1), number: Some(3), image_key: None }
+    NextUp { id: "ep-next".into(), name: "The Next One".into(), season: Some(1), number: Some(3), image_key: Some(poster_key("ep-next")) }
+}
+/// Stills for the player's episode fixtures, 16:9 like the server's: the Up Next card and the
+/// Episodes panel rows show them. Episode 3 has no still, so its row shows the placeholder.
+fn seed_player_art() {
+    for key in ["ep-1", "ep-2", "ep-4", "ep-5", "ep-next"] {
+        let shade = 60 + (key.len() as u8) * 10;
+        handle_main(MainMsg::PosterReady { key: poster_key(key), bytes: image_bytes(0, 320, 180, shade) });
+    }
 }
 /// Scrubber seeks go through pb::seek_frac; the landing is read a step later, once the seek completes.
 /// (A +/-10 s check is left out: the 6 s mock item clamps every such seek, so it would prove nothing.)
@@ -3356,7 +3364,7 @@ fn ep_fixture(n: u32) -> Vec<crate::app::messages::SeasonEpisode> {
                 2 => 0.45,
                 _ => 0.0,
             },
-            image_key: None,
+            image_key: if i == 3 { None } else { Some(poster_key(&format!("ep-{}", i))) },
         })
         .collect()
 }
@@ -3374,6 +3382,7 @@ fn s_player_movie_overlay() {
 }
 /// Overlay of an episode with a next one: the Episodes and Next Episode buttons join the right cluster.
 fn s_player_episode_overlay() {
+    seed_player_art();
     handle_main(playback_ext("ep-2", LONG, 0.0, 6.0, Vec::new(), Some("show-ep"), Some(mock_next())));
     unsafe { crate::ui::episodes::set_items(ep_fixture(4), "ep-2", Some(1)) };
     unsafe {
@@ -3418,6 +3427,14 @@ fn s_player_episodes_panel() {
         let ui_panel = ui.episodes.panel.get();
         let right: f64 = crate::ui::episodes::right_inset();
         state_check("episodes panel pushes the overlays left", right > 0.0);
+        // Every row carries a 16:9 thumbnail view (a still, or the placeholder glyph until one arrives).
+        let thumbs = (0..n).all(|i| {
+            let row: *mut AnyObject = msg_send![rows, objectAtIndex: i];
+            let parts: *mut AnyObject = msg_send![row, subviews];
+            let m: usize = msg_send![parts, count];
+            (0..m).any(|j| is_kind(msg_send![parts, objectAtIndex: j], class!(NSImageView)))
+        });
+        state_check("episodes panel: every row has a thumbnail", thumbs);
         let _ = ui_panel;
     }
     audit_both("episodes panel");
@@ -3455,6 +3472,7 @@ fn s_player_next_episode() {
     }
 }
 fn s_upnext_card() {
+    seed_player_art();
     handle_main(playback_ext("ep-cur", "Current Episode", 0.0, 6.0, Vec::new(), Some("show-next"), Some(mock_next())));
 }
 fn s_upnext_play() {
@@ -3464,6 +3482,7 @@ fn s_upnext_play() {
         state_check(&format!("up next: card names the next episode ({})", text), text.contains("The Next One") && text.contains("Playing in"));
         state_check("up next: no skip button on a plain episode", !crate::ui::skip::button_visible());
         state_check("up next: title fits the card", crate::ui::skip::card_title_fits());
+        state_check("up next: artwork is set, not the placeholder", crate::ui::skip::card_art_shown());
     }
     audit_both("up next card");
     unsafe {
