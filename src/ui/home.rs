@@ -29,7 +29,7 @@ const WIDE_RATIO: f64 = 9. / 16.;
 const CARD_GAP: f64 = SP4;
 /// Room around a strip so a card's hover lift is not clipped.
 const STRIP_PAD: f64 = SP3;
-const ROW_TITLE_H: f64 = 24.;
+const ROW_TITLE_H: f64 = 30.;
 const ROW_GAP: f64 = SP6;
 
 /// Segment labels, in the order `section_for_index` reads them.

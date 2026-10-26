@@ -33,7 +33,7 @@ pub struct Theme {
 
 /// Fixed base values that omitted keys inherit from.
 const DARK_BASE: [Rgba; SLOTS] = [
-    (0x1C1C1E, 255), (0x161618, 255), (0x2C2C2E, 255), (0x3A3A3C, 255), (0x48484A, 255), (0x3A3A3C, 255),
+    (0x0B0B0D, 255), (0x111113, 255), (0x1C1C1F, 255), (0x2A2A2E, 255), (0x38383D, 255), (0x2A2A2E, 255),
     (0xF2F2F7, 255), (0xAEAEB2, 255), (0x98989F, 255), (0x0A84FF, 255), (0x409CFF, 255), (0xFFFFFF, 255),
     (0xFF453A, 255), (0xFF9F0A, 255), (0x000000, 128), (0x000000, 90), (0x212121, 255), (0x30D158, 255),
 ];
@@ -289,8 +289,14 @@ pub struct Resolved {
 /// mode the selection must match (None for a single fixed theme); a palette of the
 /// wrong base falls back to the built-in for that mode.
 pub fn resolve(id: &str, want_dark: Option<bool>, cache: &BTreeMap<String, String>) -> Resolved {
-    if id == BUILTIN_LIGHT || id == BUILTIN_DARK {
-        return Resolved { dark: id == BUILTIN_DARK, theme: None, note: None };
+    if id == BUILTIN_DARK {
+        // The default dark is a fixed near-black palette rather than the system colours.
+        let colors = DARK_BASE;
+        let theme = Theme { id: id.to_string(), name: "Jellyfast Dark".to_string(), dark: true, colors };
+        return Resolved { dark: true, theme: Some(theme), note: None };
+    }
+    if id == BUILTIN_LIGHT {
+        return Resolved { dark: false, theme: None, note: None };
     }
     let fallback_dark = want_dark.unwrap_or(true);
     let builtin = |note: Option<String>| Resolved { dark: fallback_dark, theme: None, note };
@@ -323,6 +329,18 @@ mod tests {
         assert_eq!(parse_hex("0A84FF"), None);
         assert_eq!(parse_hex("#0A84F"), None);
         assert_eq!(parse_hex("#ZZZZZZ"), None);
+    }
+
+    #[test]
+    fn default_dark_is_near_black_palette() {
+        let r = resolve(BUILTIN_DARK, None, &BTreeMap::new());
+        let t = r.theme.expect("built-in dark carries a fixed palette");
+        assert!(r.dark && t.dark);
+        assert_eq!(t.colors[0], (0x0B0B0D, 255)); // window
+        assert_eq!(t.colors[1], (0x111113, 255)); // panel
+        assert_eq!(t.colors[2], (0x1C1C1F, 255)); // surface
+        // Light stays on the system colours.
+        assert!(resolve(BUILTIN_LIGHT, None, &BTreeMap::new()).theme.is_none());
     }
 
     #[test]

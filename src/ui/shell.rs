@@ -119,7 +119,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     add_sub(header, back);
     ui.lib_back = Ptr(back);
 
-    let ht = label("", T_DISPLAY, C_TEXT, ALIGN_LEFT);
+    let ht = label("", T_TITLE, C_TEXT, ALIGN_LEFT);
     add_sub(header, ht);
     ui.header_title = Ptr(ht);
     let hc = label("", T_CALLOUT, C_TEXT2, ALIGN_LEFT);
@@ -611,11 +611,11 @@ pub(crate) unsafe fn sidebar_row(title: &str, symbol_name: &str, action: Sel, ta
     let iv: *mut AnyObject = autorel(msg_send![iv, initWithFrame: rect(SP2, 4., 20., 20.)]);
     if !img.is_null() {
         let _: () = msg_send![iv, setImage: img];
-        let _: () = msg_send![iv, setContentTintColor: color(C_ACCENT)];
+        let _: () = msg_send![iv, setContentTintColor: color(C_TEXT2)];
     }
     add_sub(row, iv);
     let l = label(title, T_BODY, C_TEXT, ALIGN_LEFT);
-    set_frame(l, rect(36., 6., w - 36. - SP2, 16.));
+    set_frame(l, rect(36., 4., w - 36. - SP2, 20.));
     set_autoresize(l, RESIZE_W);
     add_sub(row, l);
     let btn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: nil(), action: action];
