@@ -77,6 +77,9 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Speed", "1.25×", "setSpeed:", "4", CTRL | CMD, 125),
     s("Speed", "1.5×", "setSpeed:", "5", CTRL | CMD, 150),
     s("Speed", "2×", "setSpeed:", "6", CTRL | CMD, 200),
+    // Home billboard: step through its slides
+    s("Go", "Previous Billboard Slide", "billboardStep:", LEFT, ALT | CMD, 0),
+    s("Go", "Next Billboard Slide", "billboardStep:", RIGHT, ALT | CMD, 1),
     // Home tabs (one big library): Home, Movies, TV Shows
     s("Go", "Home", "showHomeSection:", "0", ALT | CMD, 0),
     s("Go", "Movies", "showHomeSection:", "m", ALT | CMD, 1),
@@ -209,6 +212,7 @@ pub(crate) unsafe fn item_enabled(action: &str, tag: NSInteger, mods: NSUInteger
         "seerrShowTab:" => crate::ui::seerr::is_configured(&ui.cfg.settings),
         "togglePiP:" => crate::ui::playerbar::pip_available(),
         "showHomeSection:" => ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified),
+        "billboardStep:" => ui.home.active && ui.home.billboard.items.len() > 1,
         _ => true,
     }
 }

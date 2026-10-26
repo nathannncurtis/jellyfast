@@ -79,6 +79,8 @@ pub struct TypeStyle {
     pub mono: bool,
 }
 pub const T_DISPLAY: TypeStyle = TypeStyle { size: 34., weight: Weight::Bold, mono: false };
+/// Billboard title: the big bold line over a featured backdrop.
+pub const T_HERO: TypeStyle = TypeStyle { size: 44., weight: Weight::Bold, mono: false };
 /// Negative tracking for display sizes (applied by `tracked`), so big titles sit tighter.
 pub const TRACK_DISPLAY: f64 = -0.6;
 pub const T_TITLE: TypeStyle = TypeStyle { size: 24., weight: Weight::Semibold, mono: false };

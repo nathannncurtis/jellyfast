@@ -552,17 +552,13 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
             UiCmd::LoadHome => {
                 if let Some(c) = &client {
                     // One big library: Home mixes everything but splits the recent rows by type.
-                    let unified = cfg.layout_mode == Some(crate::config::LayoutMode::Unified);
+                    // Both layouts get the same rows; only the Movies and TV tabs differ.
                     let (order, hidden) = (cfg.library_order.clone(), cfg.hidden_libraries.clone());
                     // Spawned so a slow Home load never blocks later commands.
                     let (c, tx) = (c.clone(), main_tx.clone());
                     let (dir, http) = (poster_dir.clone(), http_poster.clone());
                     tokio::spawn(async move {
-                        let rows = if unified {
-                            crate::app::home::load_unified_home(&c, &order, &hidden).await
-                        } else {
-                            crate::app::home::load_home(&c).await
-                        };
+                        let rows = crate::app::home::load_unified_home(&c, &order, &hidden).await;
                         send_home(&c, &tx, rows, &dir, http.as_ref());
                     });
                 }
@@ -1078,6 +1074,21 @@ pub(crate) fn fetch_home_art(
 ) {
     let mut seen = std::collections::HashSet::new();
     let mut jobs: Vec<(u64, String)> = Vec::new();
+    // The billboard first: its backdrop and logo are on screen before the rows.
+    for it in crate::app::home::billboard_items(rows) {
+        // A backdrop reads best behind the text; a thumb or primary image is the fallback.
+        let kind = if it.backdrop_tag().is_some() { "Backdrop" } else { it.wide_art_kind().unwrap_or("Primary") };
+        let key = crate::ui::home::billboard_key(&it.id);
+        if seen.insert(key) {
+            jobs.push((key, build_art_url(&c.base, &it.id, kind, 1280, &c.token)));
+        }
+        if it.logo_tag().is_some() {
+            let lk = crate::ui::home::logo_key(&it.id);
+            if seen.insert(lk) {
+                jobs.push((lk, crate::jellyfin::urls::build_logo_url(&c.base, &it.id, &c.token, 800)));
+            }
+        }
+    }
     for row in rows {
         let wide = row.kind.is_wide();
         for it in &row.items {
@@ -2288,7 +2299,7 @@ mod tests {
         let titles: Vec<&str> = reply.rows.iter().map(|r| r.title.as_str()).collect();
         assert_eq!(
             titles,
-            ["Continue Watching", "Next Up", "Recently Added Movies", "Recently Added TV", "Because you watched Movie One", "More with Some Actor"]
+            ["Continue Watching", "Next Up", "Recently Added Movies", "Recently Added TV", "Because You Watched Movie One", "Top Rated", "Drama", "Mystery", "More with Some Actor"]
         );
         assert!(reply.grid.is_empty(), "Home has no grid");
         let movies: Vec<&str> = reply.rows[2].items.iter().map(|i| i.name.as_str()).collect();
@@ -2379,9 +2390,12 @@ mod tests {
             [
                 "Continue Watching",
                 "Next Up",
-                "Recently Added in Movies",
-                "Recently Added in Shows",
-                "Because you watched Movie One",
+                "Recently Added Movies",
+                "Recently Added TV",
+                "Because You Watched Movie One",
+                "Top Rated",
+                "Drama",
+                "Mystery",
                 "More with Some Actor",
             ]
         );
@@ -2390,11 +2404,13 @@ mod tests {
         assert_eq!(rows[2].1, ["Movie One", "Movie Two"]);
         assert_eq!(rows[3].1, ["Show One"]);
         assert_eq!(rows[4].1, ["Recommended One"]);
-        assert_eq!(rows[5].1, ["Actor Film"]);
+        assert!(!rows[5].1.is_empty(), "top rated has items");
+        assert_eq!(rows[8].1, ["Actor Film"]);
 
         // Every endpoint was called with the signed-in user and token auth.
+        // Resume is asked once per visible video library (movies and shows).
         let resume = m.find("GET", "/Users/u1/Items/Resume");
-        assert_eq!(resume.len(), 1);
+        assert_eq!(resume.len(), 2);
         assert_eq!(resume[0].qp("MediaTypes"), Some("Video"));
         assert_eq!(resume[0].qp("Limit"), Some("16"));
         assert_eq!(resume[0].headers.get("x-emby-token").map(String::as_str), Some("tok123"));
@@ -2416,7 +2432,7 @@ mod tests {
         m.cfg.lock().unwrap().home_fail = vec!["resume".into(), "latest".into()];
         h.send(UiCmd::LoadHome);
         let rows = home_of(h.next_nonposter().await);
-        assert_eq!(titles(&rows), ["Next Up", "Because you watched Movie One", "More with Some Actor"]);
+        assert_eq!(titles(&rows), ["Next Up", "Because You Watched Movie One", "Top Rated", "Drama", "Mystery", "More with Some Actor"]);
     }
 
     #[tokio::test]
@@ -2425,7 +2441,7 @@ mod tests {
         m.cfg.lock().unwrap().home_fail = vec!["views".into(), "nextup".into()];
         h.send(UiCmd::LoadHome);
         let rows = home_of(h.next_nonposter().await);
-        assert_eq!(titles(&rows), ["Continue Watching", "Because you watched Movie One", "More with Some Actor"]);
+        assert_eq!(titles(&rows), ["Continue Watching", "Because You Watched Movie One", "More with Some Actor"]);
     }
 
     #[tokio::test]
