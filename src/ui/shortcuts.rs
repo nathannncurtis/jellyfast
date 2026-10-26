@@ -102,6 +102,11 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Go", "Requests", "openSeerr:", "k", ALT | CMD, 0),
     s("Go", "Requests: Search", "seerrShowTab:", "1", ALT | CMD, 0),
     s("Go", "Requests: My Requests", "seerrShowTab:", "2", ALT | CMD, 1),
+    // Title page (a movie or series open in the detail view)
+    s("Title", "Play / Resume", "playDetail:", "\r", CMD, 0),
+    s("Title", "Favorite", "favoriteDetail:", "d", CMD, 0),
+    s("Title", "Watch Trailer", "trailerDetail:", "t", CMD, 0),
+    s("Title", "Mark as Watched", "watchedDetail:", "w", CMD | SHIFT, 0),
     // Help
     s("Help", "Keyboard Shortcuts", "showShortcuts:", "/", CMD, 0),
 ];
@@ -172,6 +177,7 @@ pub(crate) fn help_rows() -> Vec<HelpRow> {
                 "Controls" => "Playback",
                 "Speed" => "Playback Speed",
                 "Go" => "Browse and Requests",
+                "Title" => "Title Page",
                 _ => "Help",
             }));
         }
@@ -209,6 +215,7 @@ pub(crate) unsafe fn item_enabled(action: &str, tag: NSInteger, mods: NSUInteger
         "seerrShowTab:" => crate::ui::seerr::is_configured(&ui.cfg.settings),
         "togglePiP:" => crate::ui::playerbar::pip_available(),
         "showHomeSection:" => ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified),
+        "playDetail:" | "favoriteDetail:" | "trailerDetail:" | "watchedDetail:" => crate::ui::detail::is_open(),
         _ => true,
     }
 }
@@ -448,6 +455,11 @@ pub(crate) unsafe fn build_menus_from_table() {
             let _: () = msg_send![go_menu, addItem: sep()];
         }
         add(go_menu, e);
+    }
+
+    let title_menu = top("Title");
+    for e in SHORTCUTS.iter().filter(|e| e.menu == "Title") {
+        add(title_menu, e);
     }
 
     let help_menu = top("Help");

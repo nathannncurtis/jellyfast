@@ -203,6 +203,7 @@ fn steps() -> Vec<Step> {
         ("detail: series page", s_detail_series, 150),
         ("detail: seasons (picker, episodes, play)", s_detail_seasons, 300),
         ("detail: error toast", s_detail_error, 50),
+        ("detail: streaming layout (movie, resume, series, similar, actions)", s_detail_streaming, 400),
         ("cast: detail Cast button and Play On menu", s_cast_detail, 150),
         ("cast: remote bar controls and audit", s_cast_bar, 200),
         ("cast: error strip in the library", s_cast_error, 150),
@@ -1863,6 +1864,7 @@ fn detail_view(series: bool) -> DetailView {
         resume_ticks: 0,
         poster_key: Some(poster_key(id)),
         backdrop_key: Some(poster_key(&format!("{}#backdrop", id))),
+        logo_key: None,
         people: detail_people(14),
         trailer_urls: Vec::new(),
         tagline: None,
@@ -1877,6 +1879,28 @@ fn detail_view(series: bool) -> DetailView {
 unsafe fn act_on(target: *mut AnyObject, sel: Sel) {
     let _: *mut AnyObject = msg_send![target, performSelector: sel, withObject: nil()];
 }
+/// Similar titles for the More Like This row; every other one has a poster.
+fn detail_similar(n: usize) -> Vec<SimilarItem> {
+    (0..n)
+        .map(|i| SimilarItem {
+            id: format!("sim-{}", i),
+            name: format!("Similar Title {} With A Long Name", i),
+            year: Some(2000 + i as u32),
+            image_key: if i % 2 == 0 { Some(poster_key(&format!("sim-{}", i))) } else { None },
+        })
+        .collect()
+}
+/// A Next Up episode, `pos` ticks into it.
+fn detail_next_up(pos: i64) -> NextUpEpisode {
+    NextUpEpisode {
+        id: "detail-next".into(),
+        name: "The Next One".into(),
+        season: Some(2),
+        number: Some(4),
+        position_ticks: pos,
+        run_time_ticks: Some(36_000_000_000),
+    }
+}
 fn detail_host() -> *mut AnyObject {
     unsafe { UI.get().unwrap().detail.host.get() }
 }
@@ -1889,14 +1913,13 @@ fn s_detail_movie() {
         state_check("detail host shown", !is_hidden(detail_host()));
         state_check("library header hidden", is_hidden(ui.header.get()));
         state_check("library grid hidden", is_hidden(ui.lib_scroll.get()));
-        state_check("poster, backdrop and portraits laid out", crate::ui::detail::target_count() == 2 + 7);
+        state_check("backdrop and portraits laid out", crate::ui::detail::target_count() == 1 + 7);
         state_check("backdrop waits for its image", crate::ui::detail::art_filled(poster_key("detail-long#backdrop")) == Some(false));
     }
     handle_main(MainMsg::PosterReady { key: poster_key("detail-long#backdrop"), bytes: image_bytes(0, 640, 360, 90) });
     handle_main(MainMsg::PosterReady { key: poster_key("detail-long"), bytes: image_bytes(0, 200, 300, 200) });
     handle_main(MainMsg::PosterReady { key: poster_key("person-0"), bytes: image_bytes(1, 96, 96, 120) });
     state_check("backdrop fills on arrival", crate::ui::detail::art_filled(poster_key("detail-long#backdrop")) == Some(true));
-    state_check("poster fills on arrival", crate::ui::detail::art_filled(poster_key("detail-long")) == Some(true));
     state_check("portrait fills on arrival", crate::ui::detail::art_filled(poster_key("person-0")) == Some(true));
     state_check("portrait without image has no artwork view", crate::ui::detail::art_filled(poster_key("person-1")).is_none());
     unsafe {
@@ -1918,6 +1941,70 @@ fn s_detail_movie() {
     }
     audit_both("detail movie");
 }
+/// The streaming page in its states, each at the large and the min size: a movie with
+/// nothing to resume, a movie resuming with its logo, a series with Next Up, a series
+/// resuming, then a similar title opened and the favourite and trailer actions.
+fn s_detail_streaming() {
+    let mut plain = detail_view(false);
+    plain.resume = false;
+    plain.resume_ticks = 0;
+    plain.trailer_urls = vec!["https://example.test/trailer".into()];
+    plain.similar = detail_similar(7);
+    handle_main(MainMsg::DetailLoaded(Box::new(plain)));
+    audit_both("detail movie plain");
+
+    let mut resume = detail_view(false);
+    resume.resume = true;
+    resume.resume_ticks = 37 * 600_000_000;
+    resume.logo_key = Some(poster_key("detail-long#logo"));
+    resume.similar = detail_similar(7);
+    handle_main(MainMsg::DetailLoaded(Box::new(resume)));
+    state_check("logo waits for its image", crate::ui::detail::art_filled(poster_key("detail-long#logo")) == Some(false));
+    audit_both("detail movie resuming, logo waiting");
+    handle_main(MainMsg::PosterReady { key: poster_key("detail-long#logo"), bytes: image_bytes(0, 800, 200, 255) });
+    state_check("logo fills on arrival", crate::ui::detail::art_filled(poster_key("detail-long#logo")) == Some(true));
+    audit_both("detail movie resuming");
+
+    let mut series = detail_view(true);
+    series.next_up = Some(detail_next_up(0));
+    handle_main(MainMsg::DetailLoaded(Box::new(series)));
+    audit_both("detail series next up");
+
+    let mut resuming = detail_view(true);
+    resuming.next_up = Some(detail_next_up(37 * 600_000_000));
+    resuming.similar = detail_similar(7);
+    resuming.trailer_urls = vec!["https://example.test/trailer".into()];
+    handle_main(MainMsg::DetailLoaded(Box::new(resuming)));
+    audit_both("detail series resuming");
+
+    unsafe {
+        let host = detail_host();
+        let ui = UI.get_mut().unwrap();
+        let play = find_titled(ui.detail.doc.get(), "Resume S2:E4 · 23m left");
+        state_check("series resume button names the Next Up episode", !play.is_null());
+        // A similar title's poster opens that title.
+        let btn = find_row_button(ui.detail.doc.get(), 2);
+        state_check("similar poster has a click target", !btn.is_null());
+        act_with(host, sel!(detailSimilar:), btn);
+        let cmds = take_cmds();
+        state_check(
+            "similar poster opens its title",
+            cmds.iter().any(|c| matches!(c, UiCmd::OpenDetail { item_id } if item_id == "sim-2")),
+        );
+        // Favourite flips the page and the server; the trailer button is live when a link exists.
+        act_on(host, sel!(detailFavorite:));
+        state_check("favourite flips on the page", UI.get().unwrap().detail.item.as_ref().map(|i| i.is_favorite) == Some(true));
+        state_check(
+            "favourite sends SetFavorite",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::SetFavorite { item_id, favorite: true } if item_id == "detail-series")),
+        );
+        let tr = find_action(UI.get().unwrap().detail.doc.get(), sel!(detailTrailer:), 0);
+        let en: Bool = msg_send![tr, isEnabled];
+        state_check("trailer button is live with a link", en == Bool::YES);
+    }
+    crate::ui::detail::hide();
+}
+
 fn s_detail_resize() {
     set_content_size(960.0, 600.0);
     state_check("detail relaid out at min width", crate::ui::detail::layout_matches_clip());
@@ -1936,7 +2023,7 @@ fn s_detail_series() {
     unsafe {
         let ui = UI.get_mut().unwrap();
         state_check("series page open", crate::ui::detail::is_open());
-        state_check("series page has no artwork waiting", crate::ui::detail::art_filled(poster_key("detail-series")) == Some(false));
+        state_check("series page has no artwork waiting", crate::ui::detail::art_filled(poster_key("detail-series#backdrop")) == Some(false));
         let _ = ui;
     }
     audit_both("detail series");

@@ -218,7 +218,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     ui.state_btn = Ptr(sbtn);
 
     // --- Item detail page (hidden until opened; replaces the grid while open) ---
-    crate::ui::detail::build(content_host, rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h - TITLEBAR_H));
+    crate::ui::detail::build(content_host, rect(SIDEBAR_W, 0., pb.size.w - SIDEBAR_W, pb.size.h));
 
     // --- Now-playing bar (audio), on top of the library ---
     crate::ui::nowbar::build(content_host, b);
