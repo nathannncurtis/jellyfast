@@ -9,6 +9,7 @@
 #![allow(unsafe_code)]
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{class, msg_send, sel};
+use std::sync::atomic::{AtomicU64, Ordering};
 use crate::app::messages::{MediaKind, PlaybackStart, UiCmd};
 use crate::config::{set_skip_intros, skip_intros_for};
 use crate::jellyfin::segments::{self, NextUp, Segment, SegmentKind, UpNextWindow};
@@ -35,13 +36,16 @@ const EDGE: f64 = SP8;
 /// Gap between the skip button and the top of the transport bar.
 const RISE: f64 = SP4;
 const CARD_W: f64 = 360.;
-const CARD_H: f64 = 120.;
+/// 16:9 artwork across the card's top, then the title, the countdown and the buttons.
+const ART_H: f64 = CARD_W * 9. / 16.;
+const CARD_H: f64 = ART_H + SP3 + 20. + SP1 + 15. + SP3 + PILL_H + SP4;
 const CARD_PAD: f64 = SP4;
-const THUMB_W: f64 = 120.;
-const THUMB_H: f64 = 68.;
+/// Play Now pill: a white pill with a countdown ring at its left.
+const PILL_H: f64 = 36.;
+const RING_D: f64 = 22.;
+const RING_X: f64 = SP3;
 /// Left edge of the card's text column: thumbnail, gap, padding.
-const TEXT_X: f64 = CARD_PAD + THUMB_W + SP3;
-const BTN_PLAY_W: f64 = 92.;
+const BTN_PLAY_W: f64 = 140.;
 const BTN_CANCEL_W: f64 = 72.;
 /// Border and wash alphas (white over the HUD material): rest, hover, and pressed darkening.
 const BORDER_REST: f64 = 0.20;
@@ -51,6 +55,9 @@ const PRESS_DARKEN: f64 = 0.24;
 /// Skip button label: a step above body text, so it reads as the primary control.
 const T_SKIP: TypeStyle = TypeStyle { size: 17., weight: Weight::Semibold, mono: false };
 static SKIP_BTN_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+static RING_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+/// Share of the Up Next countdown still to run, 0..1, as f64 bits. The ring view reads it when it draws.
+static RING_FRAC: AtomicU64 = AtomicU64::new(0);
 
 /// Playback-scoped state. Reset by `start` for every item.
 #[derive(Default)]
@@ -96,12 +103,14 @@ pub struct SkipUi {
     pub count: Ptr,
     pub play: Ptr,
     pub cancel: Ptr,
+    /// The countdown ring on the Play Now pill.
+    pub ring: Ptr,
 }
 
 impl SkipUi {
     pub fn new() -> SkipUi {
         let n = || Ptr(std::ptr::null_mut());
-        SkipUi { pill: n(), button: n(), timer: n(), series_item: n(), card: n(), thumb: n(), title: n(), count: n(), play: n(), cancel: n() }
+        SkipUi { pill: n(), button: n(), timer: n(), series_item: n(), card: n(), thumb: n(), title: n(), count: n(), play: n(), cancel: n(), ring: n() }
     }
 }
 
@@ -158,6 +167,12 @@ pub(crate) unsafe fn register_skip_classes() {
     d.add_method(sel!(mouseDown:), btn_down as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
     d.add_method(sel!(resetCursorRects), btn_cursor as extern "C" fn(*mut AnyObject, Sel));
     SKIP_BTN_CLASS.set(d.register()).ok();
+
+    // Countdown ring on the Play Now pill: an empty track with the time left as an arc.
+    let mut r = ClassBuilder::new(c"JRCountdownRing", class!(NSView)).unwrap();
+    r.add_method(sel!(drawRect:), ring_draw as extern "C" fn(*mut AnyObject, Sel, NSRect));
+    r.add_method(sel!(acceptsFirstMouse:), ring_pass as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool);
+    RING_CLASS.set(r.register()).ok();
 }
 extern "C" fn btn_enter(this: *mut AnyObject, _c: Sel, _ev: *mut AnyObject) {
     unsafe { paint_button(this, Press::Hover) }
@@ -194,6 +209,7 @@ pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
 
     // Up Next card: bottom right, inset like the skip button, just above the transport bar.
+    // Top to bottom: 16:9 artwork, the episode title, the countdown, then Play Now and Cancel.
     let card = hud_panel(PANEL_R);
     set_frame(card, rect(b.size.w - EDGE - CARD_W, PLAYER_CTRL_H + RISE, CARD_W, CARD_H));
     set_autoresize(card, MARGIN_MINX | MARGIN_MAXY);
@@ -202,36 +218,66 @@ pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     ui.skip.card = Ptr(card);
 
     let thumb: *mut AnyObject = msg_send![class!(NSImageView), alloc];
-    let thumb: *mut AnyObject = autorel(msg_send![thumb, initWithFrame: rect(CARD_PAD, (CARD_H - THUMB_H) / 2., THUMB_W, THUMB_H)]);
+    let thumb: *mut AnyObject = autorel(msg_send![thumb, initWithFrame: rect(0., CARD_H - ART_H, CARD_W, ART_H)]);
     let _: () = msg_send![thumb, setImageScaling: 3isize];
-    set_corner(layer_of(thumb), R_THUMB);
+    let tl = layer_of(thumb);
+    set_corner(tl, PANEL_R);
+    let _: () = msg_send![tl, setMasksToBounds: Bool::YES];
+    let _: () = msg_send![tl, setMaskedCorners: 12usize]; // top corners only: the card's frame rounds the rest
     add_sub(card, thumb);
     ui.skip.thumb = Ptr(thumb);
 
-    let text_w = CARD_W - TEXT_X - CARD_PAD;
-    // Type scale: kicker 11 semibold, title 15 semibold, detail 12 regular.
-    let kicker = label("UP NEXT", T_CAPTION_EM, C_ON_MEDIA2, ALIGN_LEFT);
-    set_frame(kicker, rect(TEXT_X, CARD_H - CARD_PAD - 14., text_w, 14.));
-    add_sub(card, kicker);
+    let text_w = CARD_W - 2. * CARD_PAD;
+    let title_y = CARD_H - ART_H - SP3 - 20.;
     let title = label("", T_HEADLINE, C_ON_MEDIA, ALIGN_LEFT);
-    set_frame(title, rect(TEXT_X, CARD_H - CARD_PAD - 14. - SP1 - 20., text_w, 20.));
+    set_frame(title, rect(CARD_PAD, title_y, text_w, 20.));
     add_sub(card, title);
     ui.skip.title = Ptr(title);
     let count = label("", T_CALLOUT, C_ON_MEDIA2, ALIGN_LEFT);
-    // Between the title and the buttons (which are 26 pt tall, from CARD_PAD).
-    set_frame(count, rect(TEXT_X, CARD_PAD + 26. + SP2, text_w, 15.));
+    set_frame(count, rect(CARD_PAD, title_y - SP1 - 15., text_w, 15.));
     add_sub(card, count);
     ui.skip.count = Ptr(count);
 
-    let play: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Play Now"), target: ui.ctl.get(), action: sel!(jrUpNextPlay:)];
-    let _: () = msg_send![play, setBezelStyle: 1isize];
+    // Play Now: a white pill with the countdown ring at its left. A clear button over the pill takes the click.
+    let pill_y = CARD_PAD;
+    let pill: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let pill: *mut AnyObject = autorel(msg_send![pill, initWithFrame: rect(CARD_PAD, pill_y, BTN_PLAY_W, PILL_H)]);
+    let _: () = msg_send![pill, setWantsLayer: Bool::YES];
+    let pl = layer_of(pill);
+    set_corner(pl, PILL_H / 2.);
+    let _: () = msg_send![pl, setBackgroundColor: cg_a(C_ON_MEDIA, 1.0)];
+    add_sub(card, pill);
+    let ring: *mut AnyObject = msg_send![*RING_CLASS.get().unwrap(), alloc];
+    let ring: *mut AnyObject = autorel(msg_send![ring, initWithFrame: rect(RING_X, (PILL_H - RING_D) / 2., RING_D, RING_D)]);
+    let _: () = msg_send![ring, setWantsLayer: Bool::YES];
+    add_sub(pill, ring);
+    ui.skip.ring = Ptr(ring);
+    let glyph = symbol("play.fill", 8., Weight::Semibold);
+    let gv: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+    let gv: *mut AnyObject = autorel(msg_send![gv, initWithFrame: rect(RING_X + (RING_D - 9.) / 2. + 1., (PILL_H - 9.) / 2., 9., 9.)]);
+    let _: () = msg_send![gv, setImage: glyph];
+    let _: () = msg_send![gv, setContentTintColor: black_color()];
+    add_sub(pill, gv);
+    let pill_label = label("Play Now", T_BODY_EM, C_ON_MEDIA, ALIGN_CENTER);
+    let _: () = msg_send![pill_label, setTextColor: black_color()];
+    let lx = RING_X + RING_D + SP2;
+    set_frame(pill_label, rect(lx, (PILL_H - 18.) / 2., BTN_PLAY_W - lx - SP3, 18.));
+    add_sub(pill, pill_label);
+    let play: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: sel!(jrUpNextPlay:)];
+    let _: () = msg_send![play, setBordered: Bool::NO];
     let _: () = msg_send![play, setKeyEquivalent: ns("\r")];
-    set_frame(play, rect(TEXT_X, CARD_PAD, BTN_PLAY_W, 26.));
-    add_sub(card, play);
+    let _: () = msg_send![play, setFocusRingType: 1usize];
+    let _: () = msg_send![play, setToolTip: ns("Play now (Return)")];
+    set_frame(play, rect(0., 0., BTN_PLAY_W, PILL_H));
+    add_sub(pill, play);
     ui.skip.play = Ptr(play);
+    // Cancel: text only, beside the pill.
     let cancel: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Cancel"), target: ui.ctl.get(), action: sel!(jrUpNextCancel:)];
-    let _: () = msg_send![cancel, setBezelStyle: 1isize];
-    set_frame(cancel, rect(TEXT_X + BTN_PLAY_W + SP2, CARD_PAD, BTN_CANCEL_W, 26.));
+    let _: () = msg_send![cancel, setBordered: Bool::NO];
+    let _: () = msg_send![cancel, setFont: font(T_BODY_EM)];
+    let _: () = msg_send![cancel, setContentTintColor: color(C_ON_MEDIA2)];
+    let _: () = msg_send![cancel, setFocusRingType: 1usize];
+    set_frame(cancel, rect(CARD_PAD + BTN_PLAY_W + SP3, pill_y + (PILL_H - 22.) / 2., BTN_CANCEL_W, 22.));
     add_sub(card, cancel);
     ui.skip.cancel = Ptr(cancel);
 
@@ -288,8 +334,11 @@ pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
 
 /// Called when an item starts. Loads its segments and next episode and hides the overlay until `update` shows it.
 pub(crate) unsafe fn start(ps: &PlaybackStart) {
-    let ui = UI.get_mut().unwrap();
     let video = ps.media_kind == MediaKind::Video;
+    // The Episodes panel takes this item's season (and closes, as the new item starts).
+    let season = if video { ps.season_episodes.clone() } else { Vec::new() };
+    crate::ui::episodes::set_items(season, &ps.item_id, ps.season_number);
+    let ui = UI.get_mut().unwrap();
     let series_id = if video { ps.series_id.clone() } else { None };
     let auto_skip = series_id
         .as_deref()
@@ -311,6 +360,8 @@ pub(crate) unsafe fn start(ps: &PlaybackStart) {
     reset_views();
     sync_series_item();
     set_timer(wants_timer);
+    // The episode buttons follow the new item's series.
+    crate::ui::playerbar::relayout();
 }
 
 /// Runs `update` four times a second while the overlay may need to change. The playback
@@ -405,8 +456,61 @@ unsafe fn place_pill(pill_w: Option<f64>, card_on: bool) {
     let f = frame_of(ui.skip.pill.get());
     let w = pill_w.unwrap_or(f.size.w);
     let lift = if card_on { CARD_H + SP2 } else { 0. };
-    let x = bounds_of(ui.player_host.get()).size.w - EDGE - w;
+    let x = bounds_of(ui.player_host.get()).size.w - EDGE - w - crate::ui::episodes::right_inset();
     set_frame(ui.skip.pill.get(), rect(x, PLAYER_CTRL_H + RISE + lift, w, BUTTON_H));
+}
+
+/// Moves the Up Next card and the skip button clear of the Episodes panel (or back), at the current state.
+pub(crate) unsafe fn place_now() {
+    let ui = UI.get_mut().unwrap();
+    let card = ui.skip.card.get();
+    let x = bounds_of(ui.player_host.get()).size.w - EDGE - CARD_W - crate::ui::episodes::right_inset();
+    set_frame(card, rect(x, PLAYER_CTRL_H + RISE, CARD_W, CARD_H));
+    place_pill(None, card_visible());
+}
+
+/// Fills the countdown ring: `frac` of the countdown still to run.
+unsafe fn set_ring(frac: f64) {
+    let f = frac.clamp(0., 1.);
+    let prev = f64::from_bits(RING_FRAC.swap(f.to_bits(), Ordering::Relaxed));
+    if (prev - f).abs() > 0.001 {
+        let ui = UI.get().unwrap();
+        let _: () = msg_send![ui.skip.ring.get(), setNeedsDisplay: Bool::YES];
+    }
+}
+
+/// Draws the countdown ring: a faint full track and the time left as a dark arc, clockwise from the top.
+extern "C" fn ring_draw(this: *mut AnyObject, _c: Sel, _dirty: NSRect) {
+    unsafe {
+        let b = bounds_of(this);
+        let frac = f64::from_bits(RING_FRAC.load(Ordering::Relaxed));
+        let r = (b.size.w.min(b.size.h) / 2.) - 1.5;
+        let c = NSPoint { x: b.size.w / 2., y: b.size.h / 2. };
+        let ink: *mut AnyObject = msg_send![class!(NSColor), blackColor];
+        let track: *mut AnyObject = msg_send![ink, colorWithAlphaComponent: 0.18f64];
+        let _: () = msg_send![track, setStroke];
+        let p: *mut AnyObject = msg_send![class!(NSBezierPath), bezierPathWithOvalInRect: rect(c.x - r, c.y - r, 2. * r, 2. * r)];
+        let _: () = msg_send![p, setLineWidth: 2.5f64];
+        let _: () = msg_send![p, stroke];
+        if frac > 0.001 {
+            let _: () = msg_send![ink, setStroke];
+            let arc: *mut AnyObject = msg_send![class!(NSBezierPath), bezierPath];
+            let _: () = msg_send![arc, setLineWidth: 2.5f64];
+            let _: () = msg_send![arc, setLineCapStyle: 1isize];
+            let end = 90.0 - 360.0 * frac;
+            let _: () = msg_send![arc, appendBezierPathWithArcWithCenter: c, radius: r, startAngle: 90.0f64, endAngle: end, clockwise: Bool::YES];
+            let _: () = msg_send![arc, stroke];
+        }
+    }
+}
+
+extern "C" fn ring_pass(_t: *mut AnyObject, _c: Sel, _e: *mut AnyObject) -> Bool {
+    Bool::YES
+}
+
+/// Black, for the text and glyph on the white Play Now pill.
+unsafe fn black_color() -> *mut AnyObject {
+    msg_send![class!(NSColor), blackColor]
 }
 
 /// Keeps the context-menu item in step with the current item's show.
@@ -506,6 +610,8 @@ pub(crate) unsafe fn update() {
             }
             if st.card_shown {
                 let left = (w.play_at - pos).ceil().max(0.) as i64;
+                let span = (w.play_at - w.trigger).max(0.001);
+                set_ring((w.play_at - pos) / span);
                 if left != st.countdown_shown {
                     st.countdown_shown = left;
                     let text = if left == 1 { "Playing in 1 second".to_string() } else { format!("Playing in {} seconds", left) };
@@ -581,13 +687,26 @@ pub(crate) unsafe fn skip_current() {
 /// Hands over to the next episode: the end-of-episode writes, then the request for the next one.
 /// Returns false when there is nothing to hand over to (no next episode, autoplay off, or cancelled).
 pub(crate) unsafe fn advance() -> bool {
+    hand_over(false)
+}
+
+/// The Next Episode button and N: plays the next episode now, whatever Autoplay and Cancel say.
+pub(crate) extern "C" fn next_episode(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
+    unsafe {
+        hand_over(true);
+    }
+}
+
+/// Hands playback to the next episode. `force` skips the Autoplay and Cancel checks that the automatic
+/// handover makes; the manual Next Episode action is always allowed when there is a next episode.
+unsafe fn hand_over(force: bool) -> bool {
     let ui = UI.get_mut().unwrap();
     let Some(pn) = ui.playing.as_mut() else { return false };
     if pn.skip.advancing {
         return true;
     }
     let Some(next) = pn.skip.next.clone() else { return false };
-    if !pn.skip.autoplay || pn.skip.cancelled {
+    if !force && (!pn.skip.autoplay || pn.skip.cancelled) {
         return false;
     }
     pn.skip.advancing = true;

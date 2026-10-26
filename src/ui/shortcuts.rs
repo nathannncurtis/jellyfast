@@ -68,6 +68,8 @@ pub(crate) const SHORTCUTS: &[Shortcut] = &[
     s("Controls", "Next Audio Track", "audioCycle:", "a", 0, 0),
     s("Controls", "Enter / Exit Full Screen", "fullscreen:", "f", 0, 0),
     s("Controls", "Skip Intro or Current Segment", "skipSegment:", "s", 0, 0),
+    s("Controls", "Next Episode", "nextEpisode:", "n", 0, 0),
+    s("Controls", "Episodes", "toggleEpisodes:", "e", 0, 0),
     s("Controls", "Picture in Picture", "togglePiP:", "p", ALT | CMD, 0),
     s("Controls", "Cast to a Device…", "showCastMenu:", "c", CMD | SHIFT, 0),
     // Playback speed (submenu of Controls)
@@ -113,6 +115,7 @@ pub(crate) const EXEMPT_ACTIONS: &[&str] = &["showAbout:", "reloadThemes:"];
 const PLAYBACK_ACTIONS: &[&str] = &[
     "playPause:", "stopPlayback:", "seekBack:", "seekFwd:", "volUp:", "volDown:", "mute:",
     "subCycle:", "audioCycle:", "setSpeed:", "skipSegment:", "togglePiP:",
+    "nextEpisode:", "toggleEpisodes:",
 ];
 
 /// Human label for a key equivalent, e.g. "⌘F", "⌃⌘2", "←", "⇧⇥", "Space".
@@ -208,6 +211,8 @@ pub(crate) unsafe fn item_enabled(action: &str, tag: NSInteger, mods: NSUInteger
         "focusNext:" | "focusPrevious:" => main_window_active() && grid_has_items() && !settings_open(),
         "seerrShowTab:" => crate::ui::seerr::is_configured(&ui.cfg.settings),
         "togglePiP:" => crate::ui::playerbar::pip_available(),
+        "nextEpisode:" => ui.playing.as_ref().map(|p| p.skip.next.is_some()).unwrap_or(false),
+        "toggleEpisodes:" => ui.playing.as_ref().map(|p| p.skip.series_id.is_some()).unwrap_or(false),
         "showHomeSection:" => ui.cfg.layout_mode == Some(crate::config::LayoutMode::Unified),
         _ => true,
     }

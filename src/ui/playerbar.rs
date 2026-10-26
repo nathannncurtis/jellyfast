@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 static BAR_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 static SCRUB_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 static PIP_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+static TRANSPORT_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 /// Set when the app itself asks AVKit to stop PiP, so the resulting stop callback is not read as the user closing it.
 static PIP_APP_STOP: AtomicBool = AtomicBool::new(false);
 /// Set when the user presses PiP's restore button, which ends PiP without stopping playback.
@@ -23,7 +24,6 @@ static PIP_RESTORING: AtomicBool = AtomicBool::new(false);
 
 /// Secondary button hit size, and the larger play/pause target.
 const BTN: f64 = 40.;
-const BTN_PRIMARY: f64 = 48.;
 /// Scrubber row: elapsed label | track | remaining label.
 const TIME_W: f64 = 76.;
 const SCRUB_Y: f64 = 72.;
@@ -33,6 +33,15 @@ const CTRL_CY: f64 = 40.;
 const TIP_W: f64 = 80.;
 const TIP_H: f64 = 22.;
 const VOL_W: f64 = 120.;
+/// Centred transport over the picture: the big play/pause and the two 10 s skips either side of it.
+const CENTER_PLAY: f64 = 88.;
+const CENTER_PLAY_SYMBOL: f64 = 72.;
+const CENTER_SKIP: f64 = 64.;
+const CENTER_SKIP_SYMBOL: f64 = 40.;
+const CENTER_GAP: f64 = SP6;
+/// Width of the More menu's AirPlay row (the route picker is the menu item's view).
+const ROUTE_ROW_W: f64 = 220.;
+const ROUTE_ROW_H: f64 = 28.;
 /// Speed menu rows (label, tag = rate x 100). Same set as the Controls menu.
 const SPEEDS: [(&str, isize); 6] = [("0.5×", 50), ("0.75×", 75), ("1×", 100), ("1.25×", 125), ("1.5×", 150), ("2×", 200)];
 
@@ -56,6 +65,11 @@ pub struct PlayerBar {
     /// AirPlay route picker (AVKit) and the Play On cast menu button.
     pub route: Ptr,
     pub cast: Ptr,
+    /// Centred transport (play/pause and the 10 s skips), the More menu, and the episode buttons.
+    pub transport: Ptr,
+    pub more: Ptr,
+    pub episodes: Ptr,
+    pub next: Ptr,
     /// Owned Picture in Picture controller for the player layer, created on first use.
     pub pip_ctl: Ptr,
     /// The AVPlayerLayer the controller was built for (not owned; AVPlayerView owns the layer).
@@ -101,6 +115,10 @@ impl PlayerBar {
             full: n(),
             route: n(),
             cast: n(),
+            transport: n(),
+            more: n(),
+            episodes: n(),
+            next: n(),
             pip_ctl: n(),
             pip_layer: n(),
             pip_delegate: n(),
@@ -123,6 +141,13 @@ pub(crate) unsafe fn register_playerbar_classes() {
     d.add_method(sel!(makeBackingLayer), bar_layer as extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject);
     d.add_method(sel!(layout), bar_layout as extern "C" fn(*mut AnyObject, Sel));
     BAR_CLASS.set(d.register()).ok();
+
+    // Centred transport: draws the vignette and passes clicks through to the video everywhere but its buttons.
+    let mut t = ClassBuilder::new(c"JRTransport", class!(NSView)).unwrap();
+    t.add_method(sel!(makeBackingLayer), transport_layer as extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject);
+    t.add_method(sel!(layout), transport_layout as extern "C" fn(*mut AnyObject, Sel));
+    t.add_method(sel!(hitTest:), transport_hit as extern "C" fn(*mut AnyObject, Sel, NSPoint) -> *mut AnyObject);
+    TRANSPORT_CLASS.set(t.register()).ok();
 
     let mut s = ClassBuilder::new(c"JRScrubber", class!(NSView)).unwrap();
     s.add_method(sel!(drawRect:), scrub_draw as extern "C" fn(*mut AnyObject, Sel, NSRect));
@@ -227,13 +252,6 @@ pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     add_sub(chip, tl);
     ui.pbar.tip_label = Ptr(tl);
 
-    let play = ctl_button(bar, "play.fill", 26., "Play / Pause", sel!(playPause:));
-    ui.pbar.play = Ptr(play);
-    let back = ctl_button(bar, "gobackward.10", 22., "Back 10 seconds", sel!(seekBack:));
-    ui.pbar.back = Ptr(back);
-    let fwd = ctl_button(bar, "goforward.10", 22., "Forward 10 seconds", sel!(seekFwd:));
-    ui.pbar.fwd = Ptr(fwd);
-
     let mute = ctl_button(bar, "speaker.wave.2.fill", 20., "Mute", sel!(mute:));
     ui.pbar.mute = Ptr(mute);
     let s: *mut AnyObject = msg_send![class!(NSSlider), alloc];
@@ -249,31 +267,42 @@ pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     add_sub(bar, s);
     ui.pbar.vol = Ptr(s);
 
+    // Right cluster, from the left: Next Episode, Episodes, Subtitles, Audio, More, Full screen.
+    let next = ctl_button(bar, "forward.end.fill", 20., "Next episode (N)", sel!(nextEpisode:));
+    ui.pbar.next = Ptr(next);
+    let episodes = ctl_button(bar, "list.bullet.rectangle", 20., "Episodes (E)", sel!(toggleEpisodes:));
+    ui.pbar.episodes = Ptr(episodes);
     let subs = ctl_button(bar, "captions.bubble", 20., "Subtitles", sel!(showSubtitleMenu:));
     ui.pbar.subs = Ptr(subs);
     let audio = ctl_button(bar, "music.note.list", 20., "Audio track", sel!(showAudioMenu:));
     ui.pbar.audio = Ptr(audio);
-    let speed = ctl_button(bar, "gauge.with.dots.needle.67percent", 20., "Playback speed", sel!(showSpeedMenu:));
-    ui.pbar.speed = Ptr(speed);
-    let pip = ctl_button(bar, "pip.enter", 20., "Picture in Picture", sel!(togglePiP:));
-    ui.pbar.pip = Ptr(pip);
+    let more = ctl_button(bar, "ellipsis.circle", 20., "More: speed, AirPlay, Picture in Picture", sel!(showMoreMenu:));
+    ui.pbar.more = Ptr(more);
     let full = ctl_button(bar, "arrow.up.left.and.arrow.down.right", 20., "Full screen", sel!(fullscreen:));
     ui.pbar.full = Ptr(full);
-    let route = route_button(bar);
-    ui.pbar.route = Ptr(route);
+
+    // Speed, Picture in Picture and Cast live in the More menu now. The buttons stay as hidden
+    // targets: the PiP button carries the exit glyph, and the Cast menu anchors to a view.
+    let speed = ctl_button(bar, "gauge.with.dots.needle.67percent", 20., "Playback speed", sel!(showSpeedMenu:));
+    set_hidden(speed, true);
+    ui.pbar.speed = Ptr(speed);
+    let pip = ctl_button(bar, "pip.enter", 20., "Picture in Picture", sel!(togglePiP:));
+    set_hidden(pip, true);
+    ui.pbar.pip = Ptr(pip);
     let cast = ctl_button(bar, "tv", 20., "Cast to a device", sel!(showCastMenu:));
+    set_hidden(cast, true);
     ui.pbar.cast = Ptr(cast);
 
     relayout();
 }
 
-/// AirPlay route picker: AVKit's own button, so the system lists AirPlay receivers.
-unsafe fn route_button(bar: *mut AnyObject) -> *mut AnyObject {
+/// AirPlay route picker: AVKit's own control, so the system lists AirPlay receivers.
+/// The More menu hosts one as its AirPlay row; it is made fresh each time the menu opens.
+unsafe fn new_route_picker() -> *mut AnyObject {
     let v: *mut AnyObject = msg_send![class!(AVRoutePickerView), alloc];
-    let v: *mut AnyObject = msg_send![v, initWithFrame: rect(0., 0., BTN, BTN)];
+    let v: *mut AnyObject = msg_send![v, initWithFrame: rect(0., 0., ROUTE_ROW_W, ROUTE_ROW_H)];
     // The icon follows the player's dark appearance; there is no colour setter on macOS.
     let _: () = msg_send![v, setToolTip: ns("AirPlay")];
-    add_sub(bar, v);
     autorel(v)
 }
 
@@ -312,26 +341,117 @@ pub(crate) unsafe fn relayout() {
         rect(EDGE + TIME_W + SP3, SCRUB_Y, (w - 2. * EDGE - 2. * TIME_W - 2. * SP3).max(60.), SCRUB_H),
     );
 
-    // Left cluster: play/pause, then the 10 s skips.
-    set_frame(p.play.get(), rect(EDGE, cy - BTN_PRIMARY / 2., BTN_PRIMARY, BTN_PRIMARY));
-    let back_x = EDGE + BTN_PRIMARY + SP2;
-    set_frame(p.back.get(), rect(back_x, cy - BTN / 2., BTN, BTN));
-    set_frame(p.fwd.get(), rect(back_x + BTN + SP1, cy - BTN / 2., BTN, BTN));
+    // Left cluster: mute, then the volume slider.
+    set_frame(p.mute.get(), rect(EDGE, cy - BTN / 2., BTN, BTN));
+    set_frame(p.vol.get(), rect(EDGE + BTN + SP1, cy - 8., VOL_W, 16.));
 
-    // Right cluster, counted from the right edge: slot 0 is full screen, slot 6 is subtitles.
-    let slot = |i: f64| w - EDGE - BTN - i * (BTN + SP1);
-    set_frame(p.full.get(), rect(slot(0.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.pip.get(), rect(slot(1.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.cast.get(), rect(slot(2.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.route.get(), rect(slot(3.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.speed.get(), rect(slot(4.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.audio.get(), rect(slot(5.), cy - BTN / 2., BTN, BTN));
-    set_frame(p.subs.get(), rect(slot(6.), cy - BTN / 2., BTN, BTN));
+    // Right cluster, counted from the right edge. The episode buttons only show for episodes.
+    let episode = ui.playing.as_ref().map(|pl| pl.skip.series_id.is_some()).unwrap_or(false);
+    let mut x = w - EDGE;
+    for (b, episode_only) in [
+        (p.full.get(), false),
+        (p.more.get(), false),
+        (p.audio.get(), false),
+        (p.subs.get(), false),
+        (p.episodes.get(), true),
+        (p.next.get(), true),
+    ] {
+        if episode_only && !episode {
+            set_hidden(b, true);
+            continue;
+        }
+        set_hidden(b, false);
+        set_frame(b, rect(x - BTN, cy - BTN / 2., BTN, BTN));
+        x -= BTN + SP1;
+    }
+    // Next Episode is only live while there is a next episode to play.
+    let has_next = ui.playing.as_ref().map(|pl| pl.skip.next.is_some()).unwrap_or(false);
+    let _: () = msg_send![p.next.get(), setEnabled: if has_next { Bool::YES } else { Bool::NO }];
+}
 
-    // Volume sits just left of the subtitle button: mute, then the slider.
-    let vol_x = slot(6.) - SP4 - VOL_W;
-    set_frame(p.vol.get(), rect(vol_x, cy - 8., VOL_W, 16.));
-    set_frame(p.mute.get(), rect(vol_x - SP1 - BTN, cy - BTN / 2., BTN, BTN));
+/// Places the centred transport over the picture, midway between the bottom bar and the top bar.
+pub(crate) unsafe fn relayout_transport() {
+    let ui = match UI.get() {
+        Some(u) => u,
+        None => return,
+    };
+    let t = ui.pbar.transport.get();
+    if t.is_null() {
+        return;
+    }
+    let b = bounds_of(t).size;
+    let cx = b.w / 2.;
+    let cy = (PLAYER_CTRL_H + (b.h - PLAYER_BAR_H)) / 2.;
+    // The Episodes panel is sized from the picture too; this pass runs on every resize of the player.
+    crate::ui::episodes::layout();
+    let play = ui.pbar.play.get();
+    set_frame(play, rect(cx - CENTER_PLAY / 2., cy - CENTER_PLAY / 2., CENTER_PLAY, CENTER_PLAY));
+    let back_x = cx - CENTER_PLAY / 2. - CENTER_GAP - CENTER_SKIP;
+    set_frame(ui.pbar.back.get(), rect(back_x, cy - CENTER_SKIP / 2., CENTER_SKIP, CENTER_SKIP));
+    let fwd_x = cx + CENTER_PLAY / 2. + CENTER_GAP;
+    set_frame(ui.pbar.fwd.get(), rect(fwd_x, cy - CENTER_SKIP / 2., CENTER_SKIP, CENTER_SKIP));
+}
+
+/// Builds the centred transport over the picture. It sits below the bottom bar and the skip overlays.
+pub(crate) unsafe fn build_transport(ph: *mut AnyObject, b: NSRect) {
+    let ui = UI.get_mut().unwrap();
+    let tcls = *TRANSPORT_CLASS.get().unwrap();
+    let t: *mut AnyObject = msg_send![tcls, alloc];
+    let t: *mut AnyObject = msg_send![t, initWithFrame: rect(0., 0., b.size.w, b.size.h)];
+    let _: () = msg_send![t, setWantsLayer: Bool::YES];
+    set_autoresize(t, RESIZE_W | RESIZE_H);
+    add_sub(ph, t);
+    autorel(t);
+    ui.pbar.transport = Ptr(t);
+
+    let play = ctl_button(t, "play.fill", CENTER_PLAY_SYMBOL, "Play / Pause", sel!(playPause:));
+    ui.pbar.play = Ptr(play);
+    let back = ctl_button(t, "gobackward.10", CENTER_SKIP_SYMBOL, "Back 10 seconds", sel!(seekBack:));
+    ui.pbar.back = Ptr(back);
+    let fwd = ctl_button(t, "goforward.10", CENTER_SKIP_SYMBOL, "Forward 10 seconds", sel!(seekFwd:));
+    ui.pbar.fwd = Ptr(fwd);
+    relayout_transport();
+}
+
+/// The vignette: clear over the middle of the picture, darkening toward the edges so the centred controls
+/// and the subtitles above the bar read on any frame.
+extern "C" fn transport_layer(_t: *mut AnyObject, _c: Sel) -> *mut AnyObject {
+    unsafe {
+        let l: *mut AnyObject = msg_send![class!(CAGradientLayer), layer];
+        let _: () = msg_send![l, setType: ns("radial")];
+        let cols = [cg_black(0.0) as *mut AnyObject, cg_black(0.0) as *mut AnyObject, cg_black(0.6) as *mut AnyObject];
+        let arr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObjects: cols.as_ptr(), count: 3usize];
+        let _: () = msg_send![l, setColors: arr];
+        let mut locs: Vec<*mut AnyObject> = Vec::new();
+        for v in [0.0f64, 0.5, 1.0] {
+            let n: *mut AnyObject = msg_send![class!(NSNumber), numberWithDouble: v];
+            locs.push(n);
+        }
+        let larr: *mut AnyObject = msg_send![class!(NSArray), arrayWithObjects: locs.as_ptr(), count: 3usize];
+        let _: () = msg_send![l, setLocations: larr];
+        let _: () = msg_send![l, setStartPoint: NSPoint { x: 0.5, y: 0.5 }];
+        let _: () = msg_send![l, setEndPoint: NSPoint { x: 1.0, y: 1.0 }];
+        l
+    }
+}
+
+extern "C" fn transport_layout(this: *mut AnyObject, _c: Sel) {
+    unsafe {
+        let _: () = msg_send![super(this, class!(NSView)), layout];
+        relayout_transport();
+    }
+}
+
+/// Clicks land on the transport's buttons; anywhere else they pass through to the video below.
+extern "C" fn transport_hit(this: *mut AnyObject, _c: Sel, p: NSPoint) -> *mut AnyObject {
+    unsafe {
+        let hit: *mut AnyObject = msg_send![super(this, class!(NSView)), hitTest: p];
+        if hit == this {
+            nil()
+        } else {
+            hit
+        }
+    }
 }
 
 /// Duration in seconds: the item's when it is known, else the one the worker sent.
@@ -418,6 +538,7 @@ pub(crate) unsafe fn on_start() {
         return;
     }
     sync_pip_controls();
+    relayout();
 }
 
 /// Makes the PiP controller once AVPlayerView has its layer (it appears lazily, so this may take a few ticks),
@@ -429,8 +550,9 @@ unsafe fn sync_pip_controls() {
         ensure_pip_controller();
     }
     let ui = UI.get_mut().unwrap();
-    let have = supported == Bool::YES && !ui.pbar.pip_ctl.get().is_null();
-    set_hidden(ui.pbar.pip.get(), !have);
+    // The PiP button is no longer in the bar: Picture in Picture lives in the More menu.
+    let _ = supported;
+    set_hidden(ui.pbar.pip.get(), true);
     refresh_pip_button();
 }
 
@@ -488,7 +610,7 @@ extern "C" fn scrub_draw(this: *mut AnyObject, _c: Sel, _dirty: NSRect) {
         let x_buf = (p.buffered * w).clamp(0., w);
         fill_rr(rect(0., cy - th / 2., w, th), th / 2., color_a(C_ON_MEDIA, 0.28));
         fill_rr(rect(0., cy - th / 2., x_buf, th), th / 2., color_a(C_ON_MEDIA, 0.50));
-        fill_rr(rect(0., cy - th / 2., x_played, th), th / 2., color(C_ACCENT));
+        fill_rr(rect(0., cy - th / 2., x_played, th), th / 2., color(C_ON_MEDIA));
         let r = if hot { 9. } else { 7. };
         let kx = x_played.clamp(r, (w - r).max(r));
         fill_oval(rect(kx - r, cy - r, 2. * r, 2. * r), color(C_ON_MEDIA));
@@ -656,6 +778,49 @@ pub(crate) extern "C" fn show_speed_menu(_t: *mut AnyObject, _c: Sel, sender: *m
         }
         present(menu, sender);
     }
+}
+
+/// The More menu: playback speed, AirPlay, Picture in Picture and Cast. Built fresh each time it opens,
+/// so the PiP title and the speed tick always match the player.
+pub(crate) extern "C" fn show_more_menu(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let menu = new_menu("More");
+
+        let rate: f32 = msg_send![ui.player.get(), defaultRate];
+        let speeds = new_menu("Playback Speed");
+        for (label, tag) in SPEEDS {
+            let on = ((tag as f32) / 100.0 - rate).abs() < 0.01;
+            menu_row(speeds, label, sel!(setSpeed:), tag, on);
+        }
+        let speed_item = menu_item("Playback Speed", sel!(showSpeedMenu:), "");
+        let _: () = msg_send![speed_item, setSubmenu: speeds];
+        let _: () = msg_send![menu, addItem: speed_item];
+
+        // AirPlay: AVKit's route picker is the row itself, so clicking it opens the system receiver list.
+        let route = new_route_picker();
+        UI.get_mut().unwrap().pbar.route = Ptr(route);
+        let air = menu_item("AirPlay", sel!(showMoreMenu:), "");
+        let _: () = msg_send![air, setView: route];
+        let _: () = msg_send![menu, addItem: air];
+
+        let pip_title = if pip_active() { "Exit Picture in Picture" } else { "Picture in Picture" };
+        let pip = menu_item(pip_title, sel!(togglePiP:), "");
+        let _: () = msg_send![pip, setTarget: UI.get().unwrap().ctl.get()];
+        let _: () = msg_send![menu, addItem: pip];
+
+        let cast = menu_item("Cast to a Device…", sel!(castFromMore:), "");
+        let _: () = msg_send![cast, setTarget: UI.get().unwrap().ctl.get()];
+        let _: () = msg_send![menu, addItem: cast];
+
+        present(menu, sender);
+    }
+}
+
+/// Cast from the More menu: the cast menu opens under the More button.
+pub(crate) extern "C" fn cast_from_more(t: *mut AnyObject, c: Sel, _s: *mut AnyObject) {
+    let more = UI.get().map(|u| u.pbar.more.get()).unwrap_or(std::ptr::null_mut());
+    crate::ui::cast::show_menu(t, c, more);
 }
 
 // ---- Picture in Picture ------------------------------------------------------------------------------

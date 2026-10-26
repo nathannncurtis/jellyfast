@@ -278,6 +278,11 @@ fn steps() -> Vec<Step> {
         ("skip: per-show auto-skip toggles and persists", s_skip_series_on, 800),
         ("skip: auto-skip on the next intro of that show", s_skip_series_auto, 800),
         ("skip: per-show auto-skip off again", s_skip_series_off, 100),
+        ("player: movie overlay, large and min", s_player_movie_overlay, 100),
+        ("player: episode overlay, large and min", s_player_episode_overlay, 100),
+        ("player: episodes panel lists the season, audit", s_player_episodes_panel, 100),
+        ("player: episodes panel picks an episode", s_player_episodes_pick, 100),
+        ("player: next episode button and N", s_player_next_episode, 100),
         ("up next: card near the end", s_upnext_card, 5000),
         ("up next: card audit and Play Now", s_upnext_play, 300),
         ("up next: next episode, title updated", s_upnext_next, 300),
@@ -526,16 +531,19 @@ fn is_hidden_or_gone(v: *mut AnyObject) -> bool {
 fn s_player_airplay() {
     unsafe {
         let ui = UI.get_mut().unwrap();
+        // AirPlay and Cast live in the More menu, which is built when it opens (self-test only counts its rows).
+        act(sel!(showMoreMenu:), ui.pbar.more.get());
+        state_check("more menu lists speed, AirPlay, Picture in Picture and Cast", ui.pbar.last_menu_items == 4);
         let route = ui.pbar.route.get();
         let is_route: Bool = msg_send![route, isKindOfClass: class!(AVRoutePickerView)];
-        state_check("player bar: AirPlay route picker built", is_route == Bool::YES);
+        state_check("more menu: AirPlay route picker built", is_route == Bool::YES);
         let sup: *mut AnyObject = msg_send![route, superview];
-        state_check("player bar: route picker sits in the bar", sup == ui.pbar.bar.get());
-        state_check("player bar: route picker visible", !is_hidden(route));
+        state_check("more menu: route picker is the AirPlay row", !sup.is_null());
+        let more_hidden: Bool = msg_send![ui.pbar.more.get(), isHidden];
+        state_check("player bar: More button visible", more_hidden == Bool::NO);
         let cast = ui.pbar.cast.get();
         let a: objc2::runtime::Sel = msg_send![cast, action];
-        state_check("player bar: cast button opens the cast menu", a == sel!(showCastMenu:));
-        state_check("player bar: cast button visible", !is_hidden(cast));
+        state_check("cast menu is still wired to its button", a == sel!(showCastMenu:));
         let cfg: Bool = msg_send![ui.player.get(), allowsExternalPlayback];
         state_check("AVPlayer allows external (AirPlay) playback", cfg == Bool::YES);
         state_check("AirPlay card hidden while playing here", is_hidden(ui.ext.view.get()));
@@ -683,6 +691,7 @@ fn video_url() -> String {
 }
 fn playback(resume: f64, run: f64) -> MainMsg {
     MainMsg::PlaybackReady(PlaybackStart {
+        season_episodes: Vec::new(),
         url: video_url(),
         item_id: "movie-1".into(),
         title: "Fake Movie".into(),
@@ -2666,6 +2675,7 @@ fn s_toast_hidden() {
 }
 fn s_audit_player() {
     handle_main(MainMsg::PlaybackReady(PlaybackStart {
+        season_episodes: Vec::new(),
         url: video_url(),
         item_id: "movie-1".into(),
         title: LONG.into(),
@@ -2759,7 +2769,7 @@ fn s_player_bar_buttons() {
             state_check("pip is not showing in self-test", active == Bool::NO);
         }
         let hid: Bool = msg_send![pip.get(), isHidden];
-        state_check("pip button shown on this Mac", hid == Bool::NO);
+        state_check("pip button left the bar (the More menu has PiP)", hid == Bool::YES);
         let btn_on: Bool = msg_send![pip.get(), isEnabled];
         state_check("pip menu item follows the button", crate::ui::shortcuts::item_enabled("togglePiP:", 0, crate::ui::shortcuts::ALT | crate::ui::shortcuts::CMD) == (btn_on == Bool::YES));
         state_check("pip shortcut is ⌥⌘P in the table", crate::ui::shortcuts::SHORTCUTS.iter().any(|e| {
@@ -3006,6 +3016,7 @@ const LONG_SERIES: &str = "The Extraordinarily Long Series Name That Keeps Going
 fn s_player_header() {
     // Episode with a long show name and a long episode title: title on top, "Series · S12 E105" under it.
     handle_main(MainMsg::PlaybackReady(PlaybackStart {
+        season_episodes: Vec::new(),
         url: video_url(),
         item_id: "ep-long".into(),
         title: LONG.into(),
@@ -3035,6 +3046,7 @@ fn s_player_header() {
     audit_both("player header (episode)");
     // Movie: the year goes under the title.
     handle_main(MainMsg::PlaybackReady(PlaybackStart {
+        season_episodes: Vec::new(),
         url: video_url(),
         item_id: "movie-hdr".into(),
         title: "Fake Movie".into(),
@@ -3086,6 +3098,7 @@ fn s_play_stop() {
 }
 fn audio_start(title: &str, artist: &str) -> MainMsg {
     MainMsg::PlaybackReady(PlaybackStart {
+        season_episodes: Vec::new(),
         url: video_url(), // the video asset has an audio track; the Audio kind never shows the picture
         item_id: "track-1".into(),
         title: title.into(),
@@ -3197,6 +3210,7 @@ fn s_fullscreen() {
 // ---- skip buttons, Up Next and autoplay -------------------------------------------------------
 fn playback_ext(item: &str, title: &str, resume: f64, run: f64, segs: Vec<Segment>, series: Option<&str>, next: Option<NextUp>) -> MainMsg {
     MainMsg::PlaybackReady(PlaybackStart {
+        season_episodes: Vec::new(),
         url: video_url(),
         item_id: item.into(),
         title: title.into(),
@@ -3327,6 +3341,117 @@ fn s_skip_series_off() {
         state_check("skip: no button after auto-skip", !crate::ui::skip::button_visible());
         act(sel!(jrToggleSeriesSkip:), nil());
         state_check("skip: per-show off persisted", !crate::config::skip_intros_for("show-auto", true));
+    }
+}
+/// Four episodes of season 1 for the Episodes panel: the first watched, the second half way, the rest unwatched.
+fn ep_fixture(n: u32) -> Vec<crate::app::messages::SeasonEpisode> {
+    (1..=n)
+        .map(|i| crate::app::messages::SeasonEpisode {
+            id: format!("ep-{}", i),
+            number: Some(i),
+            name: if i == 2 { LONG.to_string() } else { format!("Episode {} Title", i) },
+            runtime_secs: 1500.,
+            progress: match i {
+                1 => 1.0,
+                2 => 0.45,
+                _ => 0.0,
+            },
+            image_key: None,
+        })
+        .collect()
+}
+/// Overlay of a movie: no episode buttons, More and full screen present.
+fn s_player_movie_overlay() {
+    handle_main(playback(0.0, 6.0));
+    unsafe {
+        crate::ui::player::show_bars_instant();
+        let ui = UI.get().unwrap();
+        state_check("movie overlay: Episodes and Next Episode hidden", is_hidden(ui.pbar.episodes.get()) && is_hidden(ui.pbar.next.get()));
+        state_check("movie overlay: More and full screen shown", !is_hidden(ui.pbar.more.get()) && !is_hidden(ui.pbar.full.get()));
+        state_check("movie overlay: centred play button shown", !is_hidden(ui.pbar.play.get()));
+    }
+    audit_both("player overlay movie");
+}
+/// Overlay of an episode with a next one: the Episodes and Next Episode buttons join the right cluster.
+fn s_player_episode_overlay() {
+    handle_main(playback_ext("ep-2", LONG, 0.0, 6.0, Vec::new(), Some("show-ep"), Some(mock_next())));
+    unsafe { crate::ui::episodes::set_items(ep_fixture(4), "ep-2", Some(1)) };
+    unsafe {
+        crate::ui::player::show_bars_instant();
+        let ui = UI.get().unwrap();
+        state_check("episode overlay: Episodes and Next Episode shown", !is_hidden(ui.pbar.episodes.get()) && !is_hidden(ui.pbar.next.get()));
+        let en: Bool = msg_send![ui.pbar.next.get(), isEnabled];
+        state_check("episode overlay: Next Episode enabled with a next episode", en == Bool::YES);
+        state_check("episode overlay: transport and bar both shown", ui.bar_shown);
+    }
+    audit_both("player overlay episode");
+}
+/// Walks the view tree under `v` for the first button whose tag is `tag`.
+unsafe fn find_tagged_button(v: *mut AnyObject, tag: isize) -> *mut AnyObject {
+    let is: Bool = msg_send![v, isKindOfClass: class!(NSButton)];
+    let t: isize = msg_send![v, tag];
+    if is == Bool::YES && t == tag {
+        return v;
+    }
+    let subs: *mut AnyObject = msg_send![v, subviews];
+    let n: usize = msg_send![subs, count];
+    for i in 0..n {
+        let c: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+        let f = find_tagged_button(c, tag);
+        if !f.is_null() {
+            return f;
+        }
+    }
+    std::ptr::null_mut()
+}
+fn s_player_episodes_panel() {
+    unsafe {
+        act(sel!(toggleEpisodes:), nil());
+        let ui = UI.get().unwrap();
+        state_check("episodes panel opens", crate::ui::episodes::is_open() && !is_hidden(ui.episodes.panel.get()));
+        let sv = ui.episodes.scroll.get();
+        let doc: *mut AnyObject = msg_send![sv, documentView];
+        let rows: *mut AnyObject = msg_send![doc, subviews];
+        let n: usize = msg_send![rows, count];
+        state_check(&format!("episodes panel lists the season ({} rows)", n), n == 4);
+        state_check("episodes panel title names the season", read_field(ui.episodes.title.get()) == "Season 1");
+        let ui_panel = ui.episodes.panel.get();
+        let right: f64 = crate::ui::episodes::right_inset();
+        state_check("episodes panel pushes the overlays left", right > 0.0);
+        let _ = ui_panel;
+    }
+    audit_both("episodes panel");
+}
+fn s_player_episodes_pick() {
+    unsafe {
+        take_cmds();
+        let doc: *mut AnyObject = msg_send![UI.get().unwrap().episodes.scroll.get(), documentView];
+        let btn = find_tagged_button(doc, 2);
+        state_check("episodes panel: row button found", !btn.is_null());
+        if !btn.is_null() {
+            act_with(ctl(), sel!(jrEpisodePick:), btn);
+        }
+        let sent = take_cmds();
+        state_check(
+            "episodes panel: picking a row plays that episode",
+            sent.iter().any(|c| matches!(c, UiCmd::Play { item_id } if item_id == "ep-3")),
+        );
+        state_check("episodes panel closes after a pick", !crate::ui::episodes::is_open());
+    }
+}
+fn s_player_next_episode() {
+    unsafe {
+        handle_main(playback_ext("ep-2", LONG, 0.0, 6.0, Vec::new(), Some("show-ep"), Some(mock_next())));
+        take_cmds();
+        state_check("next episode: N shortcut is in the table", crate::ui::shortcuts::SHORTCUTS.iter().any(|e| e.action == "nextEpisode:" && e.key == "n"));
+        state_check("next episode: E shortcut is in the table", crate::ui::shortcuts::SHORTCUTS.iter().any(|e| e.action == "toggleEpisodes:" && e.key == "e"));
+        state_check("next episode: enabled when there is a next", crate::ui::shortcuts::item_enabled("nextEpisode:", 0, 0));
+        act(sel!(nextEpisode:), nil());
+        let sent = take_cmds();
+        state_check(
+            "next episode: plays the next episode now",
+            sent.iter().any(|c| matches!(c, UiCmd::Play { item_id } if item_id == "ep-next")),
+        );
     }
 }
 fn s_upnext_card() {

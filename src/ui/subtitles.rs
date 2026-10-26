@@ -227,18 +227,21 @@ unsafe fn place(animate: bool) {
         ui.subs.font_pt = pt;
     }
 
-    let maxw = host.size.w * MAX_W_FRAC;
     let attr: *mut AnyObject = msg_send![lab, attributedStringValue];
-    let inner = maxw - 2. * PAD_X - CELL_SLACK;
-    let r: NSRect = msg_send![attr, boundingRectWithSize: size(inner, 10000.), options: 1usize, context: nil()];
-    let w = (r.size.w.ceil() + 2. * PAD_X + CELL_SLACK).min(maxw);
-    let h = r.size.h.ceil() + 2. * PAD_Y;
-    let x = ((host.size.w - w) / 2.).max(0.);
+    // Height of the cue when it is set `maxw` wide.
+    let measure = |maxw: f64| -> (f64, f64) {
+        let inner = maxw - 2. * PAD_X - CELL_SLACK;
+        let r: NSRect = msg_send![attr, boundingRectWithSize: size(inner, 10000.), options: 1usize, context: nil()];
+        ((r.size.w.ceil() + 2. * PAD_X + CELL_SLACK).min(maxw), r.size.h.ceil() + 2. * PAD_Y)
+    };
+    let (mut w, mut h) = measure(host.size.w * MAX_W_FRAC);
+    let mut x = ((host.size.w - w) / 2.).max(0.);
 
     // Normally near the bottom of the video; with the controls up, just above the transport bar.
     let mut bottom = if ui.bar_shown { PLAYER_CTRL_H + GAP } else { BOTTOM_IDLE };
     // The skip button and the Up Next card sit above the bar and can be up without it, so the
     // overlay goes above whichever of them it overlaps horizontally.
+    let mut right_limit = host.size.w;
     for v in [ui.skip.card.get(), ui.skip.pill.get()] {
         if v.is_null() || is_hidden(v) {
             continue;
@@ -246,6 +249,18 @@ unsafe fn place(animate: bool) {
         let f = frame_of(v);
         if x < f.origin.x + f.size.w && f.origin.x < x + w {
             bottom = bottom.max(f.origin.y + f.size.h + GAP);
+            right_limit = right_limit.min(f.origin.x);
+        }
+    }
+    // No room above the card in the picture (a tall card on a short window): the cue sits beside it instead.
+    if bottom + h > host.size.h - PLAYER_BAR_H - GAP && right_limit < host.size.w {
+        let avail = right_limit - GAP - EDGE;
+        if avail > 0. {
+            let (bw, bh) = measure(avail);
+            w = bw;
+            h = bh;
+            x = EDGE;
+            bottom = PLAYER_CTRL_H + GAP;
         }
     }
 

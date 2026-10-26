@@ -331,6 +331,21 @@ pub struct PlaybackStart {
     pub series_id: Option<String>,
     /// Episodes: the next episode in series order, when there is one.
     pub next_up: Option<NextUp>,
+    /// Episodes: the episodes of this one's season, in order, for the player's Episodes panel.
+    pub season_episodes: Vec<SeasonEpisode>,
+}
+
+/// One row of the player's Episodes panel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeasonEpisode {
+    pub id: String,
+    pub number: Option<u32>,
+    pub name: String,
+    pub runtime_secs: f64,
+    /// Watched share of the episode, 0..1 (1 when marked played).
+    pub progress: f64,
+    /// Key of the 16:9 thumbnail in the poster cache, when the server has one.
+    pub image_key: Option<u64>,
 }
 
 impl PlaybackStart {
@@ -549,6 +564,7 @@ mod tests {
 
     fn start(series: Option<&str>, season: Option<u32>, episode: Option<u32>, year: Option<u32>, kind: MediaKind) -> PlaybackStart {
         PlaybackStart {
+            season_episodes: Vec::new(),
             url: String::new(),
             item_id: "x".into(),
             title: "Pilot".into(),
