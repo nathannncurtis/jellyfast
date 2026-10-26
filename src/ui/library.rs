@@ -590,6 +590,7 @@ pub fn poster_ready(key: u64, bytes: &[u8]) {
             }
         }
         crate::ui::detail::image_ready(key);
+        crate::ui::episodes::image_ready(key);
         for row in ui.home.views.iter_mut() {
             for c in row.cells.iter_mut() {
                 if c.key == key {

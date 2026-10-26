@@ -306,7 +306,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                 crate::transcode::decision::PlaybackMethod::DirectPlay => "DirectPlay",
                                 crate::transcode::decision::PlaybackMethod::ServerHls => "Transcode",
                             };
-                            let (segments, next_up, art_jobs) = playback_extras(c, &full).await;
+                            let (segments, next_up, season_episodes, art_jobs) = playback_extras(c, &full).await;
                             c.report_start(&full.id, crate::jellyfin::urls::ticks_from_secs(resume_secs), play_method)
                                 .await;
                             let mut hist = crate::config::load_history();
@@ -350,6 +350,7 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                                 segments,
                                 series_id: if full.item_type == "Episode" { full.series_id.clone() } else { None },
                                 next_up,
+                                season_episodes,
                             }));
                             fetch_art(art_jobs, &main_tx, &poster_dir, http_poster.as_ref());
                         }
@@ -678,6 +679,7 @@ async fn play_channel(
                     let url = c.absolute_media_url(&rel);
                     c.report_start(&channel_id, 0, "Transcode").await;
                     let _ = main_tx.send(MainMsg::PlaybackReady(PlaybackStart {
+                        season_episodes: Vec::new(),
                         url,
                         item_id: channel_id.clone(),
                         title: name,
@@ -1232,9 +1234,12 @@ pub(crate) fn plan_episodes(c: &JellyfinClient, eps: &[Episode]) -> (Vec<Episode
 /// What the player needs beyond the stream: skip-button segments, and for an episode the
 /// next one in its series. Lookups fail soft (logged): playback then simply has no skip
 /// buttons or Up Next. The returned jobs are the next episode's still artwork.
-async fn playback_extras(c: &JellyfinClient, full: &FullItem) -> (Vec<Segment>, Option<NextUp>, Vec<(u64, String)>) {
+/// Most rows the player's Episodes panel keeps for one season.
+const SEASON_LIST_MAX: usize = 40;
+
+async fn playback_extras(c: &JellyfinClient, full: &FullItem) -> (Vec<Segment>, Option<NextUp>, Vec<SeasonEpisode>, Vec<(u64, String)>) {
     if full.item_type == "Audio" {
-        return (Vec::new(), None, Vec::new());
+        return (Vec::new(), None, Vec::new(), Vec::new());
     }
     let segs = match c.media_segments(&full.id).await {
         Ok(v) => segments::from_models(&v),
@@ -1244,26 +1249,58 @@ async fn playback_extras(c: &JellyfinClient, full: &FullItem) -> (Vec<Segment>, 
         }
     };
     let Some(series) = full.series_id.as_deref().filter(|_| full.item_type == "Episode") else {
-        return (segs, None, Vec::new());
+        return (segs, None, Vec::new(), Vec::new());
     };
     let eps = match c.series_episodes(series).await {
         Ok(eps) => eps,
         Err(e) => {
             tracing::warn!("episode list unavailable: {}", e);
-            return (segs, None, Vec::new());
+            return (segs, None, Vec::new(), Vec::new());
         }
     };
+    let (season_rows, mut jobs) = season_episode_rows(&eps, full.season, &c.base, &c.token);
     let Some(next) = segments::next_episode(&eps, &full.id) else {
-        return (segs, None, Vec::new());
+        return (segs, None, season_rows, jobs);
     };
     let mut up = NextUp::from_episode(next);
-    let mut jobs = Vec::new();
     if next.has_image() {
         let key = sys_key(&next.id);
         up.image_key = Some(key);
         jobs.push((key, build_image_url(&c.base, &next.id, &c.token, 400)));
     }
-    (segs, Some(up), jobs)
+    (segs, Some(up), season_rows, jobs)
+}
+
+/// The Episodes panel's rows: the episodes of `season` in order, each with its watched share
+/// and the thumbnail job for it. Capped at `SEASON_LIST_MAX` rows.
+fn season_episode_rows(eps: &[Episode], season: Option<u32>, base: &str, token: &str) -> (Vec<SeasonEpisode>, Vec<(u64, String)>) {
+    let Some(season) = season else { return (Vec::new(), Vec::new()) };
+    let mut rows = Vec::new();
+    let mut jobs = Vec::new();
+    for e in eps.iter().filter(|e| e.parent_index == Some(season)).take(SEASON_LIST_MAX) {
+        let run = e.run_time_ticks.unwrap_or(0);
+        let progress = match e.user_data.as_ref() {
+            Some(u) if u.played => 1.0,
+            Some(u) if run > 0 => (u.position_ticks as f64 / run as f64).clamp(0.0, 1.0),
+            _ => 0.0,
+        };
+        let image_key = if e.has_image() {
+            let key = sys_key(&e.id);
+            jobs.push((key, build_image_url(base, &e.id, token, 400)));
+            Some(key)
+        } else {
+            None
+        };
+        rows.push(SeasonEpisode {
+            id: e.id.clone(),
+            number: e.number,
+            name: e.name.clone(),
+            runtime_secs: crate::jellyfin::urls::secs_from_ticks(run),
+            progress,
+            image_key,
+        });
+    }
+    (rows, jobs)
 }
 
 /// Fetch thumbnails for Seerr results through the user's Seerr server (never TMDB),
@@ -1886,6 +1923,29 @@ mod tests {
             }
             o => panic!("expected ItemsLoaded, got {:?}", o),
         }
+    }
+
+    #[test]
+    fn season_rows_keep_only_the_season_in_order_with_progress() {
+        let eps: Vec<Episode> = serde_json::from_value(serde_json::json!([
+            {"Id": "a", "Name": "One", "IndexNumber": 1, "ParentIndexNumber": 1, "RunTimeTicks": 12000000000u64,
+             "UserData": {"Played": true, "PlaybackPositionTicks": 0}},
+            {"Id": "b", "Name": "Other", "IndexNumber": 1, "ParentIndexNumber": 2, "RunTimeTicks": 12000000000u64},
+            {"Id": "c", "Name": "Two", "IndexNumber": 2, "ParentIndexNumber": 1, "RunTimeTicks": 12000000000u64,
+             "UserData": {"Played": false, "PlaybackPositionTicks": 3000000000u64}},
+            {"Id": "d", "Name": "Three", "IndexNumber": 3, "ParentIndexNumber": 1}
+        ]))
+        .unwrap();
+        let (rows, jobs) = season_episode_rows(&eps, Some(1), "http://x", "t");
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["a", "c", "d"]);
+        assert_eq!(rows[0].progress, 1.0);
+        assert!((rows[1].progress - 0.25).abs() < 1e-9);
+        assert_eq!(rows[2].progress, 0.0);
+        assert!((rows[0].runtime_secs - 1200.0).abs() < 1e-6);
+        assert!(jobs.is_empty(), "no thumbnail jobs without image tags");
+        let (none, _) = season_episode_rows(&eps, None, "http://x", "t");
+        assert!(none.is_empty());
     }
 
     fn playback(m: MainMsg) -> PlaybackStart {

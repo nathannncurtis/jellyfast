@@ -442,6 +442,7 @@ pub struct Ui {
     pub pbar: crate::ui::playerbar::PlayerBar,
     /// Skip-segment button and Up Next card (see ui::skip).
     pub skip: crate::ui::skip::SkipUi,
+    pub episodes: crate::ui::episodes::EpisodesUi,
     /// Subtitle overlay above the video (see ui::subtitles).
     pub subs: crate::ui::subtitles::SubtitleUi,
     /// Play On: cast menu state and the remote-control bar.
@@ -614,6 +615,11 @@ pub(crate) unsafe fn register_classes() {
             (sel!(showSubtitleMenu:), crate::ui::playerbar::show_sub_menu as Extern0),
             (sel!(showAudioMenu:), crate::ui::playerbar::show_audio_menu as Extern0),
             (sel!(showSpeedMenu:), crate::ui::playerbar::show_speed_menu as Extern0),
+            (sel!(showMoreMenu:), crate::ui::playerbar::show_more_menu as Extern0),
+            (sel!(castFromMore:), crate::ui::playerbar::cast_from_more as Extern0),
+            (sel!(nextEpisode:), crate::ui::skip::next_episode as Extern0),
+            (sel!(toggleEpisodes:), crate::ui::episodes::toggle as Extern0),
+            (sel!(jrEpisodePick:), crate::ui::episodes::pick as Extern0),
             (sel!(pickTrack:), crate::ui::playerbar::pick_track as Extern0),
             (sel!(togglePiP:), crate::ui::playerbar::toggle_pip as Extern0),
             (sel!(skipSegment:), crate::ui::skip::skip_segment as Extern0),
@@ -1398,6 +1404,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         now: crate::ui::nowbar::NowBar::new(),
         pbar: crate::ui::playerbar::PlayerBar::new(),
         skip: crate::ui::skip::SkipUi::new(),
+        episodes: crate::ui::episodes::EpisodesUi::new(),
         subs: crate::ui::subtitles::SubtitleUi::new(),
         cast: crate::ui::cast::CastUi::new(),
         ext: crate::ui::player::ExtUi::new(),

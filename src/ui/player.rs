@@ -177,19 +177,21 @@ pub(crate) unsafe fn build_player_chrome(ph: *mut AnyObject, avv: *mut AnyObject
 
     let tx = TL_RESERVE + 28. + SP2;
     let tt = label("", T_HEADLINE, C_ON_MEDIA, ALIGN_LEFT);
-    set_frame(tt, rect(tx, 26., b.size.w - tx - SP4, 18.));
+    set_frame(tt, rect(tx, 22., b.size.w - tx - SP4, 28.));
     set_autoresize(tt, RESIZE_W);
     add_sub(bar, tt);
     ui.top_title = Ptr(tt);
     let ts = label("", T_CAPTION, C_ON_MEDIA2, ALIGN_LEFT);
-    set_frame(ts, rect(tx, 9., b.size.w - tx - SP4, 14.));
+    set_frame(ts, rect(tx, 4., b.size.w - tx - SP4, 16.));
     set_autoresize(ts, RESIZE_W);
     add_sub(bar, ts);
     ui.top_sub = Ptr(ts);
 
     // ---- bottom transport bar (scrubber, buttons, menus) ----
+    crate::ui::playerbar::build_transport(ph, b);
     crate::ui::playerbar::build(ph, b);
     crate::ui::skip::build(ph, b);
+    crate::ui::episodes::build(ph);
 
     // ---- toast ----
     // Same panel as the skip button: frosted HUD, continuous corners, light border.
@@ -291,6 +293,9 @@ unsafe fn fade_transport(to: f64, d: f64) {
     if !ui.pbar.bar.get().is_null() {
         fade(ui.pbar.bar.get(), to, d);
     }
+    if !ui.pbar.transport.get().is_null() {
+        fade(ui.pbar.transport.get(), to, d);
+    }
 }
 /// Self-test hook: pretends the pointer last moved `secs` ago.
 pub(crate) unsafe fn set_idle_age(secs: f64) {
@@ -305,6 +310,9 @@ pub(crate) unsafe fn show_bars_instant() {
     let _: () = msg_send![ui.top_bar.get(), setAlphaValue: 1.0f64];
     if !ui.pbar.bar.get().is_null() {
         let _: () = msg_send![ui.pbar.bar.get(), setAlphaValue: 1.0f64];
+    }
+    if !ui.pbar.transport.get().is_null() {
+        let _: () = msg_send![ui.pbar.transport.get(), setAlphaValue: 1.0f64];
     }
     crate::ui::subtitles::update();
 }

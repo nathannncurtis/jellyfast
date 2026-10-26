@@ -11,6 +11,7 @@ pub mod home;
 pub mod onboarding;
 pub mod playerbar;
 pub mod skip;
+pub mod episodes;
 pub mod subtitles;
 pub mod palettes;
 pub mod cast;
