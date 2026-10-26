@@ -594,17 +594,45 @@ unsafe fn text_height(v: *mut AnyObject, width: f64) -> f64 {
     sz.h.ceil()
 }
 
-/// Height of two lines of `t`, from the font's metrics.
-unsafe fn two_lines(t: TypeStyle) -> f64 {
+/// Height of `n` lines of `t`, from the font's metrics.
+unsafe fn lines_height(t: TypeStyle, n: usize) -> f64 {
     let f = font(t);
     let asc: f64 = msg_send![f, ascender];
     let desc: f64 = msg_send![f, descender];
     let lead: f64 = msg_send![f, leading];
-    (2. * (asc - desc + lead)).ceil()
+    (n as f64 * (asc - desc + lead)).ceil()
 }
 
-/// Limit a wrapping label to `lines` lines. Word wrap stays on, so the text wraps
-/// rather than truncating on one line.
+/// Height of two lines of `t`, from the font's metrics.
+unsafe fn two_lines(t: TypeStyle) -> f64 {
+    lines_height(t, 2)
+}
+
+/// `text` shortened to fit `lines` wrapped lines of `t` at `width`, ending in an ellipsis when
+/// it is cut. Word wrap alone would cut the last line mid-word, and truncation alone would stop
+/// the text wrapping, so the words are counted out until they fit.
+unsafe fn fit_lines(text: &str, t: TypeStyle, width: f64, lines: usize) -> String {
+    let limit = lines_height(t, lines) + 1.;
+    let fits = |s: &str| text_height(wrapping_label(s, t, C_TEXT, ALIGN_LEFT), width) <= limit;
+    if fits(text) {
+        return text.to_string();
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    // The longest run of leading words that still fits with an ellipsis after it.
+    let (mut lo, mut hi) = (0usize, words.len());
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if fits(&format!("{}…", words[..mid].join(" "))) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    format!("{}…", words[..lo].join(" "))
+}
+
+/// Limit a wrapping label to `lines` lines. Words wrap across those lines; callers that
+/// might overflow pass the text through `fit_lines` first so it ends in an ellipsis.
 unsafe fn clamp_lines(v: *mut AnyObject, lines: isize) {
     let _: () = msg_send![v, setMaximumNumberOfLines: lines];
     let cell: *mut AnyObject = msg_send![v, cell];
@@ -689,7 +717,7 @@ unsafe fn hero_title(text: &str, w: f64) -> (*mut AnyObject, f64) {
         }
     }
     // Still too long at the smallest size: two lines, ending in an ellipsis.
-    let v = wrapping_label(text, T_HERO_S, C_TEXT, ALIGN_LEFT);
+    let v = wrapping_label(&fit_lines(text, T_HERO_S, w, 2), T_HERO_S, C_TEXT, ALIGN_LEFT);
     clamp_lines(v, 2);
     on_hero(v, 1.);
     (v, two_lines(T_HERO_S))
@@ -1008,12 +1036,13 @@ unsafe fn build_page(ui: &mut Ui, doc: *mut AnyObject, host: *mut AnyObject, ite
             let g = glyph_in(rect((CAST_W - AVATAR) / 2., 0., AVATAR, AVATAR), "person.fill", 36.);
             add_sub(cell, g);
             bind(ui, p.image_key, av, g);
-            let name = wrapping_label(&p.name, T_CALLOUT, C_TEXT, ALIGN_CENTER);
+            let name = wrapping_label(&fit_lines(&p.name, T_CALLOUT, CAST_W, 2), T_CALLOUT, C_TEXT, ALIGN_CENTER);
             clamp_lines(name, 2);
             let _: () = msg_send![name, setToolTip: ns(&p.name)];
             set_frame(name, rect(0., AVATAR + SP2, CAST_W, 32.));
             add_sub(cell, name);
-            let role = wrapping_label(p.role.as_deref().unwrap_or(""), T_CAPTION, C_TEXT2, ALIGN_CENTER);
+            let role_text = fit_lines(p.role.as_deref().unwrap_or(""), T_CAPTION, CAST_W, 2);
+            let role = wrapping_label(&role_text, T_CAPTION, C_TEXT2, ALIGN_CENTER);
             clamp_lines(role, 2);
             set_frame(role, rect(0., AVATAR + SP2 + 32. + SP1, CAST_W, 30.));
             add_sub(cell, role);
