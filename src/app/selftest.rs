@@ -249,6 +249,13 @@ fn steps() -> Vec<Step> {
         ("player bar: buttons, menus, hover", s_player_bar_buttons, 300),
         ("player bar: auto-hide arm", s_pb_hide_arm, 600),
         ("player bar: auto-hide check", s_pb_hide_check, 50),
+        ("subtitles: pick a track, cue on screen", s_sub_pick, 800),
+        ("subtitles: cue beside the controls, audits", s_sub_on_screen, 300),
+        ("subtitles: controls hide, overlay drops", s_sub_hide, 400),
+        ("subtitles: overlay at the bottom", s_sub_bottom, 400),
+        ("subtitles: seek clears the cue", s_sub_seek, 400),
+        ("subtitles: track off clears the overlay", s_sub_off, 400),
+        ("subtitles: stays clear with the track off", s_sub_off_check, 50),
         ("seek: scrubber lands near 50%", s_seek_scrub, 500),
         ("seek: scrubber landed", s_seek_scrub_check, 500),
         ("playback: controls", s_play_controls, 300),
@@ -2874,6 +2881,118 @@ fn s_play_cycle() {
         if !ui.sub_opts.is_empty() {
             state_check("toast visible after cycling", crate::ui::player::toast_visible());
         }
+    }
+}
+// ---- subtitle overlay ------------------------------------------------------------
+/// The cue in the mock video (mov_text, 0.5 s to 5.5 s).
+const SUB_CUE: &str = "Subtitle track";
+/// A long two-line cue, to check the wrap and the lift beside the Up Next card.
+const SUB_LONG: &str = "This is a much longer subtitle line that has to wrap across the video width\nand a second line that keeps going so the block gets tall";
+
+fn s_sub_pick() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("subtitles: the mock video has a subtitle track", !ui.sub_opts.is_empty());
+        // Seek into the cue (0.5 s to 5.5 s) and turn the first subtitle track on.
+        seek_to_secs(1.0);
+        let _: () = msg_send![ui.player.get(), setRate: 1.0f32];
+        set_track(0, 1);
+        crate::ui::player::show_bars_instant();
+    }
+}
+
+/// Pauses on the cue, checks it sits above the bar at both sizes, and checks a long cue beside
+/// the visible Up Next card also clears the card.
+/// Resizes the window and lays the content out at once, so the player host has its new size.
+fn sub_resize(w: f64, h: f64) {
+    set_content_size(w, h);
+    unsafe {
+        let ui = UI.get().unwrap();
+        let content: *mut Object = msg_send![ui.win.get(), contentView];
+        let _: () = msg_send![content, layoutSubtreeIfNeeded];
+        crate::ui::subtitles::settle();
+    }
+}
+
+fn s_sub_on_screen() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let _: () = msg_send![ui.player.get(), pause];
+        crate::ui::player::show_bars_instant();
+        let card = ui.skip.card.get();
+        for (w, h, tag) in [(960.0, 600.0, "min"), (1700.0, 1000.0, "large")] {
+            sub_resize(w, h);
+            let (text, f) = crate::ui::subtitles::state();
+            state_check(&format!("subtitles: cue on screen at {}", tag), text == SUB_CUE && crate::ui::subtitles::visible());
+            log(&format!("  subtitles {}: y={:.0} h={:.0} w={:.0}", tag, f.origin.y, f.size.h, f.size.w));
+            let problems = crate::ui::subtitles::chrome_problems();
+            state_check(&format!("subtitles: clear of the controls at {} ({})", tag, problems.join("; ")), problems.is_empty());
+            let bar_top = crate::ui::theme::PLAYER_CTRL_H;
+            state_check(&format!("subtitles: sits above the bar at {}", tag), f.origin.y >= bar_top + 15.5);
+            audit(&format!("subtitles @{}", tag));
+        }
+        // The Up Next card up at the minimum size, with a long two-line cue under it.
+        sub_resize(960.0, 600.0);
+        let _: () = msg_send![card, setHidden: NO];
+        let _: () = msg_send![card, setAlphaValue: 1.0f64];
+        crate::ui::subtitles::show_text(SUB_LONG);
+        let problems = crate::ui::subtitles::chrome_problems();
+        state_check(&format!("subtitles: long cue clear of the Up Next card ({})", problems.join("; ")), problems.is_empty());
+        audit("subtitles long cue @min");
+        let _: () = msg_send![card, setHidden: YES];
+        crate::ui::subtitles::show_text(SUB_CUE);
+        sub_resize(1280.0, 800.0);
+    }
+}
+
+fn s_sub_hide() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let _: () = msg_send![ui.player.get(), setRate: 1.0f32];
+        if let Some(p) = ui.playing.as_mut() {
+            p.paused = false;
+        }
+        crate::ui::player::set_idle_age(2.6);
+        crate::ui::player::hide_bars_if_idle();
+        state_check("subtitles: controls hidden after idle", !ui.bar_shown);
+    }
+}
+
+/// Animated lift: after the controls hide, the overlay settles near the bottom of the video.
+fn s_sub_bottom() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let (text, f) = crate::ui::subtitles::state();
+        state_check("subtitles: cue still on screen while playing", text == SUB_CUE);
+        state_check(&format!("subtitles: dropped to the bottom (y={:.0})", f.origin.y), f.origin.y < 40.0 && f.origin.y >= 0.0);
+        let problems = crate::ui::subtitles::chrome_problems();
+        state_check(&format!("subtitles: clear with controls hidden ({})", problems.join("; ")), problems.is_empty());
+        state_check("subtitles: controls still hidden", !ui.bar_shown);
+    }
+    audit("subtitles controls hidden");
+}
+
+fn s_sub_seek() {
+    unsafe {
+        seek_to_secs(4.0);
+        let (text, _) = crate::ui::subtitles::state();
+        state_check("subtitles: seek clears the cue", text.is_empty() && !crate::ui::subtitles::visible());
+    }
+}
+
+fn s_sub_off() {
+    unsafe {
+        set_track(0, 0);
+        let ui = UI.get().unwrap();
+        state_check("subtitles: Off selects no track", ui.sel_sub == 0);
+    }
+}
+
+fn s_sub_off_check() {
+    unsafe {
+        let (text, _) = crate::ui::subtitles::state();
+        state_check("subtitles: overlay empty with the track off", text.is_empty() && !crate::ui::subtitles::visible());
+        crate::ui::player::show_bars_instant();
     }
 }
 const LONG_SERIES: &str = "The Extraordinarily Long Series Name That Keeps Going Season After Season Forever";
