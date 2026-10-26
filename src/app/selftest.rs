@@ -17,7 +17,7 @@ use crate::jellyfin::models::{ImageTags, ListItem, UserData};
 use crate::platform::appkit::*;
 use crate::platform::avkit::*;
 use crate::ui::cast::STRIP_H;
-use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
+use crate::seerr::models::{Availability, CastMember, DiscoverRow, ImageSize, RequestStatus, SearchPage, SeasonInfo, SeerrRequestItem, SeerrResult, TitleDetail, Trailer};
 use crate::transcode::decision::PlaybackMethod;
 use crate::jellyfin::segments::{NextUp, Segment, SegmentKind};
 use std::sync::Mutex;
@@ -56,6 +56,11 @@ fn is_connect_or_auth(c: &UiCmd) -> bool {
             | UiCmd::SeerrSearch { .. }
             | UiCmd::SeerrRequest { .. }
             | UiCmd::SeerrRequests
+            | UiCmd::SeerrDiscover { .. }
+            | UiCmd::SeerrGenre { .. }
+            | UiCmd::SeerrWatched
+            | UiCmd::SeerrTitle { .. }
+            | UiCmd::SeerrLibrary { .. }
     )
 }
 
@@ -212,11 +217,15 @@ fn steps() -> Vec<Step> {
         ("server down/up while idle", s_server_idle, 50),
         ("seerr: open while disabled (inline hint)", s_seerr_disabled, 100),
         ("seerr: open while enabled", s_seerr_enabled, 100),
-        ("seerr: login restores Requests", s_seerr_login_restore, 100),
+        ("seerr: login restores Discover", s_seerr_login_restore, 100),
+        ("seerr: discover rows and billboard", s_seerr_discover, 100),
+        ("seerr: movie title page", s_seerr_title_movie, 100),
+        ("seerr: request a movie (confirm)", s_seerr_request, 100),
+        ("seerr: requested + error + back", s_seerr_replies, 100),
+        ("seerr: TV title page and season picker", s_seerr_tv_seasons, 100),
+        ("seerr: library title plays (opens item)", s_seerr_library_play, 100),
         ("seerr: results (all availabilities)", s_seerr_results, 100),
         ("seerr: type in search field", s_seerr_typing, 50),
-        ("seerr: click Request", s_seerr_request, 100),
-        ("seerr: requested + error", s_seerr_replies, 100),
         ("seerr: My requests tab", s_seerr_requests_tab, 100),
         ("seerr: resize window", s_seerr_resize, 150),
         ("seerr: leave and return", s_seerr_reopen, 100),
@@ -3526,73 +3535,6 @@ fn sheet_open() -> bool {
         crate::platform::appkit::settings_open()
     }
 }
-/// Direct subviews of `row` that are an instance of `cls` and satisfy `pred`.
-unsafe fn seerr_subviews(row: *mut AnyObject, cls: &str, pred: &dyn Fn(*mut AnyObject) -> bool) -> usize {
-    let c = AnyClass::get(&std::ffi::CString::new(cls).expect("class name has no NUL")).map_or(std::ptr::null_mut(), |c| c as *const AnyClass as *mut AnyObject);
-    let subs: *mut AnyObject = msg_send![row, subviews];
-    let n: usize = msg_send![subs, count];
-    let mut k = 0;
-    for i in 0..n {
-        let v: *mut AnyObject = msg_send![subs, objectAtIndex: i];
-        let is: Bool = msg_send![v, isKindOfClass: c];
-        if is == Bool::YES && pred(v) {
-            k += 1;
-        }
-    }
-    k
-}
-/// A status pill: a 20 pt tall box with radius 10. Poster placeholders share the radius,
-/// so the height tells them apart.
-unsafe fn seerr_is_pill(b: *mut AnyObject) -> bool {
-    let rad: f64 = msg_send![b, cornerRadius];
-    let f: NSRect = msg_send![b, frame];
-    (rad - 10.).abs() < 0.01 && (f.size.h - 20.).abs() < 0.01
-}
-/// Number of rows in the Seerr list that carry a Request button.
-fn seerr_button_rows() -> usize {
-    unsafe {
-        let ui = UI.get().unwrap();
-        ui.seerr.cards.iter().filter(|r| seerr_subviews(**r, "NSButton", &|_| true) > 0).count()
-    }
-}
-/// Status pills (NSBox with corner radius 10) across all rows.
-fn seerr_pills() -> usize {
-    unsafe {
-        let ui = UI.get().unwrap();
-        ui.seerr
-            .cards
-            .iter()
-            .map(|r| {
-                seerr_subviews(*r, "NSBox", &|b| seerr_is_pill(b))
-            })
-            .sum()
-    }
-}
-/// Every card in the grid has the same height (rows line up).
-fn seerr_card_heights_ok() -> bool {
-    unsafe {
-        let ui = UI.get().unwrap();
-        // Cards in one grid row share a height and a top edge; every card has a height.
-        ui.seerr.cards.iter().all(|c| {
-            let f = frame_of(*c);
-            f.size.h > 0. && ui.seerr.cards.iter().filter(|o| (frame_of(**o).origin.y - f.origin.y).abs() < 0.5).all(|o| (frame_of(*o).size.h - f.size.h).abs() < 0.01)
-        })
-    }
-}
-/// Each result card has a Request button exactly when it is not requested, and a pill otherwise.
-fn seerr_kinds_match() -> bool {
-    unsafe {
-        let ui = UI.get().unwrap();
-        ui.seerr.cards.len() == ui.seerr.results.len()
-            && ui.seerr.cards.iter().zip(ui.seerr.results.iter()).all(|(card, r)| {
-                let want_button = r.availability == Availability::NotRequested;
-                let has_button = seerr_subviews(*card, "NSButton", &|_| true) > 0;
-                let has_pill = seerr_subviews(*card, "NSBox", &|b| seerr_is_pill(b)) > 0;
-                has_button == want_button && has_pill == !want_button
-            })
-    }
-}
-/// Whether the Requests row exists in the sidebar and is a sidebar row.
 fn seerr_sidebar_row_ok() -> bool {
     unsafe {
         let ui = UI.get().unwrap();
@@ -3614,13 +3556,182 @@ fn seerr_empty_shown() -> Option<(String, String)> {
         Some((read_field(ui.seerr.empty_title.get()), read_field(ui.seerr.empty_body.get())))
     }
 }
-const TEST_PNG: [u8; 75] = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 6, 8, 6, 0, 0, 0, 228, 57, 63, 117, 0, 0, 0, 18, 73, 68, 65, 84, 120, 156, 99, 56, 97, 99, 243, 31, 25, 51, 208, 66, 0, 0, 182, 120, 53, 233, 148, 150, 172, 5, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
 fn seerr_status_text() -> String {
     unsafe { read_field(UI.get().unwrap().seerr.status.get()) }
 }
 fn seerr_note(field: *mut AnyObject) -> *mut AnyObject {
     unsafe {
         msg_send![class!(NSNotification), notificationWithName: ns("NSControlTextDidChangeNotification"), object: field]
+    }
+}
+
+fn seerr_request_item(id: u64, title: &str, st: RequestStatus, av: Availability) -> SeerrRequestItem {
+    SeerrRequestItem {
+        request_id: id,
+        media_type: if id % 2 == 0 { "tv".into() } else { "movie".into() },
+        tmdb_id: id * 10,
+        title: title.into(),
+        year: if id % 3 == 0 { None } else { Some(2000 + id as u16) },
+        poster_path: None,
+        status: st,
+        availability: av,
+        requested_by: if id == 4 { String::new() } else { "alice".into() },
+        created_at: "2025-01-02T03:04:05.000Z".into(),
+        seasons: if id % 2 == 0 { vec![1, 2] } else { vec![] },
+    }
+}
+/// The Discover fixtures: five home rows, two genre rows and two "Because you watched" rows.
+fn seerr_rows_fixture() -> Vec<(DiscoverRow, Vec<SeerrResult>)> {
+    let row = |base: u64, media: &str, a: Availability| -> Vec<SeerrResult> {
+        (0..7).map(|i| seerr_result(media, base + i, &format!("Title {}", base + i), Some(2015 + i as u16), if i == 2 { a } else { Availability::NotRequested })).collect()
+    };
+    vec![
+        (DiscoverRow::Trending, (0..7).map(|i| {
+            let mut r = seerr_result(if i % 2 == 0 { "movie" } else { "tv" }, 11 + i, &format!("Trending {}", i + 1), Some(2024), Availability::NotRequested);
+            r.backdrop_path = Some(format!("/b{}.jpg", 11 + i));
+            r.overview = "A fictional trending title, used to check the billboard's text layout.".into();
+            r
+        }).collect()),
+        (DiscoverRow::Movies, row(21, "movie", Availability::Available)),
+        (DiscoverRow::Tv, row(31, "tv", Availability::Processing)),
+        (DiscoverRow::UpcomingMovies, row(41, "movie", Availability::Pending)),
+        (DiscoverRow::UpcomingTv, row(51, "tv", Availability::NotRequested)),
+    ]
+}
+/// Deterministic art for a key: a two-colour gradient PNG (the stand-in for a poster or backdrop).
+fn seerr_art_png(key: &str) -> Vec<u8> {
+    let h = key.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+    let (w, hgt) = if key.starts_with("w1280") || key.starts_with("w780") { (320u32, 180u32) } else { (120, 180) };
+    let a = [(h & 0xff) as u8, ((h >> 8) & 0xff) as u8, ((h >> 16) & 0x7f) as u8 + 60];
+    let b = [20u8, 24, 34];
+    let mut raw = Vec::with_capacity(((w * 3 + 1) * hgt) as usize);
+    for y in 0..hgt {
+        raw.push(0u8);
+        let t = y as f32 / (hgt - 1) as f32;
+        let px: Vec<u8> = (0..3).map(|c| (a[c] as f32 * (1. - t) + b[c] as f32 * t) as u8).collect();
+        for _ in 0..w {
+            raw.extend_from_slice(&px);
+        }
+    }
+    let mut z = vec![0x78, 0x01];
+    let chunks: Vec<&[u8]> = raw.chunks(65535).collect();
+    for (i, c) in chunks.iter().enumerate() {
+        z.push(if i + 1 == chunks.len() { 1 } else { 0 });
+        let len = c.len() as u16;
+        z.extend_from_slice(&len.to_le_bytes());
+        z.extend_from_slice(&(!len).to_le_bytes());
+        z.extend_from_slice(c);
+    }
+    let (mut x, mut y2) = (1u32, 0u32);
+    for &v in &raw {
+        x = (x + v as u32) % 65521;
+        y2 = (y2 + x) % 65521;
+    }
+    z.extend_from_slice(&((y2 << 16) | x).to_be_bytes());
+    let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+    let mut ihdr = w.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&hgt.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    png_chunk(&mut out, b"IHDR", &ihdr);
+    png_chunk(&mut out, b"IDAT", &z);
+    png_chunk(&mut out, b"IEND", &[]);
+    out
+}
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let mut c = kind.to_vec();
+    c.extend_from_slice(data);
+    out.extend_from_slice(&c);
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in &c {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    out.extend_from_slice(&(!crc).to_be_bytes());
+}
+/// Hand the worker's poster replies for every image key the screen asks for (no network).
+fn seerr_feed_art(keys: Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    for k in keys {
+        if seen.insert(k.clone()) {
+            handle_main(MainMsg::SeerrPoster { bytes: seerr_art_png(&k), path: k });
+        }
+    }
+}
+/// Keys of every poster and backdrop the Discover rows, billboard and open title page use.
+fn seerr_wanted_keys() -> Vec<String> {
+    use crate::seerr::models::image_key;
+    let ui = UI.get().unwrap();
+    let mut keys: Vec<String> = vec![];
+    for r in ui.seerr.rows.iter() {
+        keys.extend(r.items.iter().filter_map(|i| i.poster_path.as_deref()).map(|p| image_key(ImageSize::PosterMedium, p)));
+    }
+    if let Some(b) = ui.seerr.billboard.as_ref().and_then(|b| b.backdrop_path.as_deref()) {
+        keys.push(image_key(ImageSize::BackdropLarge, b));
+    }
+    if let Some(d) = ui.seerr.title.as_ref().and_then(|p| p.detail.as_ref()) {
+        keys.extend(d.backdrop_path.iter().map(|p| image_key(ImageSize::BackdropLarge, p)));
+        keys.extend(d.cast.iter().filter_map(|m| m.profile_path.as_deref()).map(|p| image_key(ImageSize::PosterSmall, p)));
+    }
+    keys.extend(ui.seerr.tagged.iter().filter_map(|i| i.poster_path.as_deref()).map(|p| image_key(ImageSize::PosterMedium, p)));
+    keys
+}
+fn seerr_movie_detail(id: u64, title: &str, a: Availability) -> TitleDetail {
+    let cast = (1..=6)
+        .map(|n| CastMember { name: format!("Actor {}", n), character: format!("Role {}", n), profile_path: Some(format!("/c{}.jpg", n)) })
+        .collect();
+    TitleDetail {
+        media_type: "movie".into(),
+        tmdb_id: id,
+        title: title.into(),
+        year: Some(2010),
+        release_date: Some("2010-07-16".into()),
+        overview: "A fictional overview long enough to wrap onto several lines, so the title page shows how body text sits under the facts and the buttons at both the minimum and the large window sizes.".into(),
+        tagline: "A tagline for the layout test.".into(),
+        poster_path: Some(format!("/p{}.jpg", id)),
+        backdrop_path: Some(format!("/b{}.jpg", id)),
+        vote_average: Some(7.8),
+        runtime: Some(148),
+        genres: vec!["Action".into(), "Sci-Fi".into(), "Thriller".into()],
+        cast,
+        trailers: vec![Trailer { name: "Trailer".into(), key: "dQw4w9WgXcQ".into(), site: "YouTube".into() }],
+        seasons: vec![],
+        availability: a,
+        request_status: None,
+    }
+}
+fn seerr_tv_detail(id: u64, title: &str, a: Availability) -> TitleDetail {
+    let s = |n: u32, av: Availability| SeasonInfo { number: n, name: format!("Season {}", n), episode_count: 10, availability: av };
+    TitleDetail {
+        media_type: "tv".into(),
+        seasons: vec![
+            s(0, Availability::NotRequested),
+            s(1, Availability::Available),
+            s(2, Availability::NotRequested),
+            s(3, Availability::NotRequested),
+        ],
+        runtime: Some(45),
+        ..seerr_movie_detail(id, title, a)
+    }
+}
+/// The row cards and billboard are on screen (Discover is the visible screen).
+fn seerr_discover_loaded() -> bool {
+    let ui = UI.get().unwrap();
+    ui.seerr.rows.iter().filter(|r| r.loaded).count() == ui.seerr.rows.len() && ui.seerr.billboard.is_some()
+}
+/// Every subview of the document sits inside its width (nothing hangs off the right edge).
+fn seerr_doc_inside(doc: *mut AnyObject) -> bool {
+    unsafe {
+        let w = frame_of(doc).size.w;
+        let subs: *mut AnyObject = msg_send![doc, subviews];
+        let n: usize = msg_send![subs, count];
+        (0..n).all(|i| {
+            let v: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+            let f = frame_of(v);
+            f.origin.x >= -0.5 && f.origin.x + f.size.w <= w + 0.5
+        })
     }
 }
 
@@ -3657,26 +3768,30 @@ fn s_seerr_enabled() {
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.seerr_enabled = true;
         ui.cfg.settings.seerr_url = "http://seerr.example:5055".into();
+        take_cmds();
         act(sel!(requestsSelected:), nil()); // the sidebar entry appears and is selected
         let ui = UI.get().unwrap();
-        state_check("sidebar Requests row shown when configured", seerr_sidebar_row_ok());
-        state_check("Requests row selected", row_selected(ui.seerr.row.get()));
+        state_check("sidebar Discover row shown when configured", seerr_sidebar_row_ok());
+        state_check("Discover row selected", row_selected(ui.seerr.row.get()));
         state_check("Home row not selected", !row_selected(ui.home.row.get()));
-        state_check("requests view on screen", seerr_on_screen());
-        state_check("header reads Requests", read_field(ui.header_title.get()) == "Requests");
+        state_check("Discover view on screen", seerr_on_screen());
+        state_check("header reads Discover", read_field(ui.header_title.get()) == "Discover");
         state_check("library grid hidden", !visible(ui.lib_scroll.get()));
         state_check("sort popup hidden", !visible(ui.sort_popup.get()));
-        check_offscreen("requests tab");
+        check_offscreen("discover tab");
         state_check("setup state hidden when configured", seerr_hidden(ui.seerr.hint.get()));
         state_check("search visible", !seerr_hidden(ui.seerr.search.get()));
-        state_check("no cards yet", ui.seerr.cards.is_empty());
+        state_check("no empty state while Discover loads", seerr_empty_shown().is_none());
+        let cmds = take_cmds();
         state_check(
-            "hint state: search prompt",
-            seerr_empty_shown().map(|(_, b)| b == "Search for a movie or show to request.") == Some(true),
+            "Discover asks for 5 home rows, 2 genre rows and watched rows",
+            cmds.iter().filter(|c| matches!(c, UiCmd::SeerrDiscover { .. })).count() == 5
+                && cmds.iter().filter(|c| matches!(c, UiCmd::SeerrGenre { .. })).count() == 2
+                && cmds.iter().any(|c| matches!(c, UiCmd::SeerrWatched)),
         );
         state_check("remembered as last place", ui.cfg.last_view.as_deref() == Some("requests"));
     }
-    audit("requests empty");
+    audit("discover loading");
 }
 fn s_seerr_login_restore() {
     unsafe {
@@ -3707,28 +3822,197 @@ fn s_seerr_login_restore() {
         state_check("back to Home from Requests", UI.get().unwrap().home.active && !seerr_on_screen());
     }
 }
+fn s_seerr_discover() {
+    unsafe {
+        take_cmds();
+        let ui = UI.get_mut().unwrap();
+        ui.cfg.settings.seerr_enabled = true;
+        // Open Discover here rather than inheriting it from the previous step, so the shots show it.
+        act(sel!(requestsSelected:), nil());
+        state_check("discover opened before the rows load", seerr_on_screen());
+    }
+    for (row, results) in seerr_rows_fixture() {
+        handle_main(MainMsg::SeerrDiscover {
+            row,
+            page: SearchPage { page: 1, total_pages: 1, total_results: results.len() as u32, results },
+        });
+    }
+    for (media, id, base) in [("movie", 28u32, 61u64), ("tv", 35, 71)] {
+        let results: Vec<SeerrResult> = (0..7).map(|i| seerr_result(media, base + i, &format!("Genre {}", base + i), None, Availability::NotRequested)).collect();
+        handle_main(MainMsg::SeerrGenre {
+            media_type: media.into(),
+            genre_id: id,
+            page: SearchPage { page: 1, total_pages: 1, total_results: 7, results },
+        });
+    }
+    handle_main(MainMsg::SeerrWatched(vec![
+        ("Because you watched Severance".into(), (0..7).map(|i| seerr_result("tv", 81 + i, &format!("Recommended {}", i + 1), Some(2021), Availability::NotRequested)).collect()),
+        ("Because you watched Dune".into(), (0..7).map(|i| seerr_result("movie", 91 + i, &format!("Similar {}", i + 1), Some(2000), Availability::Available)).collect()),
+    ]));
+    seerr_feed_art(seerr_wanted_keys());
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("discover rows: 5 home, 2 genre, 2 watched", ui.seerr.rows.len() == 9);
+        state_check("billboard from the trending row", ui.seerr.billboard.as_ref().map(|b| b.tmdb_id) == Some(11));
+        state_check("all rows loaded", seerr_discover_loaded());
+        state_check("no empty state with rows", seerr_empty_shown().is_none());
+        state_check("discover document inside width", seerr_doc_inside(ui.seerr.doc.get()));
+        state_check("title page closed", ui.seerr.title.is_none() && !visible(ui.seerr.title_scroll.get()));
+    }
+    audit_both("discover");
+}
+/// A movie title page: facts, the Request button, trailer and cast.
+fn s_seerr_title_movie() {
+    // Movie 13 is not in the rows; open it the way a poster tap does, with its own card in `tagged`.
+    unsafe {
+        take_cmds();
+        let ui = UI.get_mut().unwrap();
+        ui.seerr.tagged.push(seerr_result("movie", 13, "Fresh Movie", Some(2010), Availability::NotRequested));
+        let tag = (ui.seerr.tagged.len() - 1) as isize;
+        act(sel!(seerrOpenTitle:), tagged_button(tag));
+        state_check(
+            "poster tap asks for the title",
+            matches!(take_cmds().as_slice(), [UiCmd::SeerrTitle { media_type, tmdb_id: 13 }] if media_type == "movie"),
+        );
+        state_check("title page open", ui.seerr.title.is_some() && visible(ui.seerr.title_scroll.get()));
+        state_check("toolbar and grid covered", !visible(ui.seerr.scroll.get()) && !visible(ui.seerr.search.get()));
+    }
+    handle_main(MainMsg::SeerrTitle(Box::new(seerr_movie_detail(13, "Fresh Movie", Availability::NotRequested))));
+    seerr_feed_art(seerr_wanted_keys());
+    unsafe {
+        let ui = UI.get().unwrap();
+        state_check("title page filled", ui.seerr.title.as_ref().and_then(|p| p.detail.as_ref()).is_some());
+        state_check("title page document inside width", seerr_doc_inside(ui.seerr.title_doc.get()));
+    }
+    audit_both("title movie");
+}
+/// Request a movie from its title page: the first press confirms, the second sends.
+fn s_seerr_request() {
+    unsafe {
+        take_cmds();
+        let ui = UI.get_mut().unwrap();
+        act(sel!(seerrRequest:), nil());
+        state_check("first press asks to confirm", take_cmds().is_empty() && ui.seerr.title.as_ref().map(|p| p.confirming) == Some(true));
+        act(sel!(seerrRequest:), nil());
+        state_check(
+            "confirmed movie request emitted",
+            matches!(take_cmds().as_slice(), [UiCmd::SeerrRequest { media_type, tmdb_id: 13, title, seasons }]
+                if media_type == "movie" && title == "Fresh Movie" && seasons.is_empty()),
+        );
+        act(sel!(seerrRequest:), nil());
+        state_check("double click ignored", take_cmds().is_empty());
+        state_check("two in flight", ui.seerr.inflight.len() == 1);
+    }
+    audit("title movie requesting");
+}
+fn s_seerr_replies() {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        handle_main(MainMsg::SeerrRequested { title: "Fresh Movie".into() });
+        state_check("confirmation shown", seerr_status_text() == "Requested “Fresh Movie”.");
+        state_check(
+            "title page shows it requested",
+            ui.seerr.title.as_ref().and_then(|p| p.detail.as_ref()).map(|d| d.availability) == Some(Availability::Pending),
+        );
+        state_check("in flight cleared", ui.seerr.inflight.is_empty());
+        handle_main(MainMsg::SeerrRequested { title: "Never Sent".into() }); // unknown title: harmless
+    }
+    audit("title movie requested");
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        handle_main(MainMsg::SeerrBrowseError("Seerr request failed (HTTP 500)".into()));
+        state_check("error shown", seerr_status_text().contains("HTTP 500"));
+        state_check("title page leaves requesting", ui.seerr.title.as_ref().map(|p| p.requesting) == Some(false));
+        act(sel!(seerrTitleBack:), nil());
+        state_check("back to Discover", ui.seerr.title.is_none() && visible(ui.seerr.scroll.get()));
+    }
+}
+/// A TV title page: the season picker (available seasons are shown, not ticked), then a
+/// request for only the ticked seasons.
+fn s_seerr_tv_seasons() {
+    unsafe {
+        take_cmds();
+        let ui = UI.get_mut().unwrap();
+        ui.seerr.tagged.push(seerr_result("tv", 22, "Fresh Show", Some(2021), Availability::NotRequested));
+        let tag = (ui.seerr.tagged.len() - 1) as isize;
+        act(sel!(seerrOpenTitle:), tagged_button(tag));
+        take_cmds();
+    }
+    handle_main(MainMsg::SeerrTitle(Box::new(seerr_tv_detail(22, "Fresh Show", Availability::NotRequested))));
+    seerr_feed_art(seerr_wanted_keys());
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        let sel = ui.seerr.title.as_ref().map(|p| p.selected.clone()).unwrap_or_default();
+        state_check("unrequested regular seasons are ticked", sel == vec![2, 3]);
+        act(sel!(seerrSeason:), tagged_button(2));
+        state_check("unticking a season", ui.seerr.title.as_ref().map(|p| p.selected.clone()) == Some(vec![3]));
+        act(sel!(seerrSeason:), tagged_button(2));
+        state_check("ticking it again", ui.seerr.title.as_ref().map(|p| p.selected.clone()) == Some(vec![2, 3]));
+        act(sel!(seerrRequest:), nil());
+        act(sel!(seerrRequest:), nil());
+        state_check(
+            "only the chosen seasons are requested",
+            matches!(take_cmds().as_slice(), [UiCmd::SeerrRequest { media_type, tmdb_id: 22, seasons, .. }]
+                if media_type == "tv" && seasons == &vec![2, 3]),
+        );
+    }
+    // The reply resets the button from "Requesting…", as the server's answer would.
+    handle_main(MainMsg::SeerrRequested { title: "Fresh Show".into() });
+    audit_both("title tv");
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        act(sel!(seerrTitleBack:), nil());
+        state_check("back from the TV title", ui.seerr.title.is_none());
+    }
+}
+/// A title already in the library: Play looks it up and opens the Jellyfin item.
+fn s_seerr_library_play() {
+    unsafe {
+        take_cmds();
+        let ui = UI.get_mut().unwrap();
+        ui.seerr.tagged.push(seerr_result("tv", 66, "Library Show", Some(2005), Availability::Available));
+        let tag = (ui.seerr.tagged.len() - 1) as isize;
+        act(sel!(seerrOpenTitle:), tagged_button(tag));
+        take_cmds();
+    }
+    handle_main(MainMsg::SeerrTitle(Box::new(seerr_tv_detail(66, "Library Show", Availability::Available))));
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        act(sel!(seerrPlay:), nil());
+        state_check(
+            "Play looks the title up",
+            matches!(take_cmds().as_slice(), [UiCmd::SeerrLibrary { media_type, tmdb_id: 66 }] if media_type == "tv"),
+        );
+        let _ = ui;
+    }
+    handle_main(MainMsg::SeerrLibrary { tmdb_id: 66, item_id: Some("det-series".into()) });
+    unsafe {
+        state_check(
+            "found in the library: Jellyfin item opened",
+            matches!(take_cmds().as_slice(), [UiCmd::OpenDetail { item_id }] if item_id == "det-series"),
+        );
+        crate::ui::seerr::show_title_page(false);
+        act(sel!(requestsSelected:), nil());
+        state_check("Discover again after the library detour", seerr_on_screen());
+    }
+}
 fn s_seerr_results() {
     unsafe { act(sel!(requestsSelected:), nil()) };
-    state_check("requests on screen before results", seerr_on_screen());
+    state_check("discover on screen before results", seerr_on_screen());
+    unsafe { set_text(UI.get().unwrap().seerr.search.get(), "incep") };
     handle_main(MainMsg::SeerrResults(seerr_mixed()));
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("7 cards", ui.seerr.cards.len() == 7);
-        state_check("2 request buttons (NotRequested only)", seerr_button_rows() == 2);
-        state_check("requestable cards: Request button, no pill; others: pill", seerr_kinds_match());
-        state_check("cards share one height", seerr_card_heights_ok());
-        state_check("a pill per card without a Request button", seerr_pills() == 7 - seerr_button_rows());
-        state_check("empty state hidden with rows", seerr_empty_shown().is_none());
-        state_check("thumbnail waits for the poster", unsafe { crate::ui::seerr::thumb_has_image("/p11.jpg") } == Some(false));
+        state_check("results: a poster card per result", ui.seerr.tagged.len() == 7);
+        state_check("the rows wait behind the search", !ui.seerr.rows.is_empty() && seerr_empty_shown().is_none());
+        state_check("posters are for the results", crate::ui::seerr::thumb_has_image(&crate::seerr::models::image_key(ImageSize::PosterMedium, "/p11.jpg")).is_some());
     }
-    audit("requests results");
-    // The worker would fetch these through the Seerr server; fake its reply (no network).
-    handle_main(MainMsg::SeerrPoster { path: "/p11.jpg".into(), bytes: TEST_PNG.to_vec() });
-    handle_main(MainMsg::SeerrPoster { path: "/bad.jpg".into(), bytes: vec![1, 2, 3] });
+    audit("discover results");
+    seerr_feed_art(seerr_wanted_keys());
     unsafe {
-        state_check("thumbnail image set after poster reply", crate::ui::seerr::thumb_has_image("/p11.jpg") == Some(true));
-        state_check("other thumbnail still a placeholder", crate::ui::seerr::thumb_has_image("/p22.jpg") == Some(false));
+        state_check("thumbnail image set after poster reply", crate::ui::seerr::thumb_has_image(&crate::seerr::models::image_key(ImageSize::PosterMedium, "/p11.jpg")) == Some(true));
     }
+    handle_main(MainMsg::SeerrPoster { path: "bogus-key".into(), bytes: vec![1, 2, 3] });
 }
 fn s_seerr_typing() {
     unsafe {
@@ -3753,62 +4037,6 @@ fn s_seerr_typing() {
         handle_main(MainMsg::SeerrResults(seerr_mixed()));
     }
 }
-fn s_seerr_request() {
-    unsafe {
-        let ui = UI.get_mut().unwrap();
-        take_cmds();
-        act(sel!(seerrRequest:), tagged_button(0));
-        let cmds = take_cmds();
-        state_check(
-            "movie request emitted",
-            matches!(cmds.as_slice(), [UiCmd::SeerrRequest { media_type, tmdb_id: 11, title }]
-                if media_type == "movie" && title == "Fresh Movie"),
-        );
-        act(sel!(seerrRequest:), tagged_button(0));
-        state_check("double click ignored", take_cmds().is_empty());
-        act(sel!(seerrRequest:), tagged_button(1));
-        let cmds = take_cmds();
-        state_check(
-            "tv request emitted",
-            matches!(cmds.as_slice(), [UiCmd::SeerrRequest { media_type, tmdb_id: 22, .. }] if media_type == "tv"),
-        );
-        act(sel!(seerrRequest:), tagged_button(2)); // Pending: no request
-        act(sel!(seerrRequest:), tagged_button(5)); // Available: no request
-        act(sel!(seerrRequest:), tagged_button(99)); // out of range
-        act(sel!(seerrRequest:), tagged_button(-1));
-        state_check("non-requestable clicks ignored", take_cmds().is_empty());
-        state_check("two in flight", ui.seerr.inflight.len() == 2);
-    }
-}
-fn s_seerr_replies() {
-    unsafe {
-        let ui = UI.get_mut().unwrap();
-        handle_main(MainMsg::SeerrRequested { title: "Fresh Movie".into() });
-        state_check("confirmation shown", seerr_status_text() == "Requested “Fresh Movie”.");
-        state_check("row state refreshed", ui.seerr.results[0].availability == Availability::Pending);
-        state_check("one request button left", seerr_button_rows() == 1);
-        state_check("other still in flight", ui.seerr.inflight.len() == 1);
-        handle_main(MainMsg::SeerrError("“Fresh Show” has already been requested.".into()));
-        state_check("error shown", seerr_status_text().contains("already been requested"));
-        state_check("in flight cleared", ui.seerr.inflight.is_empty());
-        state_check("button re-enabled (still NotRequested)", seerr_button_rows() == 1);
-        handle_main(MainMsg::SeerrRequested { title: "Never Sent".into() }); // unknown title: harmless
-    }
-}
-fn seerr_request_item(id: u64, title: &str, st: RequestStatus, av: Availability) -> SeerrRequestItem {
-    SeerrRequestItem {
-        request_id: id,
-        media_type: if id % 2 == 0 { "tv".into() } else { "movie".into() },
-        tmdb_id: id * 10,
-        title: title.into(),
-        year: if id % 3 == 0 { None } else { Some(2000 + id as u16) },
-        poster_path: None,
-        status: st,
-        availability: av,
-        requested_by: if id == 4 { String::new() } else { "alice".into() },
-        created_at: "2025-01-02T03:04:05.000Z".into(),
-    }
-}
 fn s_seerr_requests_tab() {
     unsafe {
         let ui = UI.get_mut().unwrap();
@@ -3816,7 +4044,7 @@ fn s_seerr_requests_tab() {
         let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 1isize];
         act(sel!(seerrTab:), ui.seerr.tabs.get());
         state_check("SeerrRequests emitted", matches!(take_cmds().as_slice(), [UiCmd::SeerrRequests]));
-        state_check("loading: no rows, no empty state", ui.seerr.cards.is_empty() && seerr_empty_shown().is_none());
+        state_check("loading: no cards, no empty state", ui.seerr.tagged.is_empty() && seerr_empty_shown().is_none());
         handle_main(MainMsg::SeerrRequestList(vec![
             seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending),
             seerr_request_item(2, "Two", RequestStatus::Approved, Availability::Processing),
@@ -3825,14 +4053,14 @@ fn s_seerr_requests_tab() {
             seerr_request_item(5, "Five", RequestStatus::Completed, Availability::Available),
             seerr_request_item(6, "Six", RequestStatus::Unknown, Availability::Blocklisted),
         ]));
-        state_check("6 request rows", ui.seerr.cards.len() == 6);
-        state_check("no request buttons in My requests", seerr_button_rows() == 0);
-        state_check("a pill per request row", seerr_pills() == 6);
-        audit("seerr my requests");
+        state_check("6 request rows, grouped", ui.seerr.tagged.len() == 6);
+        state_check("requests document inside width", seerr_doc_inside(ui.seerr.doc.get()));
+        seerr_feed_art(seerr_wanted_keys());
+        audit_both("seerr my requests");
         handle_main(MainMsg::SeerrRequestList(vec![]));
         state_check(
             "empty requests state",
-            ui.seerr.cards.is_empty()
+            ui.seerr.tagged.is_empty()
                 && seerr_empty_shown() == Some(("No requests yet".into(), "You haven't requested anything yet.".into())),
         );
         handle_main(MainMsg::SeerrRequestList(vec![seerr_request_item(1, "One", RequestStatus::Pending, Availability::Pending)]));
@@ -3851,32 +4079,20 @@ fn s_seerr_requests_tab() {
         take_cmds();
         let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: 0isize];
         act(sel!(seerrTab:), ui.seerr.tabs.get());
-        state_check("back on search tab", !ui.seerr.requests_mode && ui.seerr.cards.len() == 7);
+        state_check("back on search tab", !ui.seerr.requests_mode && ui.seerr.tagged.len() == 7);
     }
 }
-/// The grid reflows with the window: column count follows the width, nothing overflows,
-/// and the layout audit is clean at the minimum, a mid size and a large size.
+/// The grid reflows with the window: nothing overflows, and the layout audit is clean at
+/// the minimum, a mid size and a large size.
 fn s_seerr_resize() {
     for (w, h) in [(960.0, 600.0), (1700.0, 1000.0), (1280.0, 800.0)] {
         set_content_size(w, h);
         handle_main(MainMsg::SeerrResults(seerr_mixed())); // rebuild at the new width
         unsafe {
             let ui = UI.get().unwrap();
-            let doc_w = frame_of(ui.seerr.doc.get()).size.w;
-            let (cols, _) = crate::ui::seerr::card_columns(doc_w);
-            let first_y = frame_of(ui.seerr.cards[0]).origin.y;
-            let on_first_row = ui.seerr.cards.iter().filter(|c| (frame_of(**c).origin.y - first_y).abs() < 0.5).count();
-            state_check(
-                &format!("columns follow width @{}x{}", w, h),
-                on_first_row == cols.min(ui.seerr.cards.len()),
-            );
-            let fits = ui.seerr.cards.iter().all(|c| {
-                let f = frame_of(*c);
-                f.origin.x >= 0. && f.origin.x + f.size.w <= doc_w + 0.5
-            });
-            state_check(&format!("cards inside the grid width @{}x{}", w, h), fits);
+            state_check(&format!("cards inside the grid width @{}x{}", w, h), seerr_doc_inside(ui.seerr.doc.get()));
         }
-        audit(&format!("requests @{}x{}", w, h));
+        audit(&format!("discover @{}x{}", w, h));
     }
     set_content_size(1280.0, 800.0);
 }
@@ -3884,18 +4100,18 @@ fn s_seerr_reopen() {
     unsafe { act(sel!(homeSelected:), nil()) };
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("leaving Requests hides it", !seerr_on_screen() && !ui.seerr.active);
+        state_check("leaving Discover hides it", !seerr_on_screen() && !ui.seerr.active);
         state_check("Home is the screen again", ui.home.active && visible(ui.home.scroll.get()));
         state_check("Home remembered as last place", ui.cfg.last_view.as_deref() == Some("home"));
     }
-    // messages while Requests is away are applied, not dropped
+    // messages while Discover is away are applied, not dropped
     handle_main(MainMsg::SeerrRequested { title: "Fresh Show".into() });
     unsafe { act(sel!(requestsSelected:), nil()) };
     unsafe {
         let ui = UI.get().unwrap();
-        state_check("Requests comes back", seerr_on_screen());
-        state_check("results survive leaving", ui.seerr.results.len() == 7 && ui.seerr.cards.len() == 7);
-        state_check("Requests remembered again", ui.cfg.last_view.as_deref() == Some("requests"));
+        state_check("Discover comes back", seerr_on_screen());
+        state_check("results survive leaving", ui.seerr.results.len() == 7 && ui.seerr.tagged.len() == 7);
+        state_check("Discover remembered again", ui.cfg.last_view.as_deref() == Some("requests"));
     }
 }
 fn s_seerr_empty() {
@@ -3905,14 +4121,15 @@ fn s_seerr_empty() {
         handle_main(MainMsg::SeerrResults(vec![]));
         state_check(
             "no results state",
-            ui.seerr.cards.is_empty()
+            ui.seerr.tagged.is_empty()
                 && seerr_empty_shown() == Some(("No results".into(), "No matches for “zzzz”.".into())),
         );
         set_text(ui.seerr.search.get(), "");
-        handle_main(MainMsg::SeerrResults(vec![]));
-        state_check("blank search state", ui.seerr.cards.is_empty() && seerr_empty_shown().map(|t| t.0) == Some("Find a title".into()));
+        act(sel!(controlTextDidChange:), seerr_note(ui.seerr.search.get()));
         take_cmds();
+        state_check("blank search returns to the rows", seerr_empty_shown().is_none() && !ui.seerr.rows.is_empty());
     }
+    audit_both("discover after search");
 }
 fn s_seerr_settings_open() {
     unsafe {

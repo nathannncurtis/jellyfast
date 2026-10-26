@@ -8,6 +8,7 @@ use crate::jellyfin::segments::{self, NextUp, Segment};
 use crate::jellyfin::urls::{build_art_url, build_image_url};
 use crate::config::{load_config, save_config, Config};
 use crate::seerr::client::{SeerrClient, SeerrError};
+use crate::seerr::models::{image_key, DiscoverRow, ImageSize, SeerrResult};
 
 pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedSender<MainMsg>, cfg: Config) {
     let mut client: Option<JellyfinClient> = None;
@@ -458,9 +459,9 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     }
                     Ok(c) => match { let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await; c.search(&latest, 1).await.map(|p| (c, p)) } {
                         Ok((c, page)) => {
-                            let paths = page.results.iter().filter_map(|r| r.poster_path.clone()).collect();
+                            let keys = seerr_image_keys(&page.results);
                             let _ = main_tx.send(MainMsg::SeerrResults(page.results));
-                            fetch_seerr_posters(&c, &main_tx, paths, &poster_dir);
+                            fetch_seerr_posters(&c, &main_tx, keys, &poster_dir);
                         }
                         Err(e) => {
                             let _ = main_tx.send(MainMsg::SeerrError(e.to_string()));
@@ -468,11 +469,11 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                     },
                 }
             }
-            UiCmd::SeerrRequest { media_type, tmdb_id, title } => match seerr_client(&cfg, &mut seerr) {
+            UiCmd::SeerrRequest { media_type, tmdb_id, title, seasons } => match seerr_client(&cfg, &mut seerr) {
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrError(m));
                 }
-                Ok(c) => match request_title(&seerr_secure(c, &mut seerr, &mut seerr_plain).await, &media_type, tmdb_id).await {
+                Ok(c) => match request_title(&seerr_secure(c, &mut seerr, &mut seerr_plain).await, &media_type, tmdb_id, &seasons).await {
                     Ok(_) => {
                         let _ = main_tx.send(MainMsg::SeerrRequested { title });
                     }
@@ -490,7 +491,8 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 }
                 Ok(c) => match { let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await; c.requests(20, 0).await.map(|v| (c, v)) } {
                     Ok((c, v)) => {
-                        let paths = v.iter().filter_map(|r| r.poster_path.clone()).collect();
+                        // Request rows are small posters (w185).
+                        let paths = v.iter().filter_map(|r| r.poster_path.as_deref()).map(|p| image_key(ImageSize::PosterSmall, p)).collect();
                         let _ = main_tx.send(MainMsg::SeerrRequestList(v));
                         fetch_seerr_posters(&c, &main_tx, paths, &poster_dir);
                     }
@@ -503,27 +505,114 @@ pub(crate) async fn worker(mut rx: UnboundedReceiver<UiCmd>, main_tx: UnboundedS
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrBrowseError(m));
                 }
-                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.discover(row, page).await {
-                    Ok(page) => {
-                        let _ = main_tx.send(MainMsg::SeerrDiscover { row, page });
+                Ok(c) => {
+                    let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await;
+                    match c.discover(row, page).await {
+                        Ok(page) => {
+                            // The billboard (first trending title) also needs its wide backdrop.
+                            let mut keys = seerr_image_keys(&page.results);
+                            if row == DiscoverRow::Trending {
+                                if let Some(b) = page.results.iter().find_map(|r| r.backdrop_path.clone()) {
+                                    keys.insert(0, image_key(ImageSize::BackdropLarge, &b));
+                                }
+                            }
+                            let _ = main_tx.send(MainMsg::SeerrDiscover { row, page });
+                            fetch_seerr_posters(&c, &main_tx, keys, &poster_dir);
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
+                        }
                     }
-                    Err(e) => {
-                        let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
-                    }
-                },
+                }
             },
+            UiCmd::SeerrGenre { media_type, genre_id } => match seerr_client(&cfg, &mut seerr) {
+                Err(m) => {
+                    let _ = main_tx.send(MainMsg::SeerrBrowseError(m));
+                }
+                Ok(c) => {
+                    let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await;
+                    match c.discover_genre(&media_type, genre_id, 1).await {
+                        Ok(page) => {
+                            let keys = seerr_image_keys(&page.results);
+                            let _ = main_tx.send(MainMsg::SeerrGenre { media_type, genre_id, page });
+                            fetch_seerr_posters(&c, &main_tx, keys, &poster_dir);
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
+                        }
+                    }
+                }
+            },
+            UiCmd::SeerrWatched => {
+                // Needs a signed-in Jellyfin session and a configured Seerr; without either the rows are simply left out.
+                let mut rows: Vec<(String, Vec<SeerrResult>)> = vec![];
+                if let (Some(jf), Ok(c)) = (&client, seerr_client(&cfg, &mut seerr)) {
+                    let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await;
+                    let q = crate::jellyfin::models::ItemQuery {
+                        types: Some("Movie,Series".into()),
+                        filters: vec!["IsPlayed".into()],
+                        sort_by: "DatePlayed".into(),
+                        sort_order: "Descending".into(),
+                        limit: 8,
+                        ..Default::default()
+                    };
+                    if let Ok(played) = jf.items(&q).await {
+                        let seeds: Vec<(String, String, u64)> = played
+                            .iter()
+                            .filter_map(|it| Some((it.name.clone(), it.item_type.clone(), it.tmdb_id()?.parse::<u64>().ok()?)))
+                            .take(2)
+                            .collect();
+                        for (name, item_type, id) in seeds {
+                            let mt = if item_type == "Series" { "tv" } else { "movie" };
+                            if let Ok(page) = c.recommendations(mt, id, 1).await {
+                                let results: Vec<SeerrResult> = page.results.into_iter().take(14).collect();
+                                if !results.is_empty() {
+                                    rows.push((format!("Because you watched {}", name), results));
+                                }
+                            }
+                        }
+                    }
+                    let keys = rows.iter().flat_map(|(_, r)| seerr_image_keys(r)).collect();
+                    fetch_seerr_posters(&c, &main_tx, keys, &poster_dir);
+                }
+                let _ = main_tx.send(MainMsg::SeerrWatched(rows));
+            }
+            UiCmd::SeerrLibrary { media_type, tmdb_id } => {
+                let item_type = if media_type == "tv" { "Series" } else { "Movie" };
+                match &client {
+                    None => {
+                        let _ = main_tx.send(MainMsg::SeerrLibrary { tmdb_id, item_id: None });
+                    }
+                    Some(jf) => match jf.find_by_tmdb(tmdb_id, item_type).await {
+                        Ok(found) => {
+                            let _ = main_tx.send(MainMsg::SeerrLibrary { tmdb_id, item_id: found.map(|i| i.id) });
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
+                        }
+                    },
+                }
+            }
             UiCmd::SeerrTitle { media_type, tmdb_id } => match seerr_client(&cfg, &mut seerr) {
                 Err(m) => {
                     let _ = main_tx.send(MainMsg::SeerrBrowseError(m));
                 }
-                Ok(c) => match seerr_secure(c, &mut seerr, &mut seerr_plain).await.title(&media_type, tmdb_id).await {
-                    Ok(d) => {
-                        let _ = main_tx.send(MainMsg::SeerrTitle(Box::new(d)));
+                Ok(c) => {
+                    let c = seerr_secure(c, &mut seerr, &mut seerr_plain).await;
+                    match c.title(&media_type, tmdb_id).await {
+                        Ok(d) => {
+                            // Backdrop, poster and the cast's headshots (small) come through the same proxy.
+                            let mut keys: Vec<String> = d.backdrop_path.iter().map(|p| image_key(ImageSize::BackdropLarge, p)).collect();
+                            keys.extend(d.poster_path.iter().map(|p| image_key(ImageSize::PosterMedium, p)));
+                            keys.extend(d.cast.iter().filter_map(|m| m.profile_path.as_deref()).map(|p| image_key(ImageSize::PosterSmall, p)));
+                            let _ = main_tx.send(MainMsg::SeerrTitle(Box::new(d)));
+                            fetch_seerr_posters(&c, &main_tx, keys, &poster_dir);
+                        }
+                        Err(e) => {
+                            let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
+                        }
                     }
-                    Err(e) => {
-                        let _ = main_tx.send(MainMsg::SeerrBrowseError(e.to_string()));
-                    }
-                },
+                }
             },
             UiCmd::SeerrRecommendations { media_type, tmdb_id } => match seerr_client(&cfg, &mut seerr) {
                 Err(m) => {
@@ -769,9 +858,12 @@ async fn seerr_secure(c: SeerrClient, cache: &mut Option<SeerrClient>, plain: &m
 
 /// Request a title. A series asks for every regular season (season 0 is specials), so
 /// its season numbers are looked up first.
-async fn request_title(c: &SeerrClient, media_type: &str, tmdb_id: u64) -> Result<crate::seerr::models::CreatedRequest, SeerrError> {
+async fn request_title(c: &SeerrClient, media_type: &str, tmdb_id: u64, chosen: &[u32]) -> Result<crate::seerr::models::CreatedRequest, SeerrError> {
     if media_type != "tv" {
         return c.request(media_type, tmdb_id, &[]).await;
+    }
+    if !chosen.is_empty() {
+        return c.request("tv", tmdb_id, chosen).await;
     }
     let seasons: Vec<u32> = c.title("tv", tmdb_id).await?.seasons.iter().map(|s| s.number).filter(|n| *n > 0).collect();
     c.request("tv", tmdb_id, &seasons).await
@@ -1271,18 +1363,19 @@ async fn playback_extras(c: &JellyfinClient, full: &FullItem) -> (Vec<Segment>, 
 pub(crate) fn fetch_seerr_posters(
     c: &SeerrClient,
     main_tx: &UnboundedSender<MainMsg>,
-    mut paths: Vec<String>,
+    mut keys: Vec<String>,
     poster_dir: &std::path::Path,
 ) {
     let mut seen = std::collections::HashSet::new();
-    paths.retain(|p| seen.insert(p.clone()));
-    for path in paths.into_iter().take(40) {
+    keys.retain(|p| seen.insert(p.clone()));
+    for key in keys.into_iter().take(160) {
+        let Some((size, path)) = crate::seerr::models::parse_image_key(&key) else { continue };
         let (c, tx, dir) = (c.clone(), main_tx.clone(), poster_dir.to_path_buf());
         tokio::spawn(async move {
-            let file = dir.join(format!("seerr-{:016x}.img", sys_key(&path)));
+            let file = dir.join(format!("seerr-{:016x}.img", sys_key(&key)));
             let bytes = match tokio::fs::read(&file).await {
                 Ok(b) if !b.is_empty() => Some(b),
-                _ => match c.poster(&path).await {
+                _ => match c.image(size, &path).await {
                     Ok(b) => {
                         let _ = tokio::fs::write(&file, &b).await;
                         Some(b)
@@ -1291,10 +1384,19 @@ pub(crate) fn fetch_seerr_posters(
                 },
             };
             if let Some(bytes) = bytes {
-                let _ = tx.send(MainMsg::SeerrPoster { path, bytes });
+                let _ = tx.send(MainMsg::SeerrPoster { path: key, bytes });
             }
         });
     }
+}
+
+/// Image keys (poster size) for the posters in `results`.
+fn seerr_image_keys(results: &[SeerrResult]) -> Vec<String> {
+    results
+        .iter()
+        .filter_map(|r| r.poster_path.as_deref())
+        .map(|p| image_key(ImageSize::PosterMedium, p))
+        .collect()
 }
 
 pub(crate) fn sys_key(item_id: &str) -> u64 {
@@ -3257,9 +3359,9 @@ mod tests {
                 o => panic!("{:?}", o),
             }
         }
-        assert_eq!(got["/inc.jpg"], b"IMG/inc.jpg");
-        assert_eq!(got["/got.jpg"], b"IMG/got.jpg");
-        let reqs = m.find("GET", "/imageproxy/tmdb/t/p/w92/inc.jpg");
+        assert_eq!(got["w342|/inc.jpg"], b"IMG/inc.jpg");
+        assert_eq!(got["w342|/got.jpg"], b"IMG/got.jpg");
+        let reqs = m.find("GET", "/imageproxy/tmdb/t/p/w342/inc.jpg");
         assert_eq!(reqs.len(), 1);
         assert!(!reqs[0].headers.contains_key("x-api-key"), "poster fetch must not leak the key");
         // Second search is served from the disk cache.
@@ -3272,7 +3374,7 @@ mod tests {
                 o => panic!("{:?}", o),
             }
         }
-        assert_eq!(m.find("GET", "/imageproxy/tmdb/t/p/w92/inc.jpg").len(), 1);
+        assert_eq!(m.find("GET", "/imageproxy/tmdb/t/p/w342/inc.jpg").len(), 1);
     }
 
     #[tokio::test]
@@ -3282,7 +3384,7 @@ mod tests {
         let mut h = H::start(seerr_cfg(&m));
         h.send(UiCmd::SeerrSearch { q: "a".into() });
         h.send(UiCmd::SeerrSearch { q: "ab".into() });
-        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 1, title: "One".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 1, title: "One".into(), seasons: vec![] });
         h.send(UiCmd::SeerrSearch { q: "abc".into() });
         assert!(matches!(h.next().await, MainMsg::SeerrResults(_)));
         assert!(matches!(h.next().await, MainMsg::SeerrRequested { .. }));
@@ -3316,9 +3418,9 @@ mod tests {
         let _env = TestEnv::new();
         let m = start_seerr(default_route).await;
         let mut h = H::start(seerr_cfg(&m));
-        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 27205, title: "Inception".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 27205, title: "Inception".into(), seasons: vec![] });
         assert!(matches!(h.next().await, MainMsg::SeerrRequested { title } if title == "Inception"));
-        h.send(UiCmd::SeerrRequest { media_type: "tv".into(), tmdb_id: 1399, title: "GoT".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "tv".into(), tmdb_id: 1399, title: "GoT".into(), seasons: vec![] });
         assert!(matches!(h.next().await, MainMsg::SeerrRequested { title } if title == "GoT"));
         let posts = m.find("POST", "/api/v1/request");
         // season 0 (specials) is left out; the season numbers come from the series detail
@@ -3331,12 +3433,12 @@ mod tests {
         let _env = TestEnv::new();
         let m = start_seerr(default_route).await;
         let mut h = H::start(seerr_cfg(&m));
-        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 999, title: "Dup".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 999, title: "Dup".into(), seasons: vec![] });
         let e = seerr_err(h.next().await);
         assert!(e.contains("Dup") && e.contains("already been requested"), "{}", e);
-        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 997, title: "Q".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 997, title: "Q".into(), seasons: vec![] });
         assert!(seerr_err(h.next().await).contains("quota"));
-        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 996, title: "B".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 996, title: "B".into(), seasons: vec![] });
         assert!(seerr_err(h.next().await).contains("boom"));
     }
 
@@ -3414,7 +3516,7 @@ mod tests {
         let mut h = H::start(c);
         h.send(UiCmd::SeerrSearch { q: "x".into() });
         assert!(seerr_err(h.next().await).contains("turned off"));
-        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 1, title: "T".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 1, title: "T".into(), seasons: vec![] });
         assert!(seerr_err(h.next().await).contains("turned off"));
         h.send(UiCmd::SeerrRequests);
         assert!(seerr_err(h.next().await).contains("turned off"));
@@ -3569,7 +3671,7 @@ mod tests {
         h.send(UiCmd::SeerrSearch { q: "x".into() });
         assert!(matches!(h.next().await, MainMsg::SeerrResults(_)));
         st.expire_sessions();
-        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 27205, title: "Inception".into() });
+        h.send(UiCmd::SeerrRequest { media_type: "movie".into(), tmdb_id: 27205, title: "Inception".into(), seasons: vec![] });
         assert!(matches!(h.next().await, MainMsg::SeerrRequested { .. }));
         // re-save with no password reuses the stored one
         h.send(UiCmd::SaveSeerr { enabled: true, url: m.url(), username: "nathan".into(), password: None, api_key: None });

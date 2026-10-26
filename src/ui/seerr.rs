@@ -1,22 +1,27 @@
-//! Requests tab: search movies/TV, request them, and list "My requests".
+//! Discover tab (Seerr): a streaming-style browse surface, search, and My Requests.
 //!
 //! A full-size view in the main window's content area, the same slot Home and the
-//! library grid use. The sidebar "Requests" row selects it (shown once Seerr is
-//! configured); `enter` / `leave` swap it in and out like Home does. Results are a
-//! poster grid of cards laid out for the current width. The view is built once at
-//! launch and only shown or hidden. All state lives in `Ui.seerr`.
+//! library grid use. The sidebar "Discover" row selects it (shown once Seerr is
+//! configured); `enter` / `leave` swap it in and out like Home does. With an empty
+//! search field it shows the billboard and rows (see `ui::discover`); typing shows a
+//! poster grid of results; "My Requests" lists requests by status. A title page
+//! covers the view when a poster is opened. The view is built once at launch and
+//! only shown or hidden. All state lives in `Ui.seerr`.
 #![allow(unsafe_code)]
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{class, msg_send, sel};
 use crate::app::messages::*;
 use crate::platform::appkit::*;
 use crate::seerr::models::{Availability, RequestStatus, SeerrRequestItem, SeerrResult};
+use crate::seerr::models::{image_key, ImageSize};
+use crate::ui::discover::{self, BrowseRow, TitlePage};
 use crate::ui::home::POSTER_W;
 use crate::ui::shell::{header_layout, hide_state, set_count, sidebar_rebuild, sidebar_refresh_selection};
 use crate::ui::theme::*;
 use std::collections::HashMap;
 
-/// `cfg.last_view` value meaning "Requests was the last selected place".
+/// `cfg.last_view` value meaning "Discover was the last selected place" (kept as "requests"
+/// so a saved choice from before the rename still opens this screen).
 pub const REQUESTS_ID: &str = "requests";
 
 pub struct SeerrUi {
@@ -30,12 +35,26 @@ pub struct SeerrUi {
     /// Full-area "not set up" state (instead of the search UI).
     pub hint: Ptr,
     pub hint_btn: Ptr,
+    /// Title page: its own scroll view in the host, shown instead of `scroll` while open.
+    pub title_scroll: Ptr,
+    pub title_doc: Ptr,
+    /// The open title page (None: Discover, search or My Requests is showing).
+    pub title: Option<TitlePage>,
+    /// Discover's rows (see `discover::default_rows`) and the billboard's title.
+    pub rows: Vec<BrowseRow>,
+    pub billboard: Option<SeerrResult>,
+    /// Discover rows were asked for at least once (Discover asks again on ⌘R).
+    pub discover_asked: bool,
+    /// Items behind the poster taps: a tap button's tag is its index here.
+    pub tagged: Vec<SeerrResult>,
+    /// TMDB id of a title whose Jellyfin item is being looked up for Play.
+    pub play_lookup: Option<u64>,
     /// Centred empty-state over the grid (hidden while cards exist).
     pub empty: Ptr,
     pub empty_icon: Ptr,
     pub empty_title: Ptr,
     pub empty_body: Ptr,
-    /// Posters in the current cards: (poster_path, art view, placeholder glyph).
+    /// Images in the current views: (image key, art view, placeholder glyph).
     pub thumbs: Vec<(String, *mut AnyObject, *mut AnyObject)>,
     /// Decoded poster images by poster_path (owned, +1).
     pub images: HashMap<String, *mut AnyObject>,
@@ -46,8 +65,6 @@ pub struct SeerrUi {
     pub requests_loaded: bool,
     /// (media_type, tmdb_id, title) of requests sent and not yet answered.
     pub inflight: Vec<(String, u64, String)>,
-    /// Card views currently inside `doc` (the superview owns them).
-    pub cards: Vec<*mut AnyObject>,
     /// Width the cards were last laid out for (0 = never).
     pub laid_w: f64,
     /// Requests is the visible screen.
@@ -89,13 +106,20 @@ impl SeerrUi {
             empty_body: n,
             thumbs: vec![],
             images: HashMap::new(),
+            title_scroll: n,
+            title_doc: n,
+            title: None,
+            rows: discover::default_rows(),
+            billboard: None,
+            discover_asked: false,
+            tagged: vec![],
+            play_lookup: None,
             requests_mode: false,
             results: vec![],
             results_loaded: false,
             requests: vec![],
             requests_loaded: false,
             inflight: vec![],
-            cards: vec![],
             laid_w: 0.,
             active: false,
             row: n,
@@ -280,7 +304,7 @@ unsafe fn class_view(name: &[u8], frame: NSRect) -> *mut AnyObject {
     let v: *mut AnyObject = msg_send![cls, alloc];
     msg_send![v, initWithFrame: frame] // +1; caller autorels after add
 }
-unsafe fn flip_view(frame: NSRect) -> *mut AnyObject {
+pub(crate) unsafe fn flip_view(frame: NSRect) -> *mut AnyObject {
     class_view(b"JRFlipView\0", frame)
 }
 
@@ -345,10 +369,7 @@ const CARD_GAP_X: f64 = GRID_COL_GAP;
 const CARD_GAP_Y: f64 = GRID_ROW_GAP;
 /// Gap between a card's poster, title, subtitle and control line.
 const TEXT_GAP: f64 = 2.;
-const CONTROL_H: f64 = 22.;
-const PILL_H: f64 = 20.;
-const BTN_W: f64 = 110.;
-const SPIN: f64 = 16.;
+pub(crate) const PILL_H: f64 = 20.;
 const SEG_W: f64 = 240.;
 const SEG_H: f64 = 32.;
 const FIELD_H: f64 = 28.;
@@ -373,7 +394,7 @@ pub(crate) unsafe fn build_host(content_host: *mut AnyObject, frame: NSRect) {
     add_sub(host, canvas);
 
     let labels: *mut AnyObject = msg_send![class!(NSMutableArray), array];
-    for t in ["Search", "My Requests"] {
+    for t in ["Discover", "My Requests"] {
         let _: () = msg_send![labels, addObject: ns(t)];
     }
     let tabs: *mut AnyObject = msg_send![class!(NSSegmentedControl),
@@ -429,6 +450,21 @@ pub(crate) unsafe fn build_host(content_host: *mut AnyObject, frame: NSRect) {
     ui.seerr.status = Ptr(st);
     ui.seerr.scroll = Ptr(sc);
     ui.seerr.doc = Ptr(doc);
+    // The title page: a flipped document in its own scroll view (hidden until a poster is opened).
+    let tsc: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+    let tsc: *mut AnyObject = autorel(msg_send![tsc, initWithFrame: rect(0., 0., b.size.w, b.size.h)]);
+    let _: () = msg_send![tsc, setHasVerticalScroller: Bool::YES];
+    let _: () = msg_send![tsc, setDrawsBackground: Bool::NO];
+    let _: () = msg_send![tsc, setBorderType: 0usize];
+    set_autoresize(tsc, RESIZE_W | RESIZE_H);
+    set_hidden(tsc, true);
+    let tdoc = flip_view(rect(0., 0., b.size.w, 10.));
+    set_autoresize(tdoc, RESIZE_W);
+    let _: () = msg_send![tsc, setDocumentView: tdoc];
+    add_sub(host, tsc);
+    autorel(tdoc);
+    ui.seerr.title_scroll = Ptr(tsc);
+    ui.seerr.title_doc = Ptr(tdoc);
     ui.seerr.hint = Ptr(hint.host);
     ui.seerr.hint_btn = Ptr(hint.btn);
     ui.seerr.empty = Ptr(empty.host);
@@ -458,7 +494,11 @@ unsafe fn layout_host() {
     set_frame(s.status.get(), rect(EDGE, st_y, w - 2. * EDGE, STATUS_H));
     let grid_h = (st_y - SP2).max(0.);
     set_frame(s.scroll.get(), rect(0., 0., w, grid_h));
+    set_frame(s.title_scroll.get(), rect(0., 0., w, grid_h));
     set_frame(s.empty.get(), rect(0., 0., w, grid_h));
+    if s.title.is_some() {
+        rebuild_title();
+    }
 }
 
 /// Show or hide the setup state and the search UI to match the Seerr settings,
@@ -496,6 +536,10 @@ pub(crate) unsafe fn enter() {
     if ui.seerr.active {
         // Already showing: still pick up the current Seerr settings (sidebar row, setup state).
         apply_config_state();
+        let ui = UI.get_mut().unwrap();
+        if is_configured(&ui.cfg.settings) && !ui.seerr.discover_asked {
+            discover::request_all();
+        }
         return;
     }
     ui.home.active = false;
@@ -511,13 +555,22 @@ pub(crate) unsafe fn enter() {
     let ui = UI.get_mut().unwrap();
     ui.cfg.last_view = Some(REQUESTS_ID.to_string());
     crate::config::save_config(&ui.cfg);
-    ui.cur_title = "Requests".to_string();
-    set_text(ui.header_title.get(), "Requests");
+    ui.cur_title = "Discover".to_string();
+    set_text(ui.header_title.get(), "Discover");
     set_count("", false);
     header_layout();
     apply_config_state();
     set_hidden(UI.get().unwrap().seerr.host.get(), false);
     sidebar_refresh_selection();
+    let ui = UI.get_mut().unwrap();
+    if ui.seerr.title.is_none() {
+        // Entering on a browse view: a title page left open earlier must not show through.
+        set_hidden(ui.seerr.title_scroll.get(), true);
+        set_hidden(ui.seerr.scroll.get(), false);
+    }
+    if is_configured(&ui.cfg.settings) && !ui.seerr.discover_asked {
+        discover::request_all();
+    }
 }
 
 /// Leave Requests for a library screen or Home. A no-op unless Requests is showing.
@@ -560,7 +613,7 @@ unsafe fn pill_colors(role: &str) -> (Col, *mut AnyObject) {
 }
 
 /// Rounded status pill with its caption; returns (box, width), never wider than `max_w`.
-unsafe fn make_pill(text: &str, role: &str, max_w: f64) -> (*mut AnyObject, f64) {
+pub(crate) unsafe fn make_pill(text: &str, role: &str, max_w: f64) -> (*mut AnyObject, f64) {
     let (tc, fill) = pill_colors(role);
     let l = label(text, T_CAPTION_EM, tc, ALIGN_CENTER);
     let cell: *mut AnyObject = msg_send![l, cell];
@@ -574,54 +627,91 @@ unsafe fn make_pill(text: &str, role: &str, max_w: f64) -> (*mut AnyObject, f64)
     (b, w)
 }
 
-unsafe fn make_spinner(frame: NSRect) -> *mut AnyObject {
-    let sp: *mut AnyObject = msg_send![class!(NSProgressIndicator), alloc];
-    let sp: *mut AnyObject = autorel(msg_send![sp, initWithFrame: frame]);
-    let _: () = msg_send![sp, setStyle: 1usize]; // spinning
-    let _: () = msg_send![sp, setControlSize: 1usize];
-    let _: () = msg_send![sp, setIndeterminate: Bool::YES];
-    let _: () = msg_send![sp, startAnimation: nil()];
-    sp
-}
-
 /// Height a wrapping label needs for `text` at `width`, so nothing is clipped.
-unsafe fn text_h(text: &str, t: TypeStyle, width: f64) -> f64 {
+pub(crate) unsafe fn text_h(text: &str, t: TypeStyle, width: f64) -> f64 {
     let v = wrapping_label(text, t, C_TEXT, ALIGN_LEFT);
     let cell: *mut AnyObject = msg_send![v, cell];
     let s: NSSize = msg_send![cell, cellSizeForBounds: rect(0., 0., width, 10_000.)];
     s.h.ceil().max(1.)
 }
 
-/// Placeholder (fill + glyph) with the poster layer on top; registers the poster for later images.
-unsafe fn make_poster(card: *mut AnyObject, spec: &RowSpec, f: NSRect) {
+/// An image view (fills `f`) with a placeholder fill and glyph under it. The image is
+/// registered under `key` so `on_poster` can fill it when the bytes arrive.
+pub(crate) unsafe fn art_view(parent: *mut AnyObject, f: NSRect, key: Option<String>, glyph_name: &str, radius: f64) -> *mut AnyObject {
     let ui = UI.get_mut().unwrap();
-    let ph = surface(f, C_FILL_SEL, R_POSTER);
-    add_sub(card, ph);
+    let ph = surface(f, C_FILL_SEL, radius);
+    add_sub(parent, ph);
     let g = 20.;
     let gf = rect(f.origin.x + (f.size.w - g) / 2., f.origin.y + (f.size.h - g) / 2., g, g);
     let glyph: *mut AnyObject = msg_send![class!(NSImageView), alloc];
     let glyph: *mut AnyObject = autorel(msg_send![glyph, initWithFrame: gf]);
-    let img = symbol(spec.glyph, 16., Weight::Regular);
+    let img = symbol(glyph_name, 16., Weight::Regular);
     if !img.is_null() {
         let _: () = msg_send![glyph, setImage: img];
     }
     let _: () = msg_send![glyph, setContentTintColor: color(C_TEXT3)];
-    add_sub(card, glyph);
+    add_sub(parent, glyph);
     let art: *mut AnyObject = msg_send![class!(NSView), alloc];
     let art: *mut AnyObject = autorel(msg_send![art, initWithFrame: f]);
     let layer = layer_of(art);
-    set_corner(layer, R_POSTER);
+    set_corner(layer, radius);
     let _: () = msg_send![layer, setMasksToBounds: Bool::YES];
     let _: () = msg_send![layer, setContentsGravity: ns("resizeAspectFill")];
-    add_sub(card, art);
-    if let Some(p) = &spec.poster {
-        ui.seerr.thumbs.push((p.clone(), art, glyph));
-        if let Some(img) = ui.seerr.images.get(p) {
+    add_sub(parent, art);
+    if let Some(k) = key {
+        if let Some(img) = ui.seerr.images.get(&k) {
             apply_thumb(art, glyph, *img, false);
         }
+        ui.seerr.thumbs.push((k, art, glyph));
     }
+    art
 }
-unsafe fn apply_thumb(art: *mut AnyObject, glyph: *mut AnyObject, img: *mut AnyObject, animate: bool) {
+
+unsafe fn result_glyph(media_type: &str) -> &'static str {
+    media_glyph(media_type)
+}
+
+/// A poster card at `f`: 2:3 art (w342), the availability pill on its lower left, and a
+/// tap target that opens the title page. Autoreleased; the caller adds it to a view.
+pub(crate) unsafe fn poster_tile(item: &SeerrResult, f: NSRect) -> *mut AnyObject {
+    let ui = UI.get_mut().unwrap();
+    let card = flip_view(f);
+    autorel(card);
+    let (w, h) = (f.size.w, f.size.h);
+    let key = item.poster_path.as_deref().map(|p| image_key(ImageSize::PosterMedium, p));
+    let _ = art_view(card, rect(0., 0., w, h), key, result_glyph(&item.media_type), R_POSTER);
+    if let Some((text, role)) = discover::badge_for(item) {
+        let (pill, pw) = make_pill(text, role, w - 2. * SP2);
+        set_frame(pill, rect(SP2, h - SP2 - PILL_H, pw, PILL_H));
+        add_sub(card, pill);
+    }
+    ui.seerr.tagged.push(item.clone());
+    let tap: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns(""), target: ui.ctl.get(), action: sel!(seerrOpenTitle:)];
+    let _: () = msg_send![tap, setBordered: Bool::NO];
+    let _: () = msg_send![tap, setTag: (ui.seerr.tagged.len() - 1) as NSInteger];
+    set_frame(tap, rect(0., 0., w, h));
+    add_sub(card, tap);
+    card
+}
+
+/// A poster-sized image (My Requests rows): placeholder and art in one view.
+pub(crate) unsafe fn thumb_view(path: &str, size: ImageSize, f: NSRect) -> *mut AnyObject {
+    let host = flip_view(f);
+    autorel(host);
+    let _ = art_view(host, rect(0., 0., f.size.w, f.size.h), Some(image_key(size, path)), "film", R_THUMB);
+    host
+}
+
+/// A round headshot (cast): placeholder and photo in one view, cropped to a circle.
+pub(crate) unsafe fn thumb_view_round(path: &str, f: NSRect) -> *mut AnyObject {
+    let host = flip_view(f);
+    autorel(host);
+    let r = f.size.w / 2.;
+    let _ = art_view(host, rect(0., 0., f.size.w, f.size.h), Some(image_key(ImageSize::PosterSmall, path)), "person", r);
+    host
+}
+
+pub(crate) unsafe fn apply_thumb(art: *mut AnyObject, glyph: *mut AnyObject, img: *mut AnyObject, animate: bool) {
     let cg = cg_image(img);
     if cg.is_null() {
         return;
@@ -637,82 +727,83 @@ unsafe fn apply_thumb(art: *mut AnyObject, glyph: *mut AnyObject, img: *mut AnyO
     set_hidden(glyph, true);
 }
 
-/// One grid card: poster, title, subtitle, then either the Request button or a status pill.
-/// `frame` is in the document's flipped coordinates; `text` is (title h, subtitle h) and
-/// `block` the tallest title+subtitle stack in the grid, so the controls share one line.
-unsafe fn make_card(frame: NSRect, spec: &RowSpec, poster_h: f64, text: (f64, f64), block: f64, requesting: bool, index: usize) -> *mut AnyObject {
-    let ui = UI.get_mut().unwrap();
-    let card = flip_view(frame);
-    let tile_w = frame.size.w;
-    make_poster(card, spec, rect(0., 0., tile_w, poster_h));
-
-    let ty = poster_h + SP2;
-    let title = wrapping_label(&spec.title, T_HEADLINE, C_TEXT, ALIGN_LEFT);
-    set_frame(title, rect(0., ty, tile_w, text.0));
-    add_sub(card, title);
-    let sub = wrapping_label(&spec.sub, T_CALLOUT, C_TEXT2, ALIGN_LEFT);
-    set_frame(sub, rect(0., ty + text.0 + TEXT_GAP, tile_w, text.1));
-    add_sub(card, sub);
-
-    let cy = ty + block + SP2;
-    if spec.can_request {
-        let btn: *mut AnyObject = msg_send![class!(NSButton),
-            buttonWithTitle: ns(if requesting { "Requesting…" } else { "Request" }), target: ui.ctl.get(), action: sel!(seerrRequest:)];
-        let _: () = msg_send![btn, setBezelStyle: 1isize];
-        let _: () = msg_send![btn, setControlSize: 1isize];
-        let plus = symbol("plus", 11., Weight::Medium);
-        if !plus.is_null() {
-            let _: () = msg_send![btn, setImage: plus];
-            let _: () = msg_send![btn, setImagePosition: 7isize]; // leading
-        }
-        let _: () = msg_send![btn, setEnabled: Bool::new(!requesting)];
-        set_frame(btn, rect(0., cy, BTN_W, CONTROL_H));
-        add_sub(card, btn);
-        if requesting {
-            let sp = make_spinner(rect(BTN_W + SP2, cy + (CONTROL_H - SPIN) / 2., SPIN, SPIN));
-            add_sub(card, sp);
-        }
-        // The tag is the card's index in `results`, which `seerr_request` looks up.
-        let _: () = msg_send![btn, setTag: index as NSInteger];
-    } else {
-        let (pill, pw) = make_pill(&spec.badge, spec.badge_color, tile_w);
-        set_frame(pill, rect(0., cy + (CONTROL_H - PILL_H) / 2., pw, PILL_H));
-        add_sub(card, pill);
-    }
-    card
+/// A search result's caption: type and year.
+fn result_sub(r: &SeerrResult) -> String {
+    result_spec(r).sub
 }
 
-/// Rebuild the grid from the current mode's data, laid out for the grid's width.
+/// Grid of search results: poster cards with the title and type under each.
+unsafe fn build_results(doc: *mut AnyObject, width: f64, results: &[SeerrResult]) -> f64 {
+    let (cols, tile_w) = card_columns(width);
+    let poster_h = (tile_w * POSTER_ASPECT).round();
+    let texts: Vec<(f64, f64)> = results
+        .iter()
+        .map(|r| (text_h(&r.title, T_HEADLINE, tile_w), text_h(&result_sub(r), T_CALLOUT, tile_w)))
+        .collect();
+    let rows = (results.len() + cols - 1) / cols;
+    let row_block: Vec<f64> = (0..rows)
+        .map(|r| {
+            texts[r * cols..((r + 1) * cols).min(texts.len())]
+                .iter()
+                .map(|(t, s)| t + TEXT_GAP + s)
+                .fold(0., f64::max)
+        })
+        .collect();
+    let mut y = SP2;
+    for (r, block) in row_block.iter().enumerate() {
+        for c in 0..cols {
+            let i = r * cols + c;
+            if i >= results.len() {
+                break;
+            }
+            let x = EDGE + c as f64 * (tile_w + CARD_GAP_X);
+            add_sub(doc, poster_tile(&results[i], rect(x, y, tile_w, poster_h)));
+            let (th, sh) = texts[i];
+            let title = wrapping_label(&results[i].title, T_HEADLINE, C_TEXT, ALIGN_LEFT);
+            set_frame(title, rect(x, y + poster_h + SP2, tile_w, th));
+            add_sub(doc, title);
+            let sub = wrapping_label(&result_sub(&results[i]), T_CALLOUT, C_TEXT2, ALIGN_LEFT);
+            set_frame(sub, rect(x, y + poster_h + SP2 + th + TEXT_GAP, tile_w, sh));
+            add_sub(doc, sub);
+        }
+        y += poster_h + SP2 + block + CARD_GAP_Y;
+    }
+    y + SP2
+}
+
+/// Rebuild the document for the current mode: Discover (billboard and rows), search
+/// results, or My Requests. Does nothing to the title page's content; that is `rebuild_title`.
 pub(crate) unsafe fn rebuild() {
     let ui = UI.get_mut().unwrap();
     if ui.seerr.host.get().is_null() {
         return;
     }
-    ui.seerr.thumbs.clear();
-    for c in ui.seerr.cards.drain(..) {
-        let _: () = msg_send![c, removeFromSuperview];
+    if ui.seerr.title.is_some() {
+        rebuild_title();
+        return;
     }
+    ui.seerr.thumbs.clear();
+    ui.seerr.tagged.clear();
     let doc = ui.seerr.doc.get();
+    let none: *mut AnyObject = msg_send![class!(NSArray), array];
+    let _: () = msg_send![doc, setSubviews: none];
     let clip: *mut AnyObject = msg_send![ui.seerr.scroll.get(), contentView];
     let clip_h = bounds_of(clip).size.h;
     let width = bounds_of(clip).size.w.max(200.0);
     ui.seerr.laid_w = width;
 
-    let mut specs: Vec<(RowSpec, bool)> = vec![];
-    if ui.seerr.requests_mode {
-        specs = ui.seerr.requests.iter().map(|r| (request_spec(r), false)).collect();
+    let query = read_field(ui.seerr.search.get());
+    let searching = !ui.seerr.requests_mode && !query.trim().is_empty();
+    let (h, empty) = if ui.seerr.requests_mode {
+        let h = discover::build_requests(doc, width, &ui.seerr.requests);
+        let e = if ui.seerr.requests.is_empty() { empty_state(true, ui.seerr.requests_loaded, "") } else { None };
+        (h, e)
+    } else if searching {
+        let h = build_results(doc, width, &ui.seerr.results);
+        let e = if ui.seerr.results.is_empty() { empty_state(false, ui.seerr.results_loaded, &query) } else { None };
+        (h, e)
     } else {
-        for r in &ui.seerr.results {
-            let busy = ui.seerr.inflight.iter().any(|(m, id, _)| *m == r.media_type && *id == r.tmdb_id);
-            specs.push((result_spec(r), busy));
-        }
-    }
-    let empty = if specs.is_empty() {
-        let q = read_field(ui.seerr.search.get());
-        let loaded = if ui.seerr.requests_mode { ui.seerr.requests_loaded } else { ui.seerr.results_loaded };
-        empty_state(ui.seerr.requests_mode, loaded, &q)
-    } else {
-        None
+        (discover::build_discover(doc, width), None)
     };
     let (empty_host, empty_icon, empty_title, empty_body) =
         (ui.seerr.empty.get(), ui.seerr.empty_icon.get(), ui.seerr.empty_title.get(), ui.seerr.empty_body.get());
@@ -724,49 +815,43 @@ pub(crate) unsafe fn rebuild() {
         }
         None => set_hidden(empty_host, true),
     }
+    let _: () = msg_send![doc, setFrameSize: size(width, h.max(clip_h))];
+}
 
-    let (cols, tile_w) = card_columns(width);
-    let poster_h = (tile_w * POSTER_ASPECT).round();
-    let texts: Vec<(f64, f64)> = specs
-        .iter()
-        .map(|(sp, _)| (text_h(&sp.title, T_HEADLINE, tile_w), text_h(&sp.sub, T_CALLOUT, tile_w)))
-        .collect();
-    // Each row is as tall as its tallest title/subtitle stack, so rows with short names stay tight.
-    let rows = (specs.len() + cols - 1) / cols;
-    let row_block: Vec<f64> = (0..rows)
-        .map(|r| {
-            texts[r * cols..((r + 1) * cols).min(texts.len())]
-                .iter()
-                .map(|(t, s)| t + TEXT_GAP + s)
-                .fold(0., f64::max)
-        })
-        .collect();
-    let row_h: Vec<f64> = row_block.iter().map(|b| poster_h + SP2 + b + SP2 + CONTROL_H).collect();
-
-    tx_begin_instant();
-    let mut cards = vec![];
-    let mut y = SP2;
-    for (r, rh) in row_h.iter().enumerate() {
-        for c in 0..cols {
-            let i = r * cols + c;
-            if i >= specs.len() {
-                break;
-            }
-            let (spec, busy) = &specs[i];
-            let x = EDGE + c as f64 * (tile_w + CARD_GAP_X);
-            let card = make_card(rect(x, y, tile_w, *rh), spec, poster_h, texts[i], row_block[r], *busy, i);
-            add_sub(doc, card);
-            autorel(card);
-            cards.push(card);
-        }
-        y += rh + CARD_GAP_Y;
-    }
-    let content_h = 2. * SP2 + row_h.iter().sum::<f64>() + rows.saturating_sub(1) as f64 * CARD_GAP_Y;
+/// Rebuild the open title page (no-op when none is open).
+pub(crate) unsafe fn rebuild_title() {
     let ui = UI.get_mut().unwrap();
-    ui.seerr.cards = cards;
-    tx_end();
-    let h = content_h.max(clip_h);
-    let _: () = msg_send![doc, setFrameSize: size(width, h)];
+    let Some(page) = ui.seerr.title.clone() else { return };
+    if ui.seerr.title_doc.get().is_null() {
+        return;
+    }
+    ui.seerr.thumbs.clear();
+    let doc = ui.seerr.title_doc.get();
+    let none: *mut AnyObject = msg_send![class!(NSArray), array];
+    let _: () = msg_send![doc, setSubviews: none];
+    let clip: *mut AnyObject = msg_send![ui.seerr.title_scroll.get(), contentView];
+    let clip_h = bounds_of(clip).size.h;
+    let width = bounds_of(clip).size.w.max(200.0);
+    let h = discover::build_title(doc, width, &page);
+    let _: () = msg_send![doc, setFrameSize: size(width, h.max(clip_h))];
+}
+
+/// Show the title page (covering the toolbar and grid) or go back to the browse views.
+pub(crate) unsafe fn show_title_page(open: bool) {
+    let ui = UI.get_mut().unwrap();
+    let toolbar = is_configured(&ui.cfg.settings) && !open;
+    for v in [ui.seerr.tabs, ui.seerr.search, ui.seerr.status] {
+        set_hidden(v.get(), !toolbar);
+    }
+    set_hidden(ui.seerr.scroll.get(), open);
+    set_hidden(ui.seerr.title_scroll.get(), !open);
+    if open {
+        set_hidden(ui.seerr.empty.get(), true);
+        rebuild_title();
+    } else {
+        ui.seerr.title = None;
+        rebuild();
+    }
 }
 
 /// Poster bytes arrived (via the Seerr server): cache the image and fill matching posters.
@@ -840,6 +925,10 @@ pub(crate) extern "C" fn seerr_tab(_t: *mut AnyObject, _c: Sel, sender: *mut Any
 pub(crate) unsafe fn select_mode(requests: bool) {
     enter();
     let ui = UI.get_mut().unwrap();
+    if ui.seerr.title.is_some() {
+        show_title_page(false);
+    }
+    let ui = UI.get_mut().unwrap();
     ui.seerr.requests_mode = requests;
     if !ui.seerr.tabs.get().is_null() {
         let _: () = msg_send![ui.seerr.tabs.get(), setSelectedSegment: requests as NSInteger];
@@ -856,7 +945,7 @@ pub(crate) unsafe fn select_mode(requests: bool) {
     rebuild();
 }
 
-/// Refresh (⌘R) while Requests is showing: reload My Requests, or search again.
+/// Refresh (⌘R) while Discover is showing: reload My Requests, the rows, or search again.
 pub(crate) unsafe fn refresh() {
     let ui = UI.get_mut().unwrap();
     if ui.seerr.requests_mode {
@@ -868,6 +957,8 @@ pub(crate) unsafe fn refresh() {
         ui.seerr.results_loaded = false;
         set_status("Searching…", false);
         let _ = ui.ui_tx.send(UiCmd::SeerrSearch { q });
+    } else if is_configured(&ui.cfg.settings) {
+        discover::request_all();
     }
     rebuild();
 }
@@ -891,33 +982,62 @@ pub(crate) unsafe fn search_changed() {
     rebuild();
 }
 
-pub(crate) extern "C" fn seerr_request(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
+/// Title page: the Request button. The first press asks for confirmation; the second sends.
+pub(crate) extern "C" fn seerr_request(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        match ui.seerr.title.as_mut() {
+            Some(p) if !p.confirming && p.detail.is_some() => {
+                p.confirming = true;
+                rebuild_title();
+            }
+            Some(_) => discover::send_request(),
+            None => {}
+        }
+    }
+}
+
+/// Title page: Cancel while confirming a request.
+pub(crate) extern "C" fn seerr_cancel_request(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
+    unsafe {
+        let ui = UI.get_mut().unwrap();
+        if let Some(p) = ui.seerr.title.as_mut() {
+            p.confirming = false;
+        }
+        rebuild_title();
+    }
+}
+
+/// A poster tap (or a billboard button): open that title's page.
+pub(crate) extern "C" fn seerr_open_title(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let tag: NSInteger = msg_send![sender, tag];
-        let r = match ui.seerr.results.get(tag.max(0) as usize) {
-            Some(r) if r.availability == Availability::NotRequested => r.clone(),
-            _ => return,
-        };
-        if ui.seerr.inflight.iter().any(|(m, id, _)| *m == r.media_type && *id == r.tmdb_id) {
-            return;
-        }
-        ui.seerr.inflight.push((r.media_type.clone(), r.tmdb_id, r.title.clone()));
-        // Update the clicked button in place (never remove a control from inside its own action).
-        let _: () = msg_send![sender, setEnabled: Bool::NO];
-        let _: () = msg_send![sender, setTitle: ns("Requesting…")];
-        let card: *mut AnyObject = msg_send![sender, superview];
-        let bf = frame_of(sender);
-        if !card.is_null() {
-            let sp = make_spinner(rect(bf.origin.x + bf.size.w + SP2, bf.origin.y + (bf.size.h - SPIN) / 2., SPIN, SPIN));
-            add_sub(card, sp);
-        }
-        set_status(&format!("Requesting “{}”…", r.title), false);
-        let _ = ui.ui_tx.send(UiCmd::SeerrRequest {
-            media_type: r.media_type,
-            tmdb_id: r.tmdb_id,
-            title: r.title,
-        });
+        let Some(r) = ui.seerr.tagged.get(tag.max(0) as usize).cloned() else { return };
+        discover::open_title(&r.media_type, r.tmdb_id, &r.title);
+    }
+}
+
+/// Title page: Back to the browse views.
+pub(crate) extern "C" fn seerr_title_back(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
+    unsafe { show_title_page(false) }
+}
+
+/// Title page: Play (the title is in the library; open its Jellyfin item).
+pub(crate) extern "C" fn seerr_play(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
+    unsafe { discover::play_clicked() }
+}
+
+/// Title page: Trailer (YouTube, in the browser; a no-op in the self-test).
+pub(crate) extern "C" fn seerr_trailer(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
+    unsafe { discover::trailer_clicked() }
+}
+
+/// Title page: a season checkbox (its tag is the season number).
+pub(crate) extern "C" fn seerr_season(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
+    unsafe {
+        let tag: NSInteger = msg_send![sender, tag];
+        discover::season_toggled(tag.max(0) as u32);
     }
 }
 
@@ -946,9 +1066,13 @@ pub(crate) fn on_requested(title: String) {
                     r.request_status = Some(RequestStatus::Pending);
                 }
             }
+            discover::on_requested(&m, id);
         }
         set_status(&format!("Requested “{}”.", title), false);
         rebuild();
+        if ui.seerr.title.is_some() {
+            rebuild_title();
+        }
     }
 }
 
@@ -1069,6 +1193,7 @@ mod tests {
                 availability: av,
                 requested_by: String::new(),
                 created_at: String::new(),
+                seasons: vec![],
             })
         };
         assert_eq!(req(RequestStatus::Declined, Availability::NotRequested).badge_color, "danger");
@@ -1095,6 +1220,7 @@ mod tests {
                 availability: av,
                 requested_by: String::new(),
                 created_at: String::new(),
+                seasons: vec![],
             })
             .badge
         };

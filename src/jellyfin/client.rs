@@ -258,6 +258,9 @@ impl JellyfinClient {
         if let Some(s) = &q.search {
             pairs.push(("SearchTerm", s.clone()));
         }
+        if let Some(p) = &q.any_provider_id {
+            pairs.push(("AnyProviderIdEquals", p.clone()));
+        }
         if !q.filters.is_empty() {
             pairs.push(("Filters", q.filters.join(",")));
         }
@@ -340,6 +343,17 @@ impl JellyfinClient {
     }
 
     /// Items the server considers similar to `item_id`, best match first.
+    /// The library item of `item_type` ("Movie" or "Series") carrying this TMDB id, if any.
+    pub async fn find_by_tmdb(&self, tmdb_id: u64, item_type: &str) -> Result<Option<ListItem>, JFError> {
+        let q = ItemQuery {
+            types: Some(item_type.into()),
+            any_provider_id: Some(format!("Tmdb.{}", tmdb_id)),
+            limit: 1,
+            ..Default::default()
+        };
+        Ok(self.items(&q).await?.into_iter().next())
+    }
+
     pub async fn similar(&self, item_id: &str, limit: u32) -> Result<Vec<ListItem>, JFError> {
         let path = format!("/Items/{}/Similar", enc(item_id));
         let query = [("UserId", self.user_id.clone()), ("Limit", limit.to_string())];
@@ -1286,6 +1300,7 @@ mod tests {
             sort_order: "Descending".into(),
             filters: vec!["IsUnplayed".into(), "IsFavorite".into()],
             genres: Some("Comedy|Drama".into()),
+            any_provider_id: Some("Tmdb.603".into()),
             limit: 25,
         };
         client(&m.base).items(&q).await.unwrap();
@@ -1298,6 +1313,7 @@ mod tests {
         assert_eq!(r.qp("Filters"), Some("IsUnplayed,IsFavorite"));
         assert_eq!(r.qp("Limit"), Some("25"));
         assert_eq!(r.qp("Genres"), Some("Comedy|Drama"));
+        assert_eq!(r.qp("AnyProviderIdEquals"), Some("Tmdb.603"));
     }
 
     #[tokio::test]

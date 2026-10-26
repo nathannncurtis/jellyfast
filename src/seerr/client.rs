@@ -476,16 +476,16 @@ impl SeerrClient {
         Ok(detail_of(raw, kind))
     }
 
-    /// Poster bytes through this server's image proxy (needs no credentials).
-    pub async fn poster(&self, path: &str) -> Result<Vec<u8>, SeerrError> {
-        let r = self.exec(self.http.get(image_url(&self.base, ImageSize::Thumb, path))).await?;
+    /// Image bytes at `size` through this server's image proxy (needs no credentials).
+    pub async fn image(&self, size: ImageSize, path: &str) -> Result<Vec<u8>, SeerrError> {
+        let r = self.exec(self.http.get(image_url(&self.base, size, path))).await?;
         let code = r.status().as_u16();
         if !(200..300).contains(&code) {
             return Err(SeerrError::Api(code, "poster".into()));
         }
         let b = r.bytes().await.map_err(|e| SeerrError::Network(e.to_string()))?;
         if b.is_empty() {
-            return Err(SeerrError::Parse("empty poster".into()));
+            return Err(SeerrError::Parse("empty image".into()));
         }
         Ok(b.to_vec())
     }
@@ -558,6 +558,7 @@ impl SeerrClient {
                 availability: Availability::from_code(r.media.as_ref().and_then(|m| m.status)),
                 requested_by: who,
                 created_at: r.created_at.unwrap_or_default(),
+                seasons: r.seasons.iter().map(|s| s.season_number).filter(|n| *n > 0).collect(),
             });
         }
         Ok(out)
@@ -579,11 +580,11 @@ mod tests {
     async fn poster_fetches_bytes_without_credentials() {
         let m = start(default_route).await;
         let c = client(&m).await;
-        assert_eq!(c.poster("/inc.jpg").await.unwrap(), b"IMG/inc.jpg");
-        let r = m.find("GET", "/imageproxy/tmdb/t/p/w92/inc.jpg");
+        assert_eq!(c.image(ImageSize::PosterMedium, "/inc.jpg").await.unwrap(), b"IMG/inc.jpg");
+        let r = m.find("GET", "/imageproxy/tmdb/t/p/w342/inc.jpg");
         assert_eq!(r.len(), 1);
         assert!(!r[0].headers.contains_key("x-api-key"));
-        assert!(matches!(c.poster("/missing.jpg").await, Err(SeerrError::Api(404, _))));
+        assert!(matches!(c.image(ImageSize::PosterMedium, "/missing.jpg").await, Err(SeerrError::Api(404, _))));
     }
 
     #[test]
