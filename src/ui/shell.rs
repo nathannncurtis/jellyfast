@@ -210,7 +210,7 @@ pub(crate) unsafe fn build_window_and_ui() {
     set_frame(sbody, rect(0., sh - 40. - SP3 - 26. - SP1 - 34., sw, 34.));
     add_sub(state, sbody);
     ui.state_body = Ptr(sbody);
-    let sbtn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Try Again"), target: ui.ctl.get(), action: sel!(refresh:)];
+    let sbtn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Retry"), target: ui.ctl.get(), action: sel!(refresh:)];
     let _: () = msg_send![sbtn, setBezelStyle: 1isize];
     set_frame(sbtn, rect((sw - 110.) / 2., 0., 110., 28.));
     set_hidden(sbtn, true);
@@ -1055,7 +1055,7 @@ pub(crate) unsafe fn hide_state() {
     set_hidden(ui.state_host.get(), true);
     set_hidden(ui.status_label.get(), true);
 }
-/// Centred message in the grid area. `retry` adds the Try Again button.
+/// Centred message in the grid area. `retry` adds the Retry button.
 pub(crate) unsafe fn show_state(symbol_name: &str, title: &str, body: &str, retry: bool) {
     let ui = UI.get_mut().unwrap();
     let img = symbol(symbol_name, 40., Weight::Regular);

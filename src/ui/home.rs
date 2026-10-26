@@ -1221,7 +1221,7 @@ unsafe fn update_state() {
             HomeSection::TvShows => show_state("tv", "Loading TV Shows…", "Fetching your libraries.", false),
         }
     } else {
-        // Every empty state offers Retry (the state's "Try Again" button).
+        // Every empty state offers Retry (the state's "Retry" button).
         match ui.home.section {
             HomeSection::Home => show_state("house", "Nothing here yet", "Movies and shows you add to Jellyfin will appear here.", true),
             HomeSection::Movies => show_state("film", "No movies yet", "Movies you add to Jellyfin will appear here.", true),

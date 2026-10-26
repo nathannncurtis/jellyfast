@@ -235,6 +235,7 @@ fn steps() -> Vec<Step> {
         ("home: billboard slides", s_home_billboard, 300),
         ("home: billboard next slide", s_home_billboard_next, 500),
         ("audit: home billboard, slide 2", s_home_billboard_two, 300),
+        ("home: rows scrolled into view", s_home_rows_scroll, 300),
         ("home: card hover and billboard pause", s_home_hover, 300),
         ("home: see all page", s_home_see_all, 200),
         ("home: back to a library", s_home_leave, 100),
@@ -1430,13 +1431,13 @@ fn s_states() {
         let hh: Bool = msg_send![ui.state_host.get(), isHidden];
         state_check("error state shown", hh == Bool::NO);
         let bb: Bool = msg_send![ui.state_btn.get(), isHidden];
-        state_check("Try Again visible on error", bb == Bool::NO);
+        state_check("Retry visible on error", bb == Bool::NO);
         // empty search state, centred on the grid area
         set_text(ui.search.get(), "zzz");
         send_items("Results", vec![], false);
         let _: () = msg_send![ui.win.get(), layoutIfNeeded];
         let hb: Bool = msg_send![ui.state_btn.get(), isHidden];
-        state_check("no Try Again on empty", hb == Bool::YES);
+        state_check("no Retry on empty", hb == Bool::YES);
         state_check("empty search body", read_field(ui.state_body.get()).contains("No results for"));
         let sf = frame_of(ui.status_label.get());
         let win_r: NSRect = msg_send![ui.status_label.get(), convertRect: bounds_of(ui.status_label.get()), toView: nil()];
@@ -2166,6 +2167,14 @@ fn billboard_fake_rows() -> Vec<HomeRow> {
             ],
         },
         HomeRow {
+            title: "Recently Added TV".into(),
+            kind: HomeRowKind::RecentlyAdded,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-tv", "Name": "Lantern Row", "Type": "Series", "ProductionYear": 2025,
+                "BackdropImageTags": ["b"], "ImageTags": {"Primary": "p"}, "Overview": overview
+            }))],
+        },
+        HomeRow {
             title: "Because You Watched Northern Lights".into(),
             kind: HomeRowKind::Recommended,
             items: vec![v(serde_json::json!({
@@ -2179,6 +2188,22 @@ fn billboard_fake_rows() -> Vec<HomeRow> {
             items: vec![v(serde_json::json!({
                 "Id": "bb-show", "Name": "Long Show", "Type": "Series", "ProductionYear": 2019,
                 "BackdropImageTags": ["b"], "Overview": overview
+            }))],
+        },
+        HomeRow {
+            title: "Drama".into(),
+            kind: HomeRowKind::Genre,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-drama", "Name": "Quiet Harbour", "Type": "Movie", "ProductionYear": 2022,
+                "Genres": ["Drama"], "BackdropImageTags": ["b"], "Overview": overview
+            }))],
+        },
+        HomeRow {
+            title: "Thriller".into(),
+            kind: HomeRowKind::Genre,
+            items: vec![v(serde_json::json!({
+                "Id": "bb-thriller", "Name": "Cold Signal", "Type": "Movie", "ProductionYear": 2021,
+                "Genres": ["Thriller"], "BackdropImageTags": ["b"], "Overview": overview
             }))],
         },
     ]
@@ -2264,6 +2289,14 @@ fn s_home_billboard() {
     for id in ["bb-movie", "bb-show"] {
         handle_main(MainMsg::PosterReady { key: crate::ui::home::logo_key(id), bytes: image_bytes(1, 600, 160, 230) });
     }
+    // Card art for every row item: wide cards use the wide key, poster cards the poster key.
+    let row_count = rows.len();
+    for (n, r) in rows.iter().enumerate() {
+        for (i, it) in r.items.iter().enumerate() {
+            let key = if r.kind.is_wide() { crate::ui::home::wide_key(&it.id) } else { poster_key(&it.id) };
+            handle_main(MainMsg::PosterReady { key, bytes: image_bytes(0, 320, 180, (60 + n * 20 + i * 9) as u8) });
+        }
+    }
     handle_main(MainMsg::HomeLoaded(HomeRows { rows, ..Default::default() }));
     unsafe {
         pause_billboard();
@@ -2272,7 +2305,7 @@ fn s_home_billboard() {
         state_check("billboard: one slide per title", b.items.len() == 6);
         state_check("billboard: on screen above the rows", !b.host.is_null() && frame_of(b.host).origin.y == 0.);
         state_check("billboard: at least 360pt tall", frame_of(b.host).size.h >= 360.);
-        state_check("billboard: rows start below it", ui.home.views.len() == 5 && frame_of(ui.home.heads[0].0).origin.y >= frame_of(b.host).size.h);
+        state_check("billboard: rows start below it", ui.home.views.len() == row_count && frame_of(ui.home.heads[0].0).origin.y >= frame_of(b.host).size.h);
         state_check("billboard: first slide is the resume item", b.items[0].id == "bb-ep");
         state_check("billboard: title names the series", read_field(b.title) == "Harbour Lights");
         state_check("billboard: resume button shows time left", read_field(b.play.label) == "Resume · 26m left");
@@ -2301,19 +2334,52 @@ fn s_home_billboard_two() {
         state_check("billboard: logo slide hides the text title", crate::ui::shell::is_hidden(b.title));
     }
 }
+/// Scroll the Home rows so the given document y sits at the top of the visible area.
+unsafe fn scroll_home_to(y: f64) {
+    let ui = UI.get().unwrap();
+    let sv = ui.home.scroll.get();
+    let clip: *mut AnyObject = msg_send![sv, contentView];
+    let _: () = msg_send![clip, scrollToPoint: NSPoint { x: 0., y: y.max(0.) }];
+    let _: () = msg_send![sv, reflectScrolledClipView: clip];
+}
+/// Rows below the billboard, captured after scrolling each one into view.
+fn s_home_rows_scroll() {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let heads: Vec<f64> = ui.home.heads.iter().map(|h| frame_of(h.0).origin.y).collect();
+        let last = heads.len().saturating_sub(1);
+        scroll_home_to(heads[1] - 12.);
+        audit_both("home rows: next up");
+        scroll_home_to(heads[last] - 12.);
+        audit_both("home rows: genres");
+        scroll_home_to(0.);
+    }
+}
 fn s_home_hover() {
     unsafe {
         let ui = UI.get().unwrap();
-        let card = ui.home.views[2].cells[0].container;
-        crate::ui::library::hover(card, true);
+        // Bring the hovered card into view first so the capture shows it.
+        scroll_home_to(frame_of(ui.home.heads[2].0).origin.y - 12.);
+        let cell = &ui.home.views[2].cells[0];
+        crate::ui::library::hover(cell.container, true);
     }
     audit_both("home card hover");
     unsafe {
         let ui = UI.get().unwrap();
-        let card = ui.home.views[2].cells[0].container;
-        crate::ui::library::hover(card, false);
+        let cell = &ui.home.views[2].cells[0];
+        let alpha = |v: *mut AnyObject| -> f64 { msg_send![v, alphaValue] };
+        state_check("hover: title overlay fades in", !cell.overlay.is_null() && alpha(cell.overlay) > 0.99);
+        state_check("hover: centred play button fades in", !cell.play_btn.is_null() && alpha(cell.play_btn) > 0.99);
+        crate::ui::library::hover(cell.container, false);
         crate::ui::home::billboard_hover(false);
         state_check("billboard: timer resumes after the pointer leaves", !ui.home.billboard.hovered);
+    }
+    unsafe {
+        let ui = UI.get().unwrap();
+        let cell = &ui.home.views[2].cells[0];
+        let alpha = |v: *mut AnyObject| -> f64 { msg_send![v, alphaValue] };
+        state_check("hover: title overlay hides on leave", cell.overlay.is_null() || alpha(cell.overlay) < 0.01);
+        scroll_home_to(0.);
     }
 }
 fn s_home_see_all() {
