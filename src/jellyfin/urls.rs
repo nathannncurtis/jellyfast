@@ -184,6 +184,16 @@ pub fn build_art_url(base: &str, item_id: &str, kind: &str, max_w: u32, token: &
     )
 }
 
+/// Transparent title logo (`Logo` image) for the billboard overlay.
+pub fn build_logo_url(base: &str, item_id: &str, token: &str, max_w: u32) -> String {
+    build_art_url(base, item_id, "Logo", max_w, token)
+}
+
+/// Wide backdrop (`Backdrop` image) for the billboard and hero rows.
+pub fn build_backdrop_url(base: &str, item_id: &str, token: &str, max_w: u32) -> String {
+    build_art_url(base, item_id, "Backdrop", max_w, token)
+}
+
 pub fn build_livetv_url(base: &str, channel_id: &str, token: &str) -> String {
     format!(
         "{}/LiveTv/Channels/{}/stream?{}",
@@ -294,5 +304,18 @@ mod server_input_tests {
         assert_eq!(bare_url("http://h:5055/api"), "h:5055/api");
         assert_eq!(bare_url("h:8096"), "h:8096");
         assert_eq!(bare_url(""), "");
+    }
+}
+
+#[cfg(test)]
+mod art_kind_tests {
+    use super::*;
+
+    #[test]
+    fn logo_and_backdrop_urls_name_their_image_type() {
+        let logo = build_logo_url("https://h", "it1", "tok", 800);
+        assert_eq!(logo, "https://h/Items/it1/Images/Logo?maxWidth=800&quality=85&api_key=tok");
+        let bd = build_backdrop_url("https://h", "it1", "tok", 1920);
+        assert_eq!(bd, "https://h/Items/it1/Images/Backdrop?maxWidth=1920&quality=85&api_key=tok");
     }
 }

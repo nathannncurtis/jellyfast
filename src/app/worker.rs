@@ -1389,10 +1389,16 @@ mod tests {
             "Id": id, "Name": name, "Type": ty, "ProductionYear": 2020,
             "RunTimeTicks": 72_000_000_000i64,
             "UserData": {"Played": false, "PlaybackPositionTicks": 0, "PlayCount": 0},
-            "ServerId": "srv"
+            "ServerId": "srv",
+            "Overview": format!("Placeholder overview for {name}."),
+            "Genres": ["Drama", "Mystery"],
+            "CommunityRating": 7.5,
+            "OfficialRating": "PG-13",
+            "ProviderIds": {"Tmdb": format!("tmdb-{id}")}
         });
         if images {
-            v["ImageTags"] = serde_json::json!({"Primary": "tag1"});
+            v["ImageTags"] = serde_json::json!({"Primary": "tag1", "Logo": "logo1"});
+            v["BackdropImageTags"] = serde_json::json!(["backdrop1"]);
             v["PrimaryImageAspectRatio"] = serde_json::json!(0.667);
         }
         v
@@ -1521,6 +1527,13 @@ mod tests {
                     "hibr" => v["MediaSources"] = media("mp4", "h264", "aac", 20_000_000),
                     "dts" => v["MediaSources"] = media("mp4", "h264", "dts", 4_000_000),
                     "nosrc" => v["MediaSources"] = serde_json::json!([]),
+                    "det-bare" => {
+                        // Bare detail item: no metadata beyond the base fields.
+                        let o = v.as_object_mut().unwrap();
+                        for k in ["Overview", "Genres", "CommunityRating", "OfficialRating", "ProviderIds"] {
+                            o.remove(k);
+                        }
+                    }
                     "resume" => v["UserData"] = serde_json::json!({"Played": false, "PlaybackPositionTicks": 6_000_000_000i64}),
                     "played" => v["UserData"] = serde_json::json!({"Played": true, "PlaybackPositionTicks": 6_000_000_000i64}),
                     "ep-auto" | "ep-seg-broken" => {

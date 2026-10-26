@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Deserialize)]
 pub struct ServerInfo {
@@ -50,6 +51,8 @@ pub struct ItemQuery {
     pub sort_by: String,
     pub sort_order: String,
     pub filters: Vec<String>,
+    /// Pipe-separated genre names (`Genres` query param), e.g. "Comedy|Drama".
+    pub genres: Option<String>,
     pub limit: u32,
 }
 impl Default for ItemQuery {
@@ -62,6 +65,7 @@ impl Default for ItemQuery {
             sort_by: "SortName".into(),
             sort_order: "Ascending".into(),
             filters: vec![],
+            genres: None,
             limit: 400,
         }
     }
@@ -96,8 +100,33 @@ pub struct ListItem {
     /// ISO 8601 date the item was added; orders Recently Added across libraries.
     #[serde(rename = "DateCreated", default)]
     pub date_created: Option<String>,
+    #[serde(rename = "Overview", default)]
+    pub overview: Option<String>,
+    #[serde(rename = "Genres", default)]
+    pub genres: Vec<String>,
+    /// Critic/community score out of 10 (e.g. 7.8).
+    #[serde(rename = "CommunityRating", default)]
+    pub community_rating: Option<f64>,
+    /// Content rating such as "PG-13" or "TV-MA".
+    #[serde(rename = "OfficialRating", default)]
+    pub official_rating: Option<String>,
+    /// External ids keyed by provider name: "Tmdb", "Imdb", "Tvdb".
+    #[serde(rename = "ProviderIds", default)]
+    pub provider_ids: HashMap<String, String>,
 }
 impl ListItem {
+    /// Tag of the first backdrop image (wide, unlabelled artwork), if any.
+    pub fn backdrop_tag(&self) -> Option<&str> {
+        self.backdrop_tags.as_ref().and_then(|b| b.first()).map(String::as_str)
+    }
+    /// Tag of the transparent title logo, if the item has one.
+    pub fn logo_tag(&self) -> Option<&str> {
+        self.image_tags.as_ref().and_then(|t| t.logo.as_deref())
+    }
+    /// TMDB id, used to address Seerr image proxy and detail lookups.
+    pub fn tmdb_id(&self) -> Option<&str> {
+        self.provider_ids.get("Tmdb").map(String::as_str)
+    }
     pub fn has_image(&self) -> bool {
         self.image_tags
             .as_ref()
@@ -141,6 +170,8 @@ pub struct ImageTags {
     pub primary: Option<String>,
     #[serde(rename = "Thumb", default)]
     pub thumb: Option<String>,
+    #[serde(rename = "Logo", default)]
+    pub logo: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -416,5 +447,47 @@ mod wide_art_tests {
         assert_eq!(item(serde_json::json!({"Primary": "p"}), serde_json::json!(["b"])).wide_art_kind(), Some("Backdrop"));
         assert_eq!(item(serde_json::json!({"Primary": "p"}), serde_json::json!([])).wide_art_kind(), Some("Primary"));
         assert_eq!(item(serde_json::json!({}), serde_json::json!([])).wide_art_kind(), None);
+    }
+}
+
+#[cfg(test)]
+mod list_data_tests {
+    use super::*;
+
+    #[test]
+    fn parses_overview_genres_ratings_and_provider_ids() {
+        let page: ItemsPage<ListItem> = serde_json::from_str(
+            r#"{"Items":[{"Id":"m1","Name":"Heat","Type":"Movie",
+                "Overview":"A cop and a thief.","Genres":["Crime","Thriller"],
+                "CommunityRating":8.3,"OfficialRating":"R",
+                "ProviderIds":{"Tmdb":"949","Imdb":"tt0113277"},
+                "BackdropImageTags":["bd1","bd2"],
+                "ImageTags":{"Primary":"p","Logo":"lg"}}]}"#,
+        )
+        .unwrap();
+        let it = &page.items[0];
+        assert_eq!(it.overview.as_deref(), Some("A cop and a thief."));
+        assert_eq!(it.genres, vec!["Crime".to_string(), "Thriller".to_string()]);
+        assert_eq!(it.community_rating, Some(8.3));
+        assert_eq!(it.official_rating.as_deref(), Some("R"));
+        assert_eq!(it.tmdb_id(), Some("949"));
+        assert_eq!(it.provider_ids.get("Imdb").map(String::as_str), Some("tt0113277"));
+        assert_eq!(it.backdrop_tag(), Some("bd1"));
+        assert_eq!(it.logo_tag(), Some("lg"));
+    }
+
+    #[test]
+    fn missing_list_data_defaults_cleanly() {
+        let it: ListItem = serde_json::from_str(r#"{"Id":"x","Name":"n"}"#).unwrap();
+        assert!(it.overview.is_none() && it.genres.is_empty());
+        assert!(it.community_rating.is_none() && it.official_rating.is_none());
+        assert!(it.provider_ids.is_empty() && it.tmdb_id().is_none());
+        assert!(it.backdrop_tag().is_none() && it.logo_tag().is_none());
+    }
+
+    #[test]
+    fn empty_backdrop_list_has_no_backdrop_tag() {
+        let it: ListItem = serde_json::from_str(r#"{"Id":"x","Name":"n","BackdropImageTags":[]}"#).unwrap();
+        assert!(it.backdrop_tag().is_none());
     }
 }
