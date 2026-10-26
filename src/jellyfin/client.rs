@@ -67,8 +67,11 @@ fn map_err(e: reqwest::Error) -> JFError {
     }
 }
 
-/// Fields requested for every home-screen list.
-const HOME_FIELDS: &str = "PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,DateCreated";
+/// Fields requested for every home-screen list and library grid. The text
+/// and rating fields feed the billboard and the row detail overlay.
+const HOME_FIELDS: &str = "PrimaryImageAspectRatio,ProductionYear,UserData,SeriesName,DateCreated,Overview,Genres,CommunityRating,OfficialRating,ProviderIds";
+/// Image types the lists ask the server to report tags for.
+const HOME_IMAGE_TYPES: &str = "Primary,Backdrop,Logo,Thumb";
 
 impl JellyfinClient {
     pub fn new(
@@ -233,8 +236,9 @@ impl JellyfinClient {
         );
         let mut pairs: Vec<(&str, String)> = vec![
             ("Recursive", "true".into()),
-            ("Fields", "PrimaryImageAspectRatio,ProductionYear,UserData,Overview".into()),
+            ("Fields", HOME_FIELDS.into()),
             ("ImageTypeLimit", "1".into()),
+            ("EnableImageTypes", HOME_IMAGE_TYPES.into()),
             ("Limit", q.limit.to_string()),
             ("SortBy", q.sort_by.clone()),
             ("SortOrder", q.sort_order.clone()),
@@ -247,6 +251,9 @@ impl JellyfinClient {
         }
         if let Some(t) = &q.types {
             pairs.push(("IncludeItemTypes", t.clone()));
+        }
+        if let Some(g) = &q.genres {
+            pairs.push(("Genres", g.clone()));
         }
         if let Some(s) = &q.search {
             pairs.push(("SearchTerm", s.clone()));
@@ -403,6 +410,7 @@ impl JellyfinClient {
             ("MediaTypes", "Video".to_string()),
             ("Fields", HOME_FIELDS.to_string()),
             ("ImageTypeLimit", "1".to_string()),
+            ("EnableImageTypes", HOME_IMAGE_TYPES.to_string()),
         ];
         if let Some(p) = parent {
             pairs.push(("ParentId", p.to_string()));
@@ -428,6 +436,7 @@ impl JellyfinClient {
             ("Limit", limit.to_string()),
             ("Fields", HOME_FIELDS.to_string()),
             ("ImageTypeLimit", "1".to_string()),
+            ("EnableImageTypes", HOME_IMAGE_TYPES.to_string()),
         ];
         if let Some(p) = parent {
             pairs.push(("ParentId", p.to_string()));
@@ -445,6 +454,7 @@ impl JellyfinClient {
             ("Limit", limit.to_string()),
             ("Fields", HOME_FIELDS.to_string()),
             ("ImageTypeLimit", "1".to_string()),
+            ("EnableImageTypes", HOME_IMAGE_TYPES.to_string()),
         ];
         self.get_json(&path, &pairs).await
     }
@@ -954,7 +964,7 @@ mod tests {
 
     const VIEWS_JSON: &str = r#"{"Items":[{"Name":"Movies","ServerId":"srv1","Id":"v1","CollectionType":"movies","Type":"CollectionFolder"},{"Name":"Mixed","Id":"v2","Type":"UserView"}],"TotalRecordCount":2,"StartIndex":0}"#;
 
-    const ITEMS_JSON: &str = r#"{"Items":[{"Name":"Pilot","ServerId":"srv1","Id":"ep1","SeriesName":"Show","SeriesId":"s1","SeasonId":"se1","Type":"Episode","ParentIndexNumber":1,"IndexNumber":2,"ProductionYear":2019,"RunTimeTicks":27000000000,"PrimaryImageAspectRatio":1.7777,"ImageTags":{"Primary":"abc"},"UserData":{"PlaybackPositionTicks":1000000,"PlayCount":0,"IsFavorite":false,"Played":false}},{"Name":"Minimal","Id":"m1"}],"TotalRecordCount":2,"StartIndex":0}"#;
+    const ITEMS_JSON: &str = r#"{"Items":[{"Name":"Pilot","ServerId":"srv1","Id":"ep1","SeriesName":"Show","SeriesId":"s1","SeasonId":"se1","Type":"Episode","ParentIndexNumber":1,"IndexNumber":2,"ProductionYear":2019,"RunTimeTicks":27000000000,"PrimaryImageAspectRatio":1.7777,"ImageTags":{"Primary":"abc","Logo":"lg1"},"BackdropImageTags":["bd1"],"Overview":"The pilot.","Genres":["Drama","Mystery"],"CommunityRating":8.1,"OfficialRating":"TV-14","ProviderIds":{"Tmdb":"1399","Imdb":"tt0944947"},"UserData":{"PlaybackPositionTicks":1000000,"PlayCount":0,"IsFavorite":false,"Played":false}},{"Name":"Minimal","Id":"m1"}],"TotalRecordCount":2,"StartIndex":0}"#;
 
     const FULL_ITEM_JSON: &str = r#"{"Name":"Movie","ServerId":"srv1","Id":"mv1","Type":"Movie","RunTimeTicks":7200000000,"UserData":{"PlaybackPositionTicks":0,"Played":true},"MediaSources":[{"Protocol":"File","Id":"ms1","Path":"/media/movie.mkv","Type":"Default","Container":"mkv","Bitrate":8000000,"MediaStreams":[{"Codec":"h264","Type":"Video","Index":0,"DisplayTitle":"1080p H264","Language":null},{"Codec":"dts","Type":"Audio","Index":1,"Language":"eng","DisplayTitle":"English DTS 5.1"},{"Codec":"srt","Type":"Subtitle","Index":2,"Language":"eng"}]}]}"#;
 
@@ -1275,6 +1285,7 @@ mod tests {
             sort_by: "DateCreated".into(),
             sort_order: "Descending".into(),
             filters: vec!["IsUnplayed".into(), "IsFavorite".into()],
+            genres: Some("Comedy|Drama".into()),
             limit: 25,
         };
         client(&m.base).items(&q).await.unwrap();
@@ -1286,6 +1297,60 @@ mod tests {
         assert_eq!(r.qp("SortOrder"), Some("Descending"));
         assert_eq!(r.qp("Filters"), Some("IsUnplayed,IsFavorite"));
         assert_eq!(r.qp("Limit"), Some("25"));
+        assert_eq!(r.qp("Genres"), Some("Comedy|Drama"));
+    }
+
+    #[tokio::test]
+    async fn items_sorts_by_community_rating_and_filters_genre() {
+        let m = serve(|_| reply(200, ITEMS_JSON)).await;
+        let q = ItemQuery {
+            types: Some("Movie".into()),
+            sort_by: "CommunityRating".into(),
+            sort_order: "Descending".into(),
+            genres: Some("Thriller".into()),
+            ..Default::default()
+        };
+        client(&m.base).items(&q).await.unwrap();
+        let r = m.last();
+        assert_eq!(r.qp("SortBy"), Some("CommunityRating"));
+        assert_eq!(r.qp("SortOrder"), Some("Descending"));
+        assert_eq!(r.qp("Genres"), Some("Thriller"));
+        assert_eq!(r.qp("IncludeItemTypes"), Some("Movie"));
+    }
+
+    #[tokio::test]
+    async fn items_requests_list_data_fields_and_image_types() {
+        let m = serve(|_| reply(200, ITEMS_JSON)).await;
+        client(&m.base).items(&ItemQuery::default()).await.unwrap();
+        assert_list_data_params(&m.last());
+        assert_eq!(m.last().qp("Genres"), None, "no genre filter unless asked");
+    }
+
+    #[tokio::test]
+    async fn items_parses_list_data_fields() {
+        let m = serve(|_| reply(200, ITEMS_JSON)).await;
+        let items = client(&m.base).items(&ItemQuery::default()).await.unwrap();
+        let ep = &items[0];
+        assert_eq!(ep.overview.as_deref(), Some("The pilot."));
+        assert_eq!(ep.genres, vec!["Drama".to_string(), "Mystery".to_string()]);
+        assert_eq!(ep.community_rating, Some(8.1));
+        assert_eq!(ep.official_rating.as_deref(), Some("TV-14"));
+        assert_eq!(ep.tmdb_id(), Some("1399"));
+        assert_eq!(ep.backdrop_tag(), Some("bd1"));
+        assert_eq!(ep.logo_tag(), Some("lg1"));
+        let min = &items[1];
+        assert!(min.genres.is_empty() && min.tmdb_id().is_none() && min.logo_tag().is_none());
+    }
+
+    fn assert_list_data_params(r: &Recorded) {
+        let fields = r.qp("Fields").unwrap();
+        for f in ["Overview", "Genres", "CommunityRating", "OfficialRating", "ProviderIds"] {
+            assert!(fields.split(',').any(|x| x == f), "Fields missing {f}: {fields}");
+        }
+        let types = r.qp("EnableImageTypes").unwrap();
+        for t in ["Backdrop", "Logo", "Thumb"] {
+            assert!(types.split(',').any(|x| x == t), "EnableImageTypes missing {t}: {types}");
+        }
     }
 
     #[tokio::test]
@@ -1447,6 +1512,7 @@ mod tests {
         assert_eq!(r.qp("Limit"), Some("16"));
         assert_eq!(r.qp("MediaTypes"), Some("Video"));
         assert!(r.qp("Fields").unwrap().contains("UserData"));
+        assert_list_data_params(&r);
         assert_token_auth(&r);
     }
 
@@ -1459,6 +1525,7 @@ mod tests {
         assert_eq!(r.path, "/Shows/NextUp");
         assert_eq!(r.qp("UserId"), Some(USER));
         assert_eq!(r.qp("Limit"), Some("12"));
+        assert_list_data_params(&r);
         assert_token_auth(&r);
     }
 
@@ -1471,6 +1538,7 @@ mod tests {
         assert_eq!(r.path, format!("/Users/{}/Items/Latest", USER));
         assert_eq!(r.qp("ParentId"), Some("lib-7"));
         assert_eq!(r.qp("Limit"), Some("8"));
+        assert_list_data_params(&r);
         assert_token_auth(&r);
     }
 
