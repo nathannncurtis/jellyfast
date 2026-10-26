@@ -174,10 +174,13 @@ pub(crate) fn handle_main(msg: MainMsg) {
         MainMsg::SeerrPoster { path, bytes } => crate::ui::seerr::on_poster(path, &bytes),
         MainMsg::SeerrError(m) => crate::ui::seerr::on_error(m),
         // Discover rows, title pages and recommendations have no screen yet.
-        MainMsg::SeerrDiscover { .. }
-        | MainMsg::SeerrTitle(_)
-        | MainMsg::SeerrRecommendations { .. }
-        | MainMsg::SeerrBrowseError(_) => {}
+        MainMsg::SeerrDiscover { row, page } => crate::ui::discover::on_row(row, page),
+        MainMsg::SeerrGenre { media_type, genre_id, page } => crate::ui::discover::on_genre(&media_type, genre_id, page),
+        MainMsg::SeerrWatched(rows) => crate::ui::discover::on_watched(rows),
+        MainMsg::SeerrLibrary { tmdb_id, item_id } => crate::ui::discover::on_library(tmdb_id, item_id),
+        MainMsg::SeerrTitle(d) => crate::ui::discover::on_title(*d),
+        MainMsg::SeerrBrowseError(m) => crate::ui::discover::on_error(m),
+        MainMsg::SeerrRecommendations { .. } => {}
         MainMsg::SessionsLoaded(list) => crate::ui::cast::on_sessions(list),
         MainMsg::CastError(e) => crate::ui::cast::on_error(e),
         MainMsg::SeerrStatus { ok, message } => unsafe {

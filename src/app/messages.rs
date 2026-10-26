@@ -117,11 +117,27 @@ pub enum UiCmd {
     SeerrSearch {
         q: String,
     },
-    /// `media_type` is "movie" or "tv" (tv requests every regular season).
+    /// `media_type` is "movie" or "tv". TV asks for `seasons` (season numbers); empty
+    /// means every regular season.
     SeerrRequest {
         media_type: String,
         tmdb_id: u64,
         title: String,
+        seasons: Vec<u32>,
+    },
+    /// First page of one TMDB genre list (Discover's genre rows). Answered with `MainMsg::SeerrGenre`.
+    SeerrGenre {
+        media_type: String,
+        genre_id: u32,
+    },
+    /// "Because you watched" rows: recently played library titles with a TMDB id, and
+    /// their Seerr recommendations. Answered with `MainMsg::SeerrWatched`.
+    SeerrWatched,
+    /// Whether this Jellyfin server holds the title (TMDB id lookup). Answered with
+    /// `MainMsg::SeerrLibrary`.
+    SeerrLibrary {
+        media_type: String,
+        tmdb_id: u64,
     },
     /// The signed-in Seerr user's recent requests, newest first.
     SeerrRequests,
@@ -259,6 +275,19 @@ pub enum MainMsg {
     },
     /// Discover, title or recommendations failure (kept apart from `SeerrError`, which the search UI shows).
     SeerrBrowseError(String),
+    /// First page of a genre row (`media_type`, `genre_id` as asked).
+    SeerrGenre {
+        media_type: String,
+        genre_id: u32,
+        page: SearchPage,
+    },
+    /// "Because you watched" rows, one per recently played title: (row title, recommendations).
+    SeerrWatched(Vec<(String, Vec<SeerrResult>)>),
+    /// The Jellyfin item for a TMDB id (None: this server does not hold it).
+    SeerrLibrary {
+        tmdb_id: u64,
+        item_id: Option<String>,
+    },
     /// Controllable sessions on the server, without this app's own.
     SessionsLoaded(Vec<RemoteSession>),
     /// A Play On request or remote command failed (shown as a toast).

@@ -53,6 +53,8 @@ pub struct ItemQuery {
     pub filters: Vec<String>,
     /// Pipe-separated genre names (`Genres` query param), e.g. "Comedy|Drama".
     pub genres: Option<String>,
+    /// `AnyProviderIdEquals` value, e.g. "Tmdb.603" (matches any item carrying that id).
+    pub any_provider_id: Option<String>,
     pub limit: u32,
 }
 impl Default for ItemQuery {
@@ -66,6 +68,7 @@ impl Default for ItemQuery {
             sort_order: "Ascending".into(),
             filters: vec![],
             genres: None,
+            any_provider_id: None,
             limit: 400,
         }
     }

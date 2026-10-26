@@ -122,6 +122,8 @@ pub struct SeerrRequestItem {
     pub requested_by: String,
     /// ISO-8601 timestamp as sent by Seerr (may be empty).
     pub created_at: String,
+    /// Season numbers asked for (TV only; empty for movies or when Seerr sent none).
+    pub seasons: Vec<u32>,
 }
 
 /// Result of a successful POST /request.
@@ -246,6 +248,28 @@ pub fn image_url(base: &str, size: ImageSize, path: &str) -> String {
     format!("{}/imageproxy/tmdb/t/p/{}{}{}", base.trim_end_matches('/'), size.tmdb_name(), slash, path)
 }
 
+/// Key for one Seerr image: the TMDB size and path together ("w342|/abc.jpg"), so the
+/// same path at two sizes is two cache entries. Worker and UI both build it this way.
+pub fn image_key(size: ImageSize, path: &str) -> String {
+    format!("{}|{}", size.tmdb_name(), path)
+}
+
+/// Size and path back out of an [`image_key`]. None for keys this module did not make.
+pub fn parse_image_key(key: &str) -> Option<(ImageSize, String)> {
+    let (name, path) = key.split_once('|')?;
+    let size = [
+        ImageSize::Thumb,
+        ImageSize::PosterSmall,
+        ImageSize::PosterMedium,
+        ImageSize::PosterLarge,
+        ImageSize::BackdropMedium,
+        ImageSize::BackdropLarge,
+    ]
+    .into_iter()
+    .find(|s| s.tmdb_name() == name)?;
+    Some((size, path.to_string()))
+}
+
 pub(crate) fn year_of(date: Option<&str>) -> Option<u16> {
     let d = date?.trim();
     if d.len() < 4 {
@@ -332,6 +356,16 @@ pub(crate) struct RawRequest {
     pub media: Option<RawMediaInfo>,
     pub requested_by: Option<RawUser>,
     pub created_at: Option<String>,
+    #[serde(default)]
+    pub seasons: Vec<RawRequestSeason>,
+}
+
+/// One season inside a TV request (`seasonNumber`).
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RawRequestSeason {
+    #[serde(default)]
+    pub season_number: u32,
 }
 
 #[derive(Debug, Deserialize, Default)]
