@@ -28,7 +28,7 @@ pub const GRID_COL_GAP: f64 = SP5;
 pub const GRID_ROW_GAP: f64 = 32.;
 pub const TILE_MIN_W: f64 = 160.;
 pub const POSTER_ASPECT: f64 = 1.5;
-/// 8 gap + 17 title + 1 + 14 subtitle + 4.
+/// 8 gap + 20 title + 1 + 16 subtitle + 3.
 pub const CELL_TEXT_H: f64 = 48.;
 pub const SIDEBAR_ROW_H: f64 = 28.;
 pub const NOW_BAR_H: f64 = 72.;
@@ -493,7 +493,6 @@ pub unsafe fn label(text: &str, t: TypeStyle, c: Col, align: usize) -> *mut AnyO
     let _: () = msg_send![v, setMaximumNumberOfLines: 1isize];
     v
 }
-/// Multi-line label that wraps (autoreleased).
 /// Applies letter-spacing (`kern`, points) to a label, keeping its font and text.
 pub unsafe fn tracked(v: *mut AnyObject, kern: f64) {
     let text: *mut AnyObject = msg_send![v, stringValue];
@@ -509,6 +508,7 @@ pub unsafe fn tracked(v: *mut AnyObject, kern: f64) {
     let cell: *mut AnyObject = msg_send![v, cell];
     let _: () = msg_send![cell, setLineBreakMode: 4usize];
 }
+/// Multi-line label that wraps (autoreleased).
 pub unsafe fn wrapping_label(text: &str, t: TypeStyle, c: Col, align: usize) -> *mut AnyObject {
     let v: *mut AnyObject = msg_send![class!(NSTextField), wrappingLabelWithString: ns(text)];
     let _: () = msg_send![v, setFont: font(t)];

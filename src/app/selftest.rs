@@ -3452,7 +3452,8 @@ fn s_signed_out() {
     unsafe {
         let ui = UI.get().unwrap();
         let c: *mut AnyObject = msg_send![ui.login_err.get(), textColor];
-        let sec: *mut AnyObject = msg_send![class!(NSColor), secondaryLabelColor];
+        // The secondary role resolves through the active palette (the default dark carries its own).
+        let sec = crate::ui::theme::color(crate::ui::theme::Col::Text2);
         // Theme colours are dynamic objects, so compare what they resolve to.
         state_check("signed-out message is neutral (secondary colour)", srgb(c) == srgb(sec));
         let t: *mut AnyObject = msg_send![ui.win.get(), title];
