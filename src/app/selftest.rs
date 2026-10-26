@@ -3827,6 +3827,9 @@ fn s_seerr_discover() {
         take_cmds();
         let ui = UI.get_mut().unwrap();
         ui.cfg.settings.seerr_enabled = true;
+        // Open Discover here rather than inheriting it from the previous step, so the shots show it.
+        act(sel!(requestsSelected:), nil());
+        state_check("discover opened before the rows load", seerr_on_screen());
     }
     for (row, results) in seerr_rows_fixture() {
         handle_main(MainMsg::SeerrDiscover {
@@ -3953,6 +3956,8 @@ fn s_seerr_tv_seasons() {
                 if media_type == "tv" && seasons == &vec![2, 3]),
         );
     }
+    // The reply resets the button from "Requesting…", as the server's answer would.
+    handle_main(MainMsg::SeerrRequested { title: "Fresh Show".into() });
     audit_both("title tv");
     unsafe {
         let ui = UI.get_mut().unwrap();
