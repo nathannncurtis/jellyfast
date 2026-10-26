@@ -5,7 +5,7 @@ use crate::app::library_query::{browse_query, filter_query, library_query};
 use crate::jellyfin::client::JellyfinClient;
 use crate::jellyfin::models::{DetailItem, Episode, FullItem, ListItem, Person, Season};
 use crate::jellyfin::segments::{self, NextUp, Segment};
-use crate::jellyfin::urls::{build_art_url, build_image_url};
+use crate::jellyfin::urls::{build_art_url, build_image_url, build_logo_url};
 use crate::config::{load_config, save_config, Config};
 use crate::seerr::client::{SeerrClient, SeerrError};
 
@@ -1123,6 +1123,10 @@ pub(crate) fn plan_detail(
     if let Some(k) = backdrop_key {
         jobs.push((k, build_art_url(&c.base, &d.id, "Backdrop", 1280, &c.token)));
     }
+    let logo_key = d.image_tags.as_ref().and_then(|t| t.logo.as_ref()).map(|_| sys_key(&format!("{}#logo", d.id)));
+    if let Some(k) = logo_key {
+        jobs.push((k, build_logo_url(&c.base, &d.id, &c.token, 800)));
+    }
     let people = d
         .people
         .iter()
@@ -1147,9 +1151,16 @@ pub(crate) fn plan_detail(
     let played = d.user_data.as_ref().map(|u| u.played).unwrap_or(false);
     let position = d.user_data.as_ref().map(|u| u.position_ticks).unwrap_or(0);
     let trailer_urls = d.remote_trailers.iter().map(|t| t.url.clone()).filter(|u| !u.trim().is_empty()).collect();
+    // Similar titles reuse their poster artwork key, so a poster already shown elsewhere is not fetched twice.
     let similar = similar
         .into_iter()
-        .map(|i| SimilarItem { id: i.id, name: i.name, year: i.year })
+        .map(|i| {
+            let image_key = i.image_tags.as_ref().and_then(|t| t.primary.as_ref()).map(|_| sys_key(&i.id));
+            if let Some(k) = image_key {
+                jobs.push((k, build_image_url(&c.base, &i.id, &c.token, 400)));
+            }
+            SimilarItem { id: i.id, name: i.name, year: i.year, image_key }
+        })
         .collect();
     let next_up = next_up.map(|e| NextUpEpisode {
         id: e.id,
@@ -1174,6 +1185,7 @@ pub(crate) fn plan_detail(
         resume_ticks: if played { 0 } else { position },
         poster_key,
         backdrop_key,
+        logo_key,
         people,
         trailer_urls,
         tagline: d.taglines.first().filter(|t| !t.trim().is_empty()).cloned(),

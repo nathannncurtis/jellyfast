@@ -203,6 +203,7 @@ fn steps() -> Vec<Step> {
         ("detail: series page", s_detail_series, 150),
         ("detail: seasons (picker, episodes, play)", s_detail_seasons, 300),
         ("detail: error toast", s_detail_error, 50),
+        ("detail: streaming layout (movie, resume, series, similar, actions)", s_detail_streaming, 400),
         ("cast: detail Cast button and Play On menu", s_cast_detail, 150),
         ("cast: remote bar controls and audit", s_cast_bar, 200),
         ("cast: error strip in the library", s_cast_error, 150),
@@ -674,6 +675,31 @@ fn image_bytes(kind: usize, w: usize, h: usize, shade: u8) -> Vec<u8> {
         v
     }
 }
+/// A title logo like the ones Jellyfin serves: a transparent PNG with white lettering on
+/// it, so the backdrop shows through and the page's logo path is what draws the title.
+fn logo_bytes() -> Vec<u8> {
+    unsafe {
+        let size = NSSize { w: 800.0, h: 200.0 };
+        let img: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let img: *mut AnyObject = msg_send![img, initWithSize: size];
+        let _: () = msg_send![img, lockFocus];
+        let font: *mut AnyObject = msg_send![class!(NSFont), boldSystemFontOfSize: 96.0f64];
+        let color: *mut AnyObject = msg_send![class!(NSColor), whiteColor];
+        let vals = [font, color];
+        let keys = [ns("NSFont"), ns("NSColor")];
+        let attrs: *mut AnyObject = msg_send![class!(NSDictionary), dictionaryWithObjects: vals.as_ptr(), forKeys: keys.as_ptr(), count: 2usize];
+        let text = ns("Logo Title");
+        let _: () = msg_send![text, drawAtPoint: NSPoint { x: 16.0, y: 48.0 }, withAttributes: attrs];
+        let _: () = msg_send![img, unlockFocus];
+        let tiff: *mut AnyObject = msg_send![img, TIFFRepresentation];
+        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff];
+        let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
+        let data: *mut AnyObject = msg_send![rep, representationUsingType: 4usize, properties: props]; // PNG
+        let len: usize = msg_send![data, length];
+        let p: *const std::ffi::c_void = msg_send![data, bytes];
+        std::slice::from_raw_parts(p as *const u8, len).to_vec()
+    }
+}
 fn video_url() -> String {
     let path = std::env::var("JELLYFAST_SELFTEST_VIDEO").unwrap_or_else(|_| {
         concat!(env!("CARGO_MANIFEST_DIR"), "/assets/selftest.mp4").into()
@@ -845,6 +871,14 @@ unsafe fn collect_text_windowrects(v: *mut AnyObject, out: &mut Vec<(*mut AnyObj
         collect_text_windowrects(c, out);
     }
 }
+/// The detail page's Back button, which floats over its scrolled content.
+unsafe fn is_back_control(v: *mut AnyObject) -> bool {
+    if !is_kind(v, class!(NSButton)) {
+        return false;
+    }
+    let a: Sel = msg_send![v, action];
+    a == sel!(detailBack:)
+}
 unsafe fn audit_global_overlap_in(root: *mut AnyObject, issues: &mut Vec<String>) {
     let mut items = vec![];
     collect_text_windowrects(root, &mut items);
@@ -857,6 +891,11 @@ unsafe fn audit_global_overlap_in(root: *mut AnyObject, issues: &mut Vec<String>
             let sb: *mut AnyObject = msg_send![vb, superview];
             if anc_a == Bool::YES || anc_b == Bool::YES || sa == sb {
                 continue; // siblings are covered by audit_view
+            }
+            // The window's Back control floats over scrolled detail content on its own backing,
+            // so text that scrolls beneath it is covered by it, not colliding with readable text.
+            if is_back_control(va) || is_back_control(vb) {
+                continue;
             }
             let ox = (a.origin.x + a.size.w).min(b.origin.x + b.size.w) - a.origin.x.max(b.origin.x);
             let oy = (a.origin.y + a.size.h).min(b.origin.y + b.size.h) - a.origin.y.max(b.origin.y);
@@ -1863,11 +1902,12 @@ fn detail_view(series: bool) -> DetailView {
         resume_ticks: 0,
         poster_key: Some(poster_key(id)),
         backdrop_key: Some(poster_key(&format!("{}#backdrop", id))),
+        logo_key: None,
         people: detail_people(14),
         trailer_urls: Vec::new(),
-        tagline: None,
-        critic_rating: None,
-        badges: Vec::new(),
+        tagline: Some("Every story has a beginning, a middle and a reason to stay.".into()),
+        critic_rating: Some(91.0),
+        badges: vec!["4K", "HDR", "Atmos", "CC"],
         is_favorite: false,
         similar: Vec::new(),
         next_up: None,
@@ -1876,6 +1916,28 @@ fn detail_view(series: bool) -> DetailView {
 /// Send `sel` to a page view (its own target), like a click would.
 unsafe fn act_on(target: *mut AnyObject, sel: Sel) {
     let _: *mut AnyObject = msg_send![target, performSelector: sel, withObject: nil()];
+}
+/// Similar titles for the More Like This row; every other one has a poster.
+fn detail_similar(n: usize) -> Vec<SimilarItem> {
+    (0..n)
+        .map(|i| SimilarItem {
+            id: format!("sim-{}", i),
+            name: format!("Similar Title {} With A Long Name", i),
+            year: Some(2000 + i as u32),
+            image_key: if i % 2 == 0 { Some(poster_key(&format!("sim-{}", i))) } else { None },
+        })
+        .collect()
+}
+/// A Next Up episode, `pos` ticks into it.
+fn detail_next_up(pos: i64) -> NextUpEpisode {
+    NextUpEpisode {
+        id: "detail-next".into(),
+        name: "The Next One".into(),
+        season: Some(2),
+        number: Some(4),
+        position_ticks: pos,
+        run_time_ticks: Some(36_000_000_000),
+    }
 }
 fn detail_host() -> *mut AnyObject {
     unsafe { UI.get().unwrap().detail.host.get() }
@@ -1889,14 +1951,13 @@ fn s_detail_movie() {
         state_check("detail host shown", !is_hidden(detail_host()));
         state_check("library header hidden", is_hidden(ui.header.get()));
         state_check("library grid hidden", is_hidden(ui.lib_scroll.get()));
-        state_check("poster, backdrop and portraits laid out", crate::ui::detail::target_count() == 2 + 7);
+        state_check("backdrop and portraits laid out", crate::ui::detail::target_count() == 1 + 7);
         state_check("backdrop waits for its image", crate::ui::detail::art_filled(poster_key("detail-long#backdrop")) == Some(false));
     }
     handle_main(MainMsg::PosterReady { key: poster_key("detail-long#backdrop"), bytes: image_bytes(0, 640, 360, 90) });
     handle_main(MainMsg::PosterReady { key: poster_key("detail-long"), bytes: image_bytes(0, 200, 300, 200) });
     handle_main(MainMsg::PosterReady { key: poster_key("person-0"), bytes: image_bytes(1, 96, 96, 120) });
     state_check("backdrop fills on arrival", crate::ui::detail::art_filled(poster_key("detail-long#backdrop")) == Some(true));
-    state_check("poster fills on arrival", crate::ui::detail::art_filled(poster_key("detail-long")) == Some(true));
     state_check("portrait fills on arrival", crate::ui::detail::art_filled(poster_key("person-0")) == Some(true));
     state_check("portrait without image has no artwork view", crate::ui::detail::art_filled(poster_key("person-1")).is_none());
     unsafe {
@@ -1918,6 +1979,136 @@ fn s_detail_movie() {
     }
     audit_both("detail movie");
 }
+/// The series page's seasons and episodes: season 2 selected, its E4 the Next Up episode
+/// (`pos` ticks in), with 16:9 thumbnails so the rows look as they do with artwork.
+fn load_series_seasons(pos: i64) {
+    handle_main(MainMsg::SeasonsLoaded { series_id: "detail-series".into(), seasons: season_entries(3), selected: 1 });
+    let mut eps = episode_rows(6, "s2");
+    for (i, ep) in eps.iter_mut().enumerate() {
+        let key = poster_key(&format!("s2-ep{}", i + 1));
+        ep.image_key = Some(key);
+        handle_main(MainMsg::PosterReady { key, bytes: image_bytes(0, 320, 180, (60 + i * 30) as u8) });
+    }
+    eps[3].id = "detail-next".into();
+    eps[3].position_ticks = pos;
+    handle_main(MainMsg::SeasonEpisodesLoaded {
+        series_id: "detail-series".into(),
+        season_id: "sea-2".into(),
+        episodes: eps,
+    });
+}
+
+/// Scroll the detail page so the section headed `text` sits just under the title bar, where
+/// the scrolled content must not run beneath the window's own controls.
+fn scroll_detail_to_text(text: &str) {
+    unsafe {
+        let ui = UI.get().unwrap();
+        let doc = ui.detail.doc.get();
+        let subs: *mut AnyObject = msg_send![doc, subviews];
+        let n: usize = msg_send![subs, count];
+        for i in 0..n {
+            let v: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+            if is_kind(v, class!(NSTextField)) && to_str(msg_send![v, stringValue]) == text {
+                let f: NSRect = msg_send![v, frame];
+                let scroll = ui.detail.scroll.get();
+                let clip: *mut AnyObject = msg_send![scroll, contentView];
+                let want = NSPoint { x: 0.0, y: f.origin.y - crate::ui::theme::TITLEBAR_H - 16.0 };
+                let p: NSPoint = msg_send![clip, constrainScrollPoint: want];
+                let _: () = msg_send![clip, scrollToPoint: p];
+                let _: () = msg_send![scroll, reflectScrolledClipView: clip];
+                return;
+            }
+        }
+        state_check(&format!("detail page has a '{}' section to scroll to", text), false);
+    }
+}
+
+/// Audit a detail page scrolled to the section `text`, at the min and the large size,
+/// so the screenshots show that section and not only the top of the page.
+fn audit_scrolled(tag: &str, text: &str) {
+    set_content_size(960.0, 600.0);
+    scroll_detail_to_text(text);
+    audit(&format!("{} @min", tag));
+    set_content_size(1700.0, 1000.0);
+    scroll_detail_to_text(text);
+    audit(&format!("{} @large", tag));
+    set_content_size(1280.0, 800.0);
+}
+
+/// The streaming page in its states, each at the large and the min size: a movie with
+/// nothing to resume, a movie resuming with its logo, a series with Next Up, a series
+/// resuming, then a similar title opened and the favourite and trailer actions.
+fn s_detail_streaming() {
+    // Every other similar title has a poster; the rest show the placeholder.
+    for i in (0..7).step_by(2) {
+        handle_main(MainMsg::PosterReady { key: poster_key(&format!("sim-{}", i)), bytes: image_bytes(0, 200, 300, (40 + i * 20) as u8) });
+    }
+    let mut plain = detail_view(false);
+    plain.resume = false;
+    plain.resume_ticks = 0;
+    plain.trailer_urls = vec!["https://example.test/trailer".into()];
+    plain.similar = detail_similar(7);
+    handle_main(MainMsg::DetailLoaded(Box::new(plain)));
+    audit_both("detail movie plain");
+
+    let mut resume = detail_view(false);
+    resume.resume = true;
+    resume.resume_ticks = 37 * 600_000_000;
+    resume.logo_key = Some(poster_key("detail-long#logo"));
+    resume.similar = detail_similar(7);
+    handle_main(MainMsg::DetailLoaded(Box::new(resume)));
+    state_check("logo waits for its image", crate::ui::detail::art_filled(poster_key("detail-long#logo")) == Some(false));
+    audit_both("detail movie resuming, logo waiting");
+    handle_main(MainMsg::PosterReady { key: poster_key("detail-long#logo"), bytes: logo_bytes() });
+    state_check("logo fills on arrival", crate::ui::detail::art_filled(poster_key("detail-long#logo")) == Some(true));
+    audit_both("detail movie resuming");
+    audit_scrolled("detail movie cast", "Cast & Crew");
+    audit_scrolled("detail movie similar", "More Like This");
+
+    let mut series = detail_view(true);
+    series.next_up = Some(detail_next_up(0));
+    handle_main(MainMsg::DetailLoaded(Box::new(series)));
+    load_series_seasons(0);
+    audit_both("detail series next up");
+
+    let mut resuming = detail_view(true);
+    resuming.next_up = Some(detail_next_up(37 * 600_000_000));
+    resuming.similar = detail_similar(7);
+    resuming.trailer_urls = vec!["https://example.test/trailer".into()];
+    handle_main(MainMsg::DetailLoaded(Box::new(resuming)));
+    load_series_seasons(37 * 600_000_000);
+    audit_both("detail series resuming");
+    audit_scrolled("detail series episodes", "Episodes");
+    audit_scrolled("detail series similar", "More Like This");
+
+    unsafe {
+        let host = detail_host();
+        let ui = UI.get_mut().unwrap();
+        let play = find_titled(ui.detail.doc.get(), "Resume S2:E4 · 23m left");
+        state_check("series resume button names the Next Up episode", !play.is_null());
+        // A similar title's poster opens that title.
+        let btn = find_row_button(ui.detail.doc.get(), 2);
+        state_check("similar poster has a click target", !btn.is_null());
+        act_with(host, sel!(detailSimilar:), btn);
+        let cmds = take_cmds();
+        state_check(
+            "similar poster opens its title",
+            cmds.iter().any(|c| matches!(c, UiCmd::OpenDetail { item_id } if item_id == "sim-2")),
+        );
+        // Favourite flips the page and the server; the trailer button is live when a link exists.
+        act_on(host, sel!(detailFavorite:));
+        state_check("favourite flips on the page", UI.get().unwrap().detail.item.as_ref().map(|i| i.is_favorite) == Some(true));
+        state_check(
+            "favourite sends SetFavorite",
+            take_cmds().iter().any(|c| matches!(c, UiCmd::SetFavorite { item_id, favorite: true } if item_id == "detail-series")),
+        );
+        let tr = find_action(UI.get().unwrap().detail.doc.get(), sel!(detailTrailer:), 0);
+        let en: Bool = msg_send![tr, isEnabled];
+        state_check("trailer button is live with a link", en == Bool::YES);
+    }
+    crate::ui::detail::hide();
+}
+
 fn s_detail_resize() {
     set_content_size(960.0, 600.0);
     state_check("detail relaid out at min width", crate::ui::detail::layout_matches_clip());
@@ -1936,7 +2127,7 @@ fn s_detail_series() {
     unsafe {
         let ui = UI.get_mut().unwrap();
         state_check("series page open", crate::ui::detail::is_open());
-        state_check("series page has no artwork waiting", crate::ui::detail::art_filled(poster_key("detail-series")) == Some(false));
+        state_check("series page has no artwork waiting", crate::ui::detail::art_filled(poster_key("detail-series#backdrop")) == Some(false));
         let _ = ui;
     }
     audit_both("detail series");

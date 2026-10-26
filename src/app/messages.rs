@@ -387,6 +387,8 @@ pub struct DetailView {
     pub resume_ticks: i64,
     pub poster_key: Option<u64>,
     pub backdrop_key: Option<u64>,
+    /// Transparent title logo, drawn over the backdrop in place of the name.
+    pub logo_key: Option<u64>,
     pub people: Vec<DetailPerson>,
     /// Remote trailer links (YouTube and the like), in the server's order.
     pub trailer_urls: Vec<String>,
@@ -408,6 +410,8 @@ pub struct SimilarItem {
     pub id: String,
     pub name: String,
     pub year: Option<u32>,
+    /// Poster artwork key, when the title has a poster.
+    pub image_key: Option<u64>,
 }
 
 /// The Next Up episode of a series, with the saved position in it.
