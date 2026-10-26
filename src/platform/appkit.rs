@@ -443,6 +443,8 @@ pub struct Ui {
     pub pbar: crate::ui::playerbar::PlayerBar,
     /// Skip-segment button and Up Next card (see ui::skip).
     pub skip: crate::ui::skip::SkipUi,
+    /// Subtitle overlay above the video (see ui::subtitles).
+    pub subs: crate::ui::subtitles::SubtitleUi,
     /// Play On: cast menu state and the remote-control bar.
     pub cast: crate::ui::cast::CastUi,
     /// AirPlay card shown over the video while it plays on another screen.
@@ -620,6 +622,7 @@ pub(crate) unsafe fn register_classes() {
             (sel!(jrSkipSegment:), crate::ui::skip::skip_segment as Extern0),
             (sel!(jrUpNextPlay:), crate::ui::skip::up_next_play as Extern0),
             (sel!(jrUpNextCancel:), crate::ui::skip::up_next_cancel as Extern0),
+            (sel!(jrSkipHideDone:), crate::ui::skip::skip_hide_done as Extern0),
             (sel!(jrToggleSeriesSkip:), crate::ui::skip::toggle_series_skip as Extern0),
             (sel!(showCastMenu:), crate::ui::cast::show_menu as Extern0),
             (sel!(castPick:), crate::ui::cast::pick as Extern0),
@@ -645,6 +648,7 @@ pub(crate) unsafe fn register_classes() {
     crate::ui::detail::register_detail_classes();
     crate::ui::player::register_player_classes();
     crate::ui::playerbar::register_playerbar_classes();
+    crate::ui::skip::register_skip_classes();
     crate::ui::nowbar::register_nowbar_class();
     // Poster grid container
     {
@@ -1395,6 +1399,7 @@ pub unsafe fn bootstrap(cfg: Config, ui_tx: UnboundedSender<UiCmd>, main_tx: Unb
         now: crate::ui::nowbar::NowBar::new(),
         pbar: crate::ui::playerbar::PlayerBar::new(),
         skip: crate::ui::skip::SkipUi::new(),
+        subs: crate::ui::subtitles::SubtitleUi::new(),
         cast: crate::ui::cast::CastUi::new(),
         ext: crate::ui::player::ExtUi::new(),
         tint_cache: HashMap::new(),

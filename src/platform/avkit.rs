@@ -78,6 +78,7 @@ pub(crate) extern "C" fn tick(_this: *mut AnyObject, _cmd: Sel, _t: *mut AnyObje
         }
         crate::ui::nowbar::update(); // every tick (0.25 s while the bar shows)
         crate::ui::playerbar::update(); // video transport bar, same cadence
+        crate::ui::subtitles::update(); // overlay follows the controls and the skip stack
         if !crate::ui::nowbar::slow_due() {
             return;
         }
@@ -255,6 +256,7 @@ pub fn stop_playback_ui() {
         if ui.playing.is_none() {
             return; // nothing observed / nothing to tear down
         }
+        crate::ui::subtitles::detach();
         // Picture in Picture ends with the item; the controller itself stays with the player layer.
         crate::ui::playerbar::pip_stop();
         if !ui.pitem.get().is_null() {
@@ -303,6 +305,8 @@ pub(crate) unsafe fn clear_media_groups() {
 /// (scrubber, +/-10 s, resume, restart, skip) goes through here.
 pub(crate) unsafe fn seek_to_secs(secs: f64) {
     let ui = UI.get_mut().unwrap();
+    // The cue on screen belongs to the old position; AVPlayer sends the one for the new one.
+    crate::ui::subtitles::clear();
     let tm = CMTimeMakeWithSeconds(secs.max(0.), 600);
     let zero = CMTimeMakeWithSeconds(0.0, 600);
     let _: () = msg_send![ui.player.get(), seekToTime: tm, toleranceBefore: zero, toleranceAfter: zero];
@@ -378,6 +382,10 @@ pub(crate) unsafe fn cycle(which: usize) {
 /// Shared by the keyboard cycle and the transport bar's menus.
 pub(crate) unsafe fn set_track(which: usize, idx: usize) {
     let ui = UI.get_mut().unwrap();
+    if which == 0 {
+        // A new choice (or Off): the cue on screen belongs to the old one.
+        crate::ui::subtitles::clear();
+    }
     let (group, count) = if which == 0 {
         (ui.sub_group, ui.sub_opts.len())
     } else {
@@ -459,6 +467,7 @@ pub fn start_playback(ps: &PlaybackStart) {
             let _ = ui.main_tx.send(MainMsg::PlaybackError("could not create player item".into()));
             return;
         }
+        crate::ui::subtitles::attach(item);
         let _: () = msg_send![ui.player.get(), replaceCurrentItemWithPlayerItem: item];
         ui.pitem = Ptr::retained(item);
         for kp in ["status", "presentationSize"] {
@@ -591,6 +600,7 @@ pub(crate) unsafe fn drop_replace_item(url: &str, resume: f64) {
         }
     }
     let item: *mut AnyObject = msg_send![class!(AVPlayerItem), playerItemWithURL: u];
+    crate::ui::subtitles::attach(item);
     clear_media_groups();
     let _: () = msg_send![ui.player.get(), replaceCurrentItemWithPlayerItem: item];
     if !ui.pitem.get().is_null() {

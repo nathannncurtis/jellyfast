@@ -7,7 +7,7 @@
 //! writes at the end of an episode (stopped, marked watched) and then asks for the next one.
 //! Per-playback state lives in `PlayingNow.skip`; the views live in `Ui.skip`.
 #![allow(unsafe_code)]
-use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{class, msg_send, sel};
 use crate::app::messages::{MediaKind, PlaybackStart, UiCmd};
 use crate::config::{set_skip_intros, skip_intros_for};
@@ -17,21 +17,40 @@ use crate::platform::appkit::*;
 use crate::ui::player::{fade, toast};
 use crate::ui::shell::is_hidden;
 use crate::ui::theme::*;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 /// The skip button stays up this long after segment entry or the last pointer movement.
 const BUTTON_IDLE: f64 = 8.0;
 /// A skip seek is in flight for this long; the old position may still read back meanwhile.
 const SEEK_SETTLE: f64 = 1.0;
-const BUTTON_H: f64 = 36.;
-const CARD_W: f64 = 340.;
-const CARD_H: f64 = 112.;
+/// Skip button height: above the 44 pt minimum for a pointer target.
+const BUTTON_H: f64 = 48.;
+/// Horizontal padding inside the skip button, either side of its label and icon.
+const BTN_PAD: f64 = SP6;
+/// Corner radius shared by the skip button, the Up Next card and the toast.
+const PANEL_R: f64 = 12.;
+/// Gap between the skip button and the right edge of the video.
+const EDGE: f64 = SP8;
+/// Gap between the skip button and the top of the transport bar.
+const RISE: f64 = SP4;
+const CARD_W: f64 = 360.;
+const CARD_H: f64 = 120.;
+const CARD_PAD: f64 = SP4;
 const THUMB_W: f64 = 120.;
 const THUMB_H: f64 = 68.;
 /// Left edge of the card's text column: thumbnail, gap, padding.
-const TEXT_X: f64 = SP3 + THUMB_W + SP3;
+const TEXT_X: f64 = CARD_PAD + THUMB_W + SP3;
 const BTN_PLAY_W: f64 = 92.;
 const BTN_CANCEL_W: f64 = 72.;
+/// Border and wash alphas (white over the HUD material): rest, hover, and pressed darkening.
+const BORDER_REST: f64 = 0.20;
+const BORDER_HOVER: f64 = 0.36;
+const WASH_HOVER: f64 = 0.10;
+const PRESS_DARKEN: f64 = 0.24;
+/// Skip button label: a step above body text, so it reads as the primary control.
+const T_SKIP: TypeStyle = TypeStyle { size: 17., weight: Weight::Semibold, mono: false };
+static SKIP_BTN_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 
 /// Playback-scoped state. Reset by `start` for every item.
 #[derive(Default)]
@@ -86,77 +105,173 @@ impl SkipUi {
     }
 }
 
+/// A frosted HUD panel: dark vibrancy, active state, continuous rounded corners, 1 px light border.
+/// Player overlays stay light-on-dark in both appearances, so the panel pins a dark appearance.
+pub(crate) unsafe fn hud_panel(r: f64) -> *mut AnyObject {
+    let v = vev(MAT_HUD, BLEND_WITHIN);
+    let _: () = msg_send![v, setState: 1i64]; // active: the panel stays frosted when the window is inactive
+    let dark: *mut AnyObject = msg_send![class!(NSAppearance), appearanceNamed: ns("NSAppearanceNameDarkAqua")];
+    let _: () = msg_send![v, setAppearance: dark];
+    let l = layer_of(v);
+    set_corner(l, r);
+    let _: () = msg_send![l, setMasksToBounds: Bool::YES];
+    let _: () = msg_send![l, setBorderWidth: 1.0f64];
+    let _: () = msg_send![l, setBorderColor: cg_white(BORDER_REST)];
+    v
+}
+
+/// White, or black, at `a` alpha, as a CGColor for a layer.
+unsafe fn cg_rgba(r: f64, a: f64) -> *mut CGColor {
+    let c: *mut AnyObject = msg_send![class!(NSColor), colorWithSRGBRed: r, green: r, blue: r, alpha: a];
+    msg_send![c, CGColor]
+}
+unsafe fn cg_white(a: f64) -> *mut CGColor {
+    cg_rgba(1.0, a)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Press {
+    Rest,
+    Hover,
+    Down,
+}
+
+/// Paints the skip button for a pointer state: its own layer carries the wash, the panel carries the border.
+unsafe fn paint_button(btn: *mut AnyObject, state: Press) {
+    let (wash, border) = match state {
+        Press::Rest => (cg_white(0.0), BORDER_REST),
+        Press::Hover => (cg_white(WASH_HOVER), BORDER_HOVER),
+        Press::Down => (cg_rgba(0.0, PRESS_DARKEN), BORDER_REST),
+    };
+    let _: () = msg_send![layer_of(btn), setBackgroundColor: wash];
+    let pill: *mut AnyObject = msg_send![btn, superview];
+    if !pill.is_null() {
+        let _: () = msg_send![layer_of(pill), setBorderColor: cg_white(border)];
+    }
+}
+
+/// The skip button: a borderless button that does its own hover, press and pointing-hand cursor.
+pub(crate) unsafe fn register_skip_classes() {
+    let mut d = ClassBuilder::new(c"JRSkipButton", class!(NSButton)).unwrap();
+    d.add_method(sel!(mouseEntered:), btn_enter as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    d.add_method(sel!(mouseExited:), btn_exit as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    d.add_method(sel!(mouseDown:), btn_down as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+    d.add_method(sel!(resetCursorRects), btn_cursor as extern "C" fn(*mut AnyObject, Sel));
+    SKIP_BTN_CLASS.set(d.register()).ok();
+}
+extern "C" fn btn_enter(this: *mut AnyObject, _c: Sel, _ev: *mut AnyObject) {
+    unsafe { paint_button(this, Press::Hover) }
+}
+extern "C" fn btn_exit(this: *mut AnyObject, _c: Sel, _ev: *mut AnyObject) {
+    unsafe { paint_button(this, Press::Rest) }
+}
+extern "C" fn btn_down(this: *mut AnyObject, _c: Sel, ev: *mut AnyObject) {
+    unsafe {
+        paint_button(this, Press::Down);
+        let _: () = msg_send![super(this, class!(NSButton)), mouseDown: ev];
+        // After the click: hover if the pointer is still over the button, otherwise rest.
+        let win: *mut AnyObject = msg_send![this, window];
+        let mut inside = false;
+        if !win.is_null() {
+            let m: NSPoint = msg_send![win, mouseLocationOutsideOfEventStream];
+            let p: NSPoint = msg_send![this, convertPoint: m fromView: nil()];
+            let b: NSRect = msg_send![this, bounds];
+            inside = p.x >= b.origin.x && p.x <= b.origin.x + b.size.w && p.y >= b.origin.y && p.y <= b.origin.y + b.size.h;
+        }
+        paint_button(this, if inside { Press::Hover } else { Press::Rest });
+    }
+}
+extern "C" fn btn_cursor(this: *mut AnyObject, _c: Sel) {
+    unsafe {
+        let cur: *mut AnyObject = msg_send![class!(NSCursor), pointingHandCursor];
+        let b: NSRect = msg_send![this, bounds];
+        let _: () = msg_send![this, addCursorRect: b cursor: cur];
+    }
+}
+
 /// Builds the skip button and the Up Next card inside the player host, above the transport bar.
 pub(crate) unsafe fn build(ph: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
 
-    // Up Next card: bottom right, just above the transport bar.
-    let card = vev(MAT_HUD, BLEND_WITHIN);
-    set_frame(card, rect(b.size.w - SP5 - CARD_W, PLAYER_CTRL_H + SP3, CARD_W, CARD_H));
+    // Up Next card: bottom right, inset like the skip button, just above the transport bar.
+    let card = hud_panel(PANEL_R);
+    set_frame(card, rect(b.size.w - EDGE - CARD_W, PLAYER_CTRL_H + RISE, CARD_W, CARD_H));
     set_autoresize(card, MARGIN_MINX | MARGIN_MAXY);
-    let cl = layer_of(card);
-    set_corner(cl, R_CARD);
-    let _: () = msg_send![cl, setMasksToBounds: Bool::YES];
     set_hidden(card, true);
     add_sub(ph, card);
     ui.skip.card = Ptr(card);
 
     let thumb: *mut AnyObject = msg_send![class!(NSImageView), alloc];
-    let thumb: *mut AnyObject = autorel(msg_send![thumb, initWithFrame: rect(SP3, (CARD_H - THUMB_H) / 2., THUMB_W, THUMB_H)]);
+    let thumb: *mut AnyObject = autorel(msg_send![thumb, initWithFrame: rect(CARD_PAD, (CARD_H - THUMB_H) / 2., THUMB_W, THUMB_H)]);
     let _: () = msg_send![thumb, setImageScaling: 3isize];
     set_corner(layer_of(thumb), R_THUMB);
     add_sub(card, thumb);
     ui.skip.thumb = Ptr(thumb);
 
-    let text_w = CARD_W - TEXT_X - SP3;
+    let text_w = CARD_W - TEXT_X - CARD_PAD;
+    // Type scale: kicker 11 semibold, title 15 semibold, detail 12 regular.
     let kicker = label("UP NEXT", T_CAPTION_EM, C_ON_MEDIA2, ALIGN_LEFT);
-    set_frame(kicker, rect(TEXT_X, CARD_H - SP3 - 14., text_w, 14.));
+    set_frame(kicker, rect(TEXT_X, CARD_H - CARD_PAD - 14., text_w, 14.));
     add_sub(card, kicker);
-    let title = label("", T_BODY_EM, C_ON_MEDIA, ALIGN_LEFT);
-    set_frame(title, rect(TEXT_X, CARD_H - SP3 - 14. - SP1 - 18., text_w, 18.));
+    let title = label("", T_HEADLINE, C_ON_MEDIA, ALIGN_LEFT);
+    set_frame(title, rect(TEXT_X, CARD_H - CARD_PAD - 14. - SP1 - 20., text_w, 20.));
     add_sub(card, title);
     ui.skip.title = Ptr(title);
-    let count = label("", T_CAPTION, C_ON_MEDIA2, ALIGN_LEFT);
-    // Under the buttons (which are 26 pt tall, from SP3), and clear of the title above.
-    set_frame(count, rect(TEXT_X, SP3 + 26. + SP2, text_w, 14.));
+    let count = label("", T_CALLOUT, C_ON_MEDIA2, ALIGN_LEFT);
+    // Between the title and the buttons (which are 26 pt tall, from CARD_PAD).
+    set_frame(count, rect(TEXT_X, CARD_PAD + 26. + SP2, text_w, 15.));
     add_sub(card, count);
     ui.skip.count = Ptr(count);
 
     let play: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Play Now"), target: ui.ctl.get(), action: sel!(jrUpNextPlay:)];
     let _: () = msg_send![play, setBezelStyle: 1isize];
     let _: () = msg_send![play, setKeyEquivalent: ns("\r")];
-    set_frame(play, rect(TEXT_X, SP3, BTN_PLAY_W, 26.));
+    set_frame(play, rect(TEXT_X, CARD_PAD, BTN_PLAY_W, 26.));
     add_sub(card, play);
     ui.skip.play = Ptr(play);
     let cancel: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Cancel"), target: ui.ctl.get(), action: sel!(jrUpNextCancel:)];
     let _: () = msg_send![cancel, setBezelStyle: 1isize];
-    set_frame(cancel, rect(TEXT_X + BTN_PLAY_W + SP2, SP3, BTN_CANCEL_W, 26.));
+    set_frame(cancel, rect(TEXT_X + BTN_PLAY_W + SP2, CARD_PAD, BTN_CANCEL_W, 26.));
     add_sub(card, cancel);
     ui.skip.cancel = Ptr(cancel);
 
-    // Skip button: a HUD pill holding a borderless button, like the toast.
-    let pill = vev(MAT_HUD, BLEND_WITHIN);
-    set_frame(pill, rect(b.size.w - SP5 - 160., PLAYER_CTRL_H + SP3, 160., BUTTON_H));
+    // Skip button: a HUD panel holding the button, inset 1 pt so the panel's border shows around it.
+    let pill = hud_panel(PANEL_R);
+    set_frame(pill, rect(b.size.w - EDGE - 160., PLAYER_CTRL_H + RISE, 160., BUTTON_H));
     set_autoresize(pill, MARGIN_MINX | MARGIN_MAXY);
-    let pl = layer_of(pill);
-    set_corner(pl, BUTTON_H / 2.);
-    let _: () = msg_send![pl, setMasksToBounds: Bool::YES];
     set_hidden(pill, true);
     add_sub(ph, pill);
     ui.skip.pill = Ptr(pill);
 
-    let btn: *mut AnyObject = msg_send![class!(NSButton), buttonWithTitle: ns("Skip Intro"), target: ui.ctl.get(), action: sel!(jrSkipSegment:)];
+    let cls = *SKIP_BTN_CLASS.get().unwrap();
+    let btn: *mut AnyObject = msg_send![cls, alloc];
+    let btn: *mut AnyObject = autorel(msg_send![btn, initWithFrame: rect(1., 1., 158., BUTTON_H - 2.)]);
+    let _: () = msg_send![btn, setTitle: ns("Skip Intro")];
+    let _: () = msg_send![btn, setTarget: ui.ctl.get()];
+    let _: () = msg_send![btn, setAction: sel!(jrSkipSegment:)];
     let _: () = msg_send![btn, setBordered: Bool::NO];
-    let img = symbol("forward.end.fill", 12., Weight::Semibold);
+    let _: () = msg_send![btn, setFocusRingType: 1isize]; // none: the press and hover states already show it
+    let _: () = msg_send![btn, setFont: font(T_SKIP)];
+    let _: () = msg_send![btn, setImageHugsTitle: Bool::YES];
+    // Trailing symbol, at the label's weight.
+    let img = symbol("forward.end.fill", 15., Weight::Semibold);
     if !img.is_null() {
         let _: () = msg_send![btn, setImage: img];
     }
-    let _: () = msg_send![btn, setImagePosition: 7isize];
+    let _: () = msg_send![btn, setImagePosition: 3isize]; // NSImageRight: the symbol trails the label
     let _: () = msg_send![btn, setContentTintColor: color(C_ON_MEDIA)];
-    let _: () = msg_send![btn, setFont: font(T_BODY_EM)];
     let _: () = msg_send![btn, setToolTip: ns("Skip this part (S). Right-click for more.")];
-    set_frame(btn, rect(0., 0., 160., BUTTON_H));
+    let bl = layer_of(btn);
+    set_corner(bl, PANEL_R - 1.);
+    let _: () = msg_send![bl, setMasksToBounds: Bool::YES];
     set_autoresize(btn, RESIZE_W | RESIZE_H);
+    // Hover is tracked over the whole button; the cursor comes from resetCursorRects.
+    let ta: *mut AnyObject = msg_send![class!(NSTrackingArea), alloc];
+    let ta: *mut AnyObject = msg_send![ta,
+        initWithRect: rect(0., 0., 0., 0.)
+        options: (0x01usize | 0x80usize | 0x200usize) owner: btn userInfo: nil()];
+    let _: () = msg_send![btn, addTrackingArea: ta];
+    autorel(ta);
     add_sub(pill, btn);
     ui.skip.button = Ptr(btn);
 
@@ -225,31 +340,73 @@ pub(crate) unsafe fn stop() {
 /// Hide both views at once, without animation.
 unsafe fn reset_views() {
     let ui = UI.get_mut().unwrap();
-    set_hidden(ui.skip.pill.get(), true);
-    set_hidden(ui.skip.card.get(), true);
-}
-
-/// Show or hide a view. Showing fades in; hiding removes it at once so it cannot take clicks.
-unsafe fn set_shown(v: *mut AnyObject, on: bool) {
-    if on {
-        if is_hidden(v) {
-            let _: () = msg_send![v, setAlphaValue: 0.0f64];
-            set_hidden(v, false);
-            fade(v, 1.0, M_FAST);
-        }
-    } else if !is_hidden(v) {
+    for v in [ui.skip.pill.get(), ui.skip.card.get()] {
+        cancel_hide(v);
         set_hidden(v, true);
     }
 }
 
-/// Stacks the skip button above the card while the card is up, otherwise at the bar's top edge.
-unsafe fn place_pill(pill_w: Option<f64>) {
+/// A view that is visible to the pointer: unhidden and not fading out.
+unsafe fn shown(v: *mut AnyObject) -> bool {
+    if v.is_null() || is_hidden(v) {
+        return false;
+    }
+    let a: f64 = msg_send![v, alphaValue];
+    a > 0.01
+}
+
+unsafe fn cancel_hide(v: *mut AnyObject) {
+    let ctl = UI.get().unwrap().ctl.get();
+    let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: ctl
+        selector: sel!(jrSkipHideDone:) object: v];
+}
+
+/// Show or hide a view. Both fade over M_STD. A hidden view is then removed, so it cannot take clicks.
+unsafe fn set_shown(v: *mut AnyObject, on: bool) {
+    if v.is_null() {
+        return;
+    }
+    cancel_hide(v);
+    if on {
+        if is_hidden(v) {
+            let _: () = msg_send![v, setAlphaValue: 0.0f64];
+            set_hidden(v, false);
+        }
+        let a: f64 = msg_send![v, alphaValue];
+        if a < 1.0 {
+            fade(v, 1.0, M_STD);
+        }
+    } else if !is_hidden(v) {
+        let a: f64 = msg_send![v, alphaValue];
+        if a > 0.0 {
+            fade(v, 0.0, M_STD);
+            let ctl = UI.get().unwrap().ctl.get();
+            let _: () = msg_send![ctl, performSelector: sel!(jrSkipHideDone:) withObject: v afterDelay: M_STD];
+        } else {
+            set_hidden(v, true);
+        }
+    }
+}
+
+/// Runs once a fade-out has finished: removes the view unless it was shown again meanwhile.
+pub(crate) extern "C" fn skip_hide_done(_t: *mut AnyObject, _c: Sel, v: *mut AnyObject) {
+    unsafe {
+        let a: f64 = msg_send![v, alphaValue];
+        if a < 0.01 {
+            set_hidden(v, true);
+        }
+    }
+}
+
+/// Places the skip button at the bottom right, EDGE in from the right and RISE above the transport bar.
+/// While the Up Next card is up, the button lifts above it.
+unsafe fn place_pill(pill_w: Option<f64>, card_on: bool) {
     let ui = UI.get_mut().unwrap();
     let f = frame_of(ui.skip.pill.get());
     let w = pill_w.unwrap_or(f.size.w);
-    let lift = if is_hidden(ui.skip.card.get()) { 0. } else { CARD_H + SP2 };
-    let x = bounds_of(ui.player_host.get()).size.w - SP5 - w;
-    set_frame(ui.skip.pill.get(), rect(x, PLAYER_CTRL_H + SP3 + lift, w, BUTTON_H));
+    let lift = if card_on { CARD_H + SP2 } else { 0. };
+    let x = bounds_of(ui.player_host.get()).size.w - EDGE - w;
+    set_frame(ui.skip.pill.get(), rect(x, PLAYER_CTRL_H + RISE + lift, w, BUTTON_H));
 }
 
 /// Keeps the context-menu item in step with the current item's show.
@@ -319,17 +476,18 @@ pub(crate) unsafe fn update() {
     let skip_label = cur_seg.and_then(|s| s.kind.skip_label());
     let entered_age = st.entered.map(|t| t.elapsed().as_secs_f64()).unwrap_or(f64::MAX);
     let button_on = skip_label.is_some() && !auto_skipped && (entered_age < BUTTON_IDLE || mouse_age < BUTTON_IDLE);
+    let card_before = st.card_shown && !st.cancelled && !st.advancing;
     if let Some(label) = skip_label {
         if label != st.button_label {
             st.button_label = label;
             let btn = ui.skip.button.get();
             let _: () = msg_send![btn, setTitle: ns(label)];
-            // Size from the cell's own content (icon and title), then fit the button to the pill.
+            // Size from the cell's own content (icon and title) plus the padding, then fit the panel to it.
             let cell: *mut AnyObject = msg_send![btn, cell];
             let content: NSSize = msg_send![cell, cellSize];
-            let w = content.w.ceil() + 2. * SP4;
-            place_pill(Some(w));
-            set_frame(btn, rect(0., 0., w, BUTTON_H));
+            let w = (content.w.ceil() + 2. * BTN_PAD + 2.).max(BUTTON_H);
+            place_pill(Some(w), card_before);
+            set_frame(btn, rect(1., 1., w - 2., BUTTON_H - 2.));
         }
     }
 
@@ -374,12 +532,9 @@ pub(crate) unsafe fn update() {
     }
 
     let card_on = st.card_shown && !st.cancelled && !st.advancing;
-    let was_card = !is_hidden(ui.skip.card.get());
     set_shown(ui.skip.card.get(), card_on);
-    if card_changed || was_card != card_on {
-        place_pill(None);
-    }
     set_shown(ui.skip.pill.get(), button_on);
+    place_pill(None, card_on);
 
     if auto_skipped {
         toast("Skipped intro", Some("forward.end"), false);
@@ -471,7 +626,7 @@ pub(crate) extern "C" fn up_next_cancel(_t: *mut AnyObject, _c: Sel, _s: *mut An
             pn.skip.card_shown = false;
         }
         set_shown(ui.skip.card.get(), false);
-        place_pill(None);
+        place_pill(None, false);
     }
 }
 
@@ -508,15 +663,49 @@ pub(crate) extern "C" fn toggle_series_skip(_t: *mut AnyObject, _c: Sel, _s: *mu
 /// Test hooks (self-test): what the overlay shows right now.
 pub(crate) unsafe fn button_visible() -> bool {
     let ui = UI.get().unwrap();
-    !is_hidden(ui.skip.pill.get()) && !ui.skip.pill.get().is_null()
+    shown(ui.skip.pill.get())
 }
 pub(crate) unsafe fn button_label() -> String {
     let ui = UI.get().unwrap();
     to_str(msg_send![ui.skip.button.get(), title])
 }
+/// Geometry of the skip button, for the self-test: sizes in pt, and the gaps to the video's edges.
+pub(crate) struct ButtonMetrics {
+    pub pill_h: f64,
+    pub btn_h: f64,
+    pub label_fits: bool,
+    pub right_gap: f64,
+    pub bottom_gap: f64,
+}
+pub(crate) unsafe fn button_metrics() -> ButtonMetrics {
+    let ui = UI.get().unwrap();
+    let pill = frame_of(ui.skip.pill.get());
+    let btn: *mut AnyObject = ui.skip.button.get();
+    let bf: NSRect = msg_send![btn, frame];
+    let cell: *mut AnyObject = msg_send![btn, cell];
+    let content: NSSize = msg_send![cell, cellSize];
+    let host = bounds_of(ui.player_host.get());
+    ButtonMetrics {
+        pill_h: pill.size.h,
+        btn_h: bf.size.h,
+        // The label fits when its natural width leaves the padding on both sides.
+        label_fits: content.w + 2. * BTN_PAD <= bf.size.w + 0.5,
+        right_gap: host.size.w - (pill.origin.x + pill.size.w),
+        bottom_gap: pill.origin.y - PLAYER_CTRL_H,
+    }
+}
 pub(crate) unsafe fn card_visible() -> bool {
     let ui = UI.get().unwrap();
-    !is_hidden(ui.skip.card.get())
+    shown(ui.skip.card.get())
+}
+/// The Up Next title's natural width fits its label, so the name is not cut off.
+pub(crate) unsafe fn card_title_fits() -> bool {
+    let ui = UI.get().unwrap();
+    let t = ui.skip.title.get();
+    let cell: *mut AnyObject = msg_send![t, cell];
+    let content: NSSize = msg_send![cell, cellSize];
+    let f: NSRect = msg_send![t, frame];
+    content.w <= f.size.w + 0.5
 }
 pub(crate) unsafe fn card_text() -> String {
     let ui = UI.get().unwrap();
