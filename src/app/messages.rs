@@ -2,7 +2,7 @@ use crate::config::{Config, HomeSection, LayoutMode};
 use crate::jellyfin::models::ListItem;
 use crate::jellyfin::segments::{NextUp, Segment};
 use crate::jellyfin::sessions::{RemoteAction, RemoteSession};
-use crate::seerr::models::{SeerrRequestItem, SeerrResult};
+use crate::seerr::models::{DiscoverRow, SearchPage, SeerrRequestItem, SeerrResult, TitleDetail};
 use crate::transcode::decision::PlaybackMethod;
 use serde::{Deserialize, Serialize};
 
@@ -117,7 +117,7 @@ pub enum UiCmd {
     SeerrSearch {
         q: String,
     },
-    /// `media_type` is "movie" or "tv" (tv requests all seasons).
+    /// `media_type` is "movie" or "tv" (tv requests every regular season).
     SeerrRequest {
         media_type: String,
         tmdb_id: u64,
@@ -125,6 +125,21 @@ pub enum UiCmd {
     },
     /// The signed-in Seerr user's recent requests, newest first.
     SeerrRequests,
+    /// One page (1-based) of a home-page discover row.
+    SeerrDiscover {
+        row: DiscoverRow,
+        page: u32,
+    },
+    /// Full detail for one title: cast, trailers, seasons.
+    SeerrTitle {
+        media_type: String,
+        tmdb_id: u64,
+    },
+    /// First page of recommendations for one title.
+    SeerrRecommendations {
+        media_type: String,
+        tmdb_id: u64,
+    },
     /// Validate the connection, then persist. A non-blank `username` selects
     /// Jellyfin-account sign-in (`password: None`/blank reuses the Keychain
     /// password for this URL); a blank one selects API-key mode (`api_key:
@@ -232,6 +247,18 @@ pub enum MainMsg {
     },
     /// Search/request/list failure, "already requested", or Seerr disabled/unconfigured.
     SeerrError(String),
+    SeerrDiscover {
+        row: DiscoverRow,
+        page: SearchPage,
+    },
+    SeerrTitle(Box<TitleDetail>),
+    SeerrRecommendations {
+        media_type: String,
+        tmdb_id: u64,
+        results: Vec<SeerrResult>,
+    },
+    /// Discover, title or recommendations failure (kept apart from `SeerrError`, which the search UI shows).
+    SeerrBrowseError(String),
     /// Controllable sessions on the server, without this app's own.
     SessionsLoaded(Vec<RemoteSession>),
     /// A Play On request or remote command failed (shown as a toast).
