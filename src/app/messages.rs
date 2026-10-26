@@ -79,6 +79,11 @@ pub enum UiCmd {
         item_id: String,
         played: bool,
     },
+    /// Add or remove an item from the user's favourites (no button yet).
+    SetFavorite {
+        item_id: String,
+        favorite: bool,
+    },
     /// Unified Browse: every movie and show in one grid (`ItemsLoaded`, title "Browse").
     LoadBrowse,
     /// Layout chosen in onboarding or Settings. The UI already saved the config;
@@ -186,6 +191,13 @@ pub enum MainMsg {
     DetailLoaded(Box<DetailView>),
     /// The detail page could not be loaded (shown as a toast).
     DetailError(String),
+    /// A favourite was added or removed on the server.
+    FavoriteChanged {
+        item_id: String,
+        favorite: bool,
+    },
+    /// A favourite could not be changed (shown as a toast).
+    FavoriteError(String),
     /// The series' seasons, and which one to show first (its Next Up season, else the first).
     SeasonsLoaded {
         series_id: String,
@@ -349,6 +361,37 @@ pub struct DetailView {
     pub poster_key: Option<u64>,
     pub backdrop_key: Option<u64>,
     pub people: Vec<DetailPerson>,
+    /// Remote trailer links (YouTube and the like), in the server's order.
+    pub trailer_urls: Vec<String>,
+    pub tagline: Option<String>,
+    /// Critic score, 0 to 100.
+    pub critic_rating: Option<f64>,
+    /// Quality badges such as "4K", "Dolby Vision", "Atmos", "CC/SDH".
+    pub badges: Vec<&'static str>,
+    pub is_favorite: bool,
+    /// "More like this": the server's similar items, best match first.
+    pub similar: Vec<SimilarItem>,
+    /// Series only: the episode the user should watch next.
+    pub next_up: Option<NextUpEpisode>,
+}
+
+/// One title in a detail page's similar list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimilarItem {
+    pub id: String,
+    pub name: String,
+    pub year: Option<u32>,
+}
+
+/// The Next Up episode of a series, with the saved position in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NextUpEpisode {
+    pub id: String,
+    pub name: String,
+    pub season: Option<u32>,
+    pub number: Option<u32>,
+    pub position_ticks: i64,
+    pub run_time_ticks: Option<i64>,
 }
 
 /// One season in the series page's season picker.

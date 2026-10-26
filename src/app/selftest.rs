@@ -619,7 +619,7 @@ fn item(id: &str, name: &str, ty: &str, played: bool, pos: i64, run: i64) -> Lis
         year: Some(1999),
         season: Some(1),
         episode: Some(2),
-        user_data: Some(UserData { played, position_ticks: pos, last_played_date: None }),
+        user_data: Some(UserData { played, position_ticks: pos, last_played_date: None, is_favorite: false }),
         aspect: Some(0.667),
         image_tags: Some(ImageTags { primary: Some("tag".into()), thumb: None }),
         backdrop_tags: None,
@@ -1859,6 +1859,13 @@ fn detail_view(series: bool) -> DetailView {
         poster_key: Some(poster_key(id)),
         backdrop_key: Some(poster_key(&format!("{}#backdrop", id))),
         people: detail_people(14),
+        trailer_urls: Vec::new(),
+        tagline: None,
+        critic_rating: None,
+        badges: Vec::new(),
+        is_favorite: false,
+        similar: Vec::new(),
+        next_up: None,
     }
 }
 /// Send `sel` to a page view (its own target), like a click would.
