@@ -621,10 +621,15 @@ fn item(id: &str, name: &str, ty: &str, played: bool, pos: i64, run: i64) -> Lis
         episode: Some(2),
         user_data: Some(UserData { played, position_ticks: pos, last_played_date: None }),
         aspect: Some(0.667),
-        image_tags: Some(ImageTags { primary: Some("tag".into()), thumb: None }),
+        image_tags: Some(ImageTags { primary: Some("tag".into()), thumb: None, logo: None }),
         backdrop_tags: None,
         run_time_ticks: Some(run),
         date_created: None,
+        overview: Some("A mock overview for the self-test item.".into()),
+        genres: vec!["Drama".into(), "Mystery".into()],
+        community_rating: Some(7.6),
+        official_rating: Some("TV-14".into()),
+        provider_ids: [("Tmdb".to_string(), "1399".to_string())].into_iter().collect(),
     }
 }
 fn items_of(ty: &str, n: usize) -> Vec<ListItem> {
