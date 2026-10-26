@@ -7,6 +7,8 @@
 //! Shows). The Movies and TV Shows tabs reuse this scroll view: their rows, then a
 //! full poster grid of every movie or show in the visible libraries.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::messages::{HomeRow, HomeRows, UiCmd};
 use crate::config::{HomeSection, LayoutMode};
 use crate::jellyfin::models::ListItem;
@@ -14,11 +16,6 @@ use crate::platform::appkit::*;
 use crate::ui::library::{build_cell_keyed, free_cell_data, grid_metrics, layout_cell, poster_key, Metrics};
 use crate::ui::shell::{header_layout, hide_state, set_count, show_state, sidebar_refresh_selection};
 use crate::ui::theme::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 
 /// `cfg.last_view` value meaning "Home was the last selected place".
 pub const HOME_ID: &str = "home";
@@ -100,44 +97,44 @@ impl HomeUi {
 
 /// A flipped plain view (`JRFlipView`, registered by the Seerr module): rows and
 /// cards are laid out top-down.
-unsafe fn flip_view(frame: NSRect) -> *mut Object {
-    let cls = Class::get("JRFlipView").expect("JRFlipView registered at startup");
-    let v: *mut Object = msg_send![cls, alloc];
+unsafe fn flip_view(frame: NSRect) -> *mut AnyObject {
+    let cls = AnyClass::get(c"JRFlipView").expect("JRFlipView registered at startup");
+    let v: *mut AnyObject = msg_send![cls, alloc];
     msg_send![v, initWithFrame: frame] // +1; the caller autorels after adding
 }
 
-extern "C" fn flipped(_this: &mut Object, _c: Sel) -> BOOL {
-    YES
+extern "C" fn flipped(_this: *mut AnyObject, _c: Sel) -> Bool {
+    Bool::YES
 }
 
 /// Home's document view: flipped, and it re-places the grid when its width changes
 /// (the grid has as many columns as the width allows).
-extern "C" fn home_doc_set_frame_size(this: &mut Object, _c: Sel, s: NSSize) {
+extern "C" fn home_doc_set_frame_size(this: *mut AnyObject, _c: Sel, s: NSSize) {
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), setFrameSize: s];
         let ui = match UI.get_mut() {
             Some(u) => u,
             None => return,
         };
-        if this as *mut Object != ui.home.doc.get() || ui.home.grid.is_empty() || (s.w - ui.home.laid_w).abs() < 0.5 {
+        if this as *mut AnyObject != ui.home.doc.get() || ui.home.grid.is_empty() || (s.w - ui.home.laid_w).abs() < 0.5 {
             return;
         }
         let bottom = place_grid(s.w);
-        let _: () = msg_send![this as *mut Object, setFrameSize: size(s.w, bottom)];
+        let _: () = msg_send![this as *mut AnyObject, setFrameSize: size(s.w, bottom)];
     }
 }
 
 /// Register `JRHomeDoc` once (the document view class with the grid re-layout).
 fn register_doc_class() {
-    if Class::get("JRHomeDoc").is_some() {
+    if AnyClass::get(c"JRHomeDoc").is_some() {
         return;
     }
-    let mut d = ClassDecl::new("JRHomeDoc", class!(NSView)).expect("JRHomeDoc is new");
+    let mut d = ClassBuilder::new(c"JRHomeDoc", class!(NSView)).expect("JRHomeDoc is new");
     unsafe {
-        d.add_method(sel!(isFlipped), flipped as extern "C" fn(&mut Object, Sel) -> BOOL);
+        d.add_method(sel!(isFlipped), flipped as extern "C" fn(*mut AnyObject, Sel) -> Bool);
         d.add_method(
             sel!(setFrameSize:),
-            home_doc_set_frame_size as extern "C" fn(&mut Object, Sel, NSSize),
+            home_doc_set_frame_size as extern "C" fn(*mut AnyObject, Sel, NSSize),
         );
     }
     d.register();
@@ -145,15 +142,14 @@ fn register_doc_class() {
 
 /// The segmented Home | Movies | TV Shows control, at the header's right edge.
 /// Hidden until Home is showing in the one-big-library layout.
-unsafe fn build_segment(header: *mut Object, target: *mut Object) -> *mut Object {
-    let labels: *mut Object = msg_send![class!(NSMutableArray), array];
+unsafe fn build_segment(header: *mut AnyObject, target: *mut AnyObject) -> *mut AnyObject {
+    let labels: *mut AnyObject = msg_send![class!(NSMutableArray), array];
     for t in SEGMENTS {
         let _: () = msg_send![labels, addObject: ns(t)];
     }
     // Same control and size as the Seerr tabs.
-    let seg: *mut Object = msg_send![class!(NSSegmentedControl),
-        segmentedControlWithLabels: labels trackingMode: 0i64
-        target: target action: sel!(homeSegment:)];
+    let seg: *mut AnyObject = msg_send![class!(NSSegmentedControl),
+        segmentedControlWithLabels: labels, trackingMode: 0i64, target: target, action: sel!(homeSegment:)];
     let _: () = msg_send![seg, setControlSize: 3isize];
     let _: () = msg_send![seg, setSelectedSegment: 0isize];
     let _: () = msg_send![seg, sizeToFit];
@@ -167,19 +163,19 @@ unsafe fn build_segment(header: *mut Object, target: *mut Object) -> *mut Object
 }
 
 /// The Home scroll view, hidden until Home is selected.
-pub(crate) unsafe fn build_scroll(content_host: *mut Object, frame: NSRect) {
+pub(crate) unsafe fn build_scroll(content_host: *mut AnyObject, frame: NSRect) {
     let ui = UI.get_mut().unwrap();
-    let sc: *mut Object = msg_send![class!(NSScrollView), alloc];
-    let sc: *mut Object = msg_send![sc, initWithFrame: frame];
-    let _: () = msg_send![sc, setHasVerticalScroller: YES];
-    let _: () = msg_send![sc, setDrawsBackground: YES];
+    let sc: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+    let sc: *mut AnyObject = msg_send![sc, initWithFrame: frame];
+    let _: () = msg_send![sc, setHasVerticalScroller: Bool::YES];
+    let _: () = msg_send![sc, setDrawsBackground: Bool::YES];
     let _: () = msg_send![sc, setBackgroundColor: color(C_CANVAS)];
     set_autoresize(sc, RESIZE_W | RESIZE_H);
     set_hidden(sc, true);
     add_sub(content_host, sc);
     autorel(sc);
     register_doc_class();
-    let doc: *mut Object = msg_send![class!(JRHomeDoc), alloc];
+    let doc: *mut AnyObject = msg_send![class!(JRHomeDoc), alloc];
     let doc = autorel(msg_send![doc, initWithFrame: rect(0., 0., frame.size.w, 10.)]);
     set_autoresize(doc, RESIZE_W);
     let _: () = msg_send![sc, setDocumentView: doc];
@@ -298,7 +294,7 @@ unsafe fn rebuild() {
     rebuild_drop_cells();
     let ui = UI.get_mut().unwrap();
     let doc = ui.home.doc.get();
-    let none: *mut Object = msg_send![class!(NSArray), array];
+    let none: *mut AnyObject = msg_send![class!(NSArray), array];
     let _: () = msg_send![doc, setSubviews: none];
 
     let w = bounds_of(ui.home.scroll.get()).size.w.max(200.);
@@ -320,11 +316,11 @@ unsafe fn rebuild() {
         let strip_h = m.cell_h + 2. * STRIP_PAD;
         let n = r.items.len() as f64;
         let cards_w = 2. * EDGE + n * tile_w + (n - 1.).max(0.) * CARD_GAP;
-        let strip: *mut Object = msg_send![class!(NSScrollView), alloc];
-        let strip: *mut Object = msg_send![strip, initWithFrame: rect(0., strip_y, w, strip_h)];
-        let _: () = msg_send![strip, setHasHorizontalScroller: YES];
-        let _: () = msg_send![strip, setHasVerticalScroller: NO];
-        let _: () = msg_send![strip, setDrawsBackground: NO];
+        let strip: *mut AnyObject = msg_send![class!(NSScrollView), alloc];
+        let strip: *mut AnyObject = msg_send![strip, initWithFrame: rect(0., strip_y, w, strip_h)];
+        let _: () = msg_send![strip, setHasHorizontalScroller: Bool::YES];
+        let _: () = msg_send![strip, setHasVerticalScroller: Bool::NO];
+        let _: () = msg_send![strip, setDrawsBackground: Bool::NO];
         let _: () = msg_send![strip, setBorderType: 0usize];
         set_autoresize(strip, RESIZE_W);
         add_sub(doc, strip);
@@ -486,7 +482,7 @@ pub(crate) unsafe fn select_section(section: HomeSection) {
     update_segment();
     let ui = UI.get_mut().unwrap();
     let sc = ui.home.scroll.get();
-    let clip: *mut Object = msg_send![sc, contentView];
+    let clip: *mut AnyObject = msg_send![sc, contentView];
     let _: () = msg_send![clip, scrollToPoint: NSPoint { x: 0., y: 0. }];
     let _: () = msg_send![sc, reflectScrolledClipView: clip];
     reload();
@@ -543,16 +539,16 @@ pub(crate) unsafe fn enter_browse() {
     let _ = ui.ui_tx.send(UiCmd::LoadBrowse);
 }
 
-pub(crate) extern "C" fn home_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn home_selected(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { enter() }
 }
 
-pub(crate) extern "C" fn browse_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn browse_selected(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { enter_browse() }
 }
 
 /// The header control was clicked.
-pub(crate) extern "C" fn segment_changed(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn segment_changed(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let i: NSInteger = msg_send![sender, selectedSegment];
         select_section(section_for_index(i as usize));
@@ -560,7 +556,7 @@ pub(crate) extern "C" fn segment_changed(_t: &mut Object, _c: Sel, sender: *mut 
 }
 
 /// Go > Home / Movies / TV Shows (the tag is the tab's index).
-pub(crate) extern "C" fn menu_section(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn menu_section(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let tag: NSInteger = msg_send![sender, tag];
         select_section(section_for_index(tag as usize));

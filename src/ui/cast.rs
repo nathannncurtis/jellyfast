@@ -4,15 +4,13 @@
 //!   The cast menu lists both. Choosing a Jellyfin device stops local playback and
 //!   shows a small remote bar (title, play/pause, stop, scrub) that polls the session.
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::messages::UiCmd;
 use crate::jellyfin::sessions::{RemoteAction, RemoteSession};
 use crate::jellyfin::urls::fmt_clock;
 use crate::platform::appkit::*;
 use crate::ui::theme::*;
-use objc::class;
-use objc::msg_send;
-use objc::runtime::{Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 use std::time::{Duration, Instant};
 
 /// Bottom strip of the window, full width under the sidebar and the content: the remote bar
@@ -110,7 +108,7 @@ fn secs(ticks: i64) -> f64 {
 // ---- the cast menu ------------------------------------------------------------------------------
 
 /// Opens the cast menu for `item` under `anchor`, after the session list arrives.
-pub(crate) unsafe fn open_menu(anchor: *mut Object, item: CastItem) {
+pub(crate) unsafe fn open_menu(anchor: *mut AnyObject, item: CastItem) {
     let Some(ui) = UI.get_mut() else { return };
     let h = if anchor.is_null() { 0. } else { bounds_of(anchor).size.h };
     ui.cast.anchor = Ptr(anchor);
@@ -122,7 +120,7 @@ pub(crate) unsafe fn open_menu(anchor: *mut Object, item: CastItem) {
 
 /// Shortcut (⇧⌘C) and the player bar's cast button. Playing video casts what is playing;
 /// otherwise the open movie or episode; otherwise there is nothing to cast.
-pub(crate) extern "C" fn show_menu(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn show_menu(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         if let Some(pn) = ui.playing.as_ref() {
@@ -201,12 +199,12 @@ unsafe fn build_and_present(list: Vec<RemoteSession>) {
         titles.push("AirPlay".into());
         add_to_menu(menu, msg_send![class!(NSMenuItem), separatorItem], None);
     }
-    let head: *mut Object = msg_send![class!(NSMenuItem), sectionHeaderWithTitle: ns("Play on")];
+    let head: *mut AnyObject = msg_send![class!(NSMenuItem), sectionHeaderWithTitle: ns("Play on")];
     add_to_menu(menu, head, None);
     titles.push("Play on".into());
     if list.is_empty() {
         let it = menu_item("No other Jellyfin devices are active", sel!(castPick:), "");
-        let _: () = msg_send![it, setEnabled: NO];
+        let _: () = msg_send![it, setEnabled: Bool::NO];
         add_to_menu(menu, it, None);
         titles.push("No other Jellyfin devices are active".into());
     }
@@ -223,29 +221,29 @@ unsafe fn build_and_present(list: Vec<RemoteSession>) {
     } else {
         ui.cast.anchor.get()
     };
-    let content: *mut Object = if anchor == ui.win.get() { msg_send![ui.win.get(), contentView] } else { anchor };
+    let content: *mut AnyObject = if anchor == ui.win.get() { msg_send![ui.win.get(), contentView] } else { anchor };
     let at = if anchor == ui.win.get() { NSPoint { x: EDGE, y: bounds_of(content).size.h - TITLEBAR_H } } else { ui.cast.at };
     let n: NSInteger = msg_send![menu, numberOfItems];
     ui.cast.menu_items = n as usize;
     if offscreen_mode() {
         return;
     }
-    let _: BOOL = msg_send![menu, popUpMenuPositioningItem: nil() atLocation: at inView: content];
+    let _: Bool = msg_send![menu, popUpMenuPositioningItem: nil(), atLocation: at, inView: content];
 }
 
-unsafe fn is_on_screen(v: *mut Object) -> bool {
-    let w: *mut Object = msg_send![v, window];
+unsafe fn is_on_screen(v: *mut AnyObject) -> bool {
+    let w: *mut AnyObject = msg_send![v, window];
     !w.is_null()
 }
 
-unsafe fn new_menu(title: &str) -> *mut Object {
-    let m: *mut Object = msg_send![class!(NSMenu), alloc];
-    let m: *mut Object = msg_send![m, initWithTitle: ns(title)];
+unsafe fn new_menu(title: &str) -> *mut AnyObject {
+    let m: *mut AnyObject = msg_send![class!(NSMenu), alloc];
+    let m: *mut AnyObject = msg_send![m, initWithTitle: ns(title)];
     autorel(m)
 }
 
 /// Adds `it` to `menu`. Rows that pick a session get the ctl as target and their index as tag.
-unsafe fn add_to_menu(menu: *mut Object, it: *mut Object, tag: Option<isize>) {
+unsafe fn add_to_menu(menu: *mut AnyObject, it: *mut AnyObject, tag: Option<isize>) {
     if let Some(t) = tag {
         let _: () = msg_send![it, setTarget: UI.get().unwrap().ctl.get()];
         let _: () = msg_send![it, setTag: t];
@@ -255,13 +253,13 @@ unsafe fn add_to_menu(menu: *mut Object, it: *mut Object, tag: Option<isize>) {
     let _: () = msg_send![menu, addItem: it];
 }
 
-unsafe fn is_separator(it: *mut Object) -> bool {
-    let s: BOOL = msg_send![it, isSeparatorItem];
-    s == YES
+unsafe fn is_separator(it: *mut AnyObject) -> bool {
+    let s: Bool = msg_send![it, isSeparatorItem];
+    s == Bool::YES
 }
 
 /// A session row was chosen: start the item there and show the remote bar.
-pub(crate) extern "C" fn pick(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn pick(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let tag: NSInteger = msg_send![sender, tag];
@@ -293,7 +291,7 @@ pub(crate) extern "C" fn pick(_t: &mut Object, _c: Sel, sender: *mut Object) {
 }
 
 /// AirPlay row: press AVKit's route button in the player bar so its picker opens.
-pub(crate) extern "C" fn airplay_pick(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn airplay_pick(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         if offscreen_mode() {
@@ -310,18 +308,18 @@ pub(crate) extern "C" fn airplay_pick(_t: &mut Object, _c: Sel, _s: *mut Object)
 }
 
 /// The first NSButton inside AVKit's route picker (its own control).
-unsafe fn find_button(v: *mut Object, depth: u32) -> *mut Object {
+unsafe fn find_button(v: *mut AnyObject, depth: u32) -> *mut AnyObject {
     if v.is_null() || depth > 4 {
         return nil();
     }
-    let is: BOOL = msg_send![v, isKindOfClass: class!(NSButton)];
-    if is == YES {
+    let is: Bool = msg_send![v, isKindOfClass: class!(NSButton)];
+    if is == Bool::YES {
         return v;
     }
-    let subs: *mut Object = msg_send![v, subviews];
+    let subs: *mut AnyObject = msg_send![v, subviews];
     let n: NSUInteger = msg_send![subs, count];
     for i in 0..n {
-        let s: *mut Object = msg_send![subs, objectAtIndex: i];
+        let s: *mut AnyObject = msg_send![subs, objectAtIndex: i];
         let b = find_button(s, depth + 1);
         if !b.is_null() {
             return b;
@@ -332,7 +330,7 @@ unsafe fn find_button(v: *mut Object, depth: u32) -> *mut Object {
 
 // ---- the remote bar -------------------------------------------------------------------------------
 
-pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
+pub(crate) unsafe fn build(content: *mut AnyObject, b: NSRect) {
     let ui = UI.get_mut().unwrap();
     // Full-width strip under the sidebar and the content, like a now-playing bar that spans the window.
     let bar = vev(MAT_HUD, BLEND_WITHIN);
@@ -344,11 +342,11 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
     ui.cast.bar = Ptr(bar);
 
     // Hairline along the top edge of the strip.
-    let rule: *mut Object = msg_send![class!(NSView), alloc];
-    let rule: *mut Object = autorel(msg_send![rule, initWithFrame: rect(0., STRIP_H - 1., b.size.w, 1.)]);
-    let _: () = msg_send![rule, setWantsLayer: YES];
-    let sep: *mut Object = msg_send![color(C_ON_MEDIA), colorWithAlphaComponent: 0.12f64];
-    let cg: *mut Object = msg_send![sep, CGColor];
+    let rule: *mut AnyObject = msg_send![class!(NSView), alloc];
+    let rule: *mut AnyObject = autorel(msg_send![rule, initWithFrame: rect(0., STRIP_H - 1., b.size.w, 1.)]);
+    let _: () = msg_send![rule, setWantsLayer: Bool::YES];
+    let sep: *mut AnyObject = msg_send![color(C_ON_MEDIA), colorWithAlphaComponent: 0.12f64];
+    let cg: *mut CGColor = msg_send![sep, CGColor];
     let _: () = msg_send![layer_of(rule), setBackgroundColor: cg];
     set_autoresize(rule, RESIZE_W | MARGIN_MINY);
     add_sub(bar, rule);
@@ -370,11 +368,11 @@ pub(crate) unsafe fn build(content: *mut Object, b: NSRect) {
     set_frame(stop, rect(320., 16., 32., 32.));
     ui.cast.stop = Ptr(stop);
 
-    let s: *mut Object = msg_send![class!(NSSlider), alloc];
-    let s: *mut Object = msg_send![s, initWithFrame: rect(368., 24., (b.size.w - 368. - 148.).max(120.), 16.)];
+    let s: *mut AnyObject = msg_send![class!(NSSlider), alloc];
+    let s: *mut AnyObject = msg_send![s, initWithFrame: rect(368., 24., (b.size.w - 368. - 148.).max(120.), 16.)];
     let _: () = msg_send![s, setMinValue: 0.0f64];
     let _: () = msg_send![s, setMaxValue: 1.0f64];
-    let _: () = msg_send![s, setContinuous: NO];
+    let _: () = msg_send![s, setContinuous: Bool::NO];
     let _: () = msg_send![s, setTarget: ui.ctl.get()];
     let _: () = msg_send![s, setAction: sel!(jrCastScrub:)];
     let _: () = msg_send![s, setToolTip: ns("Seek on the device")];
@@ -440,9 +438,9 @@ unsafe fn apply_remote() {
     if !img.is_null() {
         let _: () = msg_send![ui.cast.play.get(), setImage: img];
     }
-    let _: () = msg_send![ui.cast.play.get(), setEnabled: if r.title.is_some() && r.online { YES } else { NO }];
+    let _: () = msg_send![ui.cast.play.get(), setEnabled: if r.title.is_some() && r.online { Bool::YES } else { Bool::NO }];
     let seekable = r.title.is_some() && r.run_secs > 0. && r.online;
-    let _: () = msg_send![ui.cast.scrub.get(), setEnabled: if seekable { YES } else { NO }];
+    let _: () = msg_send![ui.cast.scrub.get(), setEnabled: if seekable { Bool::YES } else { Bool::NO }];
     let frac = if r.run_secs > 0. { (r.pos_secs / r.run_secs).clamp(0., 1.) } else { 0. };
     let _: () = msg_send![ui.cast.scrub.get(), setDoubleValue: frac];
     let clock = if r.title.is_some() {
@@ -467,12 +465,12 @@ pub(crate) unsafe fn layout() {
     set_hidden(bar, !show);
     let strip = if show { STRIP_H } else { 0. };
     let f = frame_of(host);
-    let sup: *mut Object = msg_send![host, superview];
+    let sup: *mut AnyObject = msg_send![host, superview];
     let h = bounds_of(sup).size.h;
     set_frame(host, rect(f.origin.x, strip, f.size.w, (h - strip).max(0.)));
 }
 
-pub(crate) extern "C" fn play_pause(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn play_pause(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let Some(r) = ui.cast.remote.as_mut() else { return };
@@ -486,7 +484,7 @@ pub(crate) extern "C" fn play_pause(_t: &mut Object, _c: Sel, _s: *mut Object) {
     }
 }
 
-pub(crate) extern "C" fn stop(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn stop(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let Some(r) = ui.cast.remote.as_mut() else { return };
@@ -499,7 +497,7 @@ pub(crate) extern "C" fn stop(_t: &mut Object, _c: Sel, _s: *mut Object) {
 }
 
 /// × on the strip: dismisses a message first, else hides the remote bar. The device keeps playing.
-pub(crate) extern "C" fn close(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn close(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         if ui.cast.message.take().is_none() {
@@ -511,7 +509,7 @@ pub(crate) extern "C" fn close(_t: &mut Object, _c: Sel, _s: *mut Object) {
 }
 
 /// Scrubber released: seek the device to that fraction of the item.
-pub(crate) extern "C" fn scrub(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn scrub(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let Some(ui) = UI.get_mut() else { return };
         let frac: f64 = msg_send![sender, doubleValue];
@@ -561,7 +559,7 @@ pub fn remote_visible() -> bool {
 }
 
 /// The remote bar's view, for layout audits.
-pub fn remote_bar_view() -> *mut Object {
+pub fn remote_bar_view() -> *mut AnyObject {
     UI.get().map(|ui| ui.cast.bar.get()).unwrap_or(std::ptr::null_mut())
 }
 
@@ -580,7 +578,7 @@ pub fn choose_row_for_test(i: usize) -> Option<RemoteSession> {
     unsafe {
         let ui = UI.get_mut()?;
         let s = ui.cast.menu.get(i).cloned()?;
-        let mi: *mut Object = msg_send![class!(NSMenuItem), new];
+        let mi: *mut AnyObject = msg_send![class!(NSMenuItem), new];
         let _: () = msg_send![mi, setTag: i as isize];
         pick(&mut *ui.ctl.get(), sel!(castPick:), mi);
         let _: () = msg_send![mi, release];

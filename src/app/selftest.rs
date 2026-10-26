@@ -8,6 +8,8 @@
 //! Video: $JELLYFAST_SELFTEST_VIDEO, else assets/selftest.mp4 (a plain gradient clip
 //! with two audio tracks and one subtitle track).
 #![allow(unsafe_code)]
+use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+use objc2::{class, msg_send, sel};
 use crate::app::controller::handle_main;
 use crate::app::messages::*;
 use crate::config::Config;
@@ -22,9 +24,6 @@ use std::sync::Mutex;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use crate::ui::library::poster_key;
 use crate::ui::shell::is_hidden;
-use objc::msg_send;
-use objc::runtime::{Object, BOOL, NO, YES};
-use objc::{class, sel, sel_impl};
 
 pub fn enabled() -> bool {
     std::env::var("JELLYFAST_SELFTEST").map(|v| v == "1").unwrap_or(false)
@@ -70,12 +69,12 @@ fn state_check_fresh_login(ui: &crate::platform::appkit::Ui) {
     }
     state_check("fresh login: no connect/auth UiCmd before Connect", bad.is_empty());
     unsafe {
-        let en: BOOL = msg_send![ui.login_btn.get(), isEnabled];
-        let title: *mut Object = msg_send![ui.login_btn.get(), title];
-        let status: *mut Object = msg_send![ui.login_err.get(), stringValue];
+        let en: Bool = msg_send![ui.login_btn.get(), isEnabled];
+        let title: *mut AnyObject = msg_send![ui.login_btn.get(), title];
+        let status: *mut AnyObject = msg_send![ui.login_err.get(), stringValue];
         state_check(
             "fresh login: Connect enabled, titled Connect, no connecting status",
-            en == YES && to_str(title) == "Connect" && to_str(status).is_empty(),
+            en == Bool::YES && to_str(title) == "Connect" && to_str(status).is_empty(),
         );
     }
 }
@@ -107,15 +106,15 @@ pub fn start() {
         *CMD_RX.lock().unwrap() = Some(rx);
         state_check_fresh_login(ui);
         // Launch state: no library chrome, no spinner, branded window.
-        let h: BOOL = msg_send![ui.content_host.get(), isHidden];
-        state_check("launch: content_host hidden", h == YES);
-        let h: BOOL = msg_send![ui.spinner.get(), isHidden];
-        state_check("launch: spinner hidden", h == YES);
+        let h: Bool = msg_send![ui.content_host.get(), isHidden];
+        state_check("launch: content_host hidden", h == Bool::YES);
+        let h: Bool = msg_send![ui.spinner.get(), isHidden];
+        state_check("launch: spinner hidden", h == Bool::YES);
         if !crate::ui::theme::reduce_transparency() {
-            let bh: BOOL = msg_send![ui.bgfx.get(), isHidden];
-            state_check("launch: login backdrop visible", bh == NO);
+            let bh: Bool = msg_send![ui.bgfx.get(), isHidden];
+            state_check("launch: login backdrop visible", bh == Bool::NO);
         }
-        let t: *mut Object = msg_send![ui.win.get(), title];
+        let t: *mut AnyObject = msg_send![ui.win.get(), title];
         state_check("window title is Jellyfast", to_str(t) == "Jellyfast");
     }
     check_offscreen("start");
@@ -327,21 +326,21 @@ fn own_device_sessions(paused: bool) -> Vec<crate::jellyfin::sessions::RemoteSes
 }
 
 /// First NSButton under `v` whose action is `action`.
-unsafe fn find_action(v: *mut Object, action: objc::runtime::Sel, depth: u32) -> *mut Object {
+unsafe fn find_action(v: *mut AnyObject, action: objc2::runtime::Sel, depth: u32) -> *mut AnyObject {
     if v.is_null() || depth > 8 {
         return nil();
     }
-    let is: BOOL = msg_send![v, isKindOfClass: class!(NSButton)];
-    if is == YES {
-        let a: objc::runtime::Sel = msg_send![v, action];
+    let is: Bool = msg_send![v, isKindOfClass: class!(NSButton)];
+    if is == Bool::YES {
+        let a: objc2::runtime::Sel = msg_send![v, action];
         if a == action {
             return v;
         }
     }
-    let subs: *mut Object = msg_send![v, subviews];
+    let subs: *mut AnyObject = msg_send![v, subviews];
     let n: NSUInteger = msg_send![subs, count];
     for i in 0..n {
-        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let c: *mut AnyObject = msg_send![subs, objectAtIndex: i];
         let f = find_action(c, action, depth + 1);
         if !f.is_null() {
             return f;
@@ -401,7 +400,7 @@ fn strip_no_overlap(what: &str) {
             &format!("{}: library side stops above the remote bar", what),
             (host.origin.y - STRIP_H).abs() < 0.5 && bar.origin.y + bar.size.h <= host.origin.y + 0.5,
         );
-        let c: *mut Object = msg_send![ui.cast.bar.get(), superview];
+        let c: *mut AnyObject = msg_send![ui.cast.bar.get(), superview];
         let cb = bounds_of(c);
         state_check(
             &format!("{}: remote bar is inside the window", what),
@@ -428,9 +427,9 @@ fn s_cast_bar() {
         (ui.cast.bar.get(), ui.cast.play.get(), ui.cast.stop.get(), ui.cast.scrub.get(), ui.cast.close.get(), ui.cast.title.get())
     };
     unsafe {
-        let a: objc::runtime::Sel = msg_send![play, action];
+        let a: objc2::runtime::Sel = msg_send![play, action];
         state_check("remote: play button wired", a == sel!(jrCastPlayPause:));
-        state_check("remote: scrubber enabled with a length", { let e: BOOL = msg_send![scrub, isEnabled]; e == YES });
+        state_check("remote: scrubber enabled with a length", { let e: Bool = msg_send![scrub, isEnabled]; e == Bool::YES });
         state_check("remote: title shown", read_field(title) == "Show · Pilot");
         act(sel!(jrCastPlayPause:), nil());
         state_check(
@@ -457,7 +456,7 @@ fn s_cast_bar() {
             take_cmds().iter().any(|c| matches!(c, UiCmd::CastControl { action: crate::jellyfin::sessions::RemoteAction::Stop, .. })),
         );
         state_check("remote: stopped shows nothing playing", read_field(title) == "Nothing playing");
-        let _: () = msg_send![stop, setEnabled: YES];
+        let _: () = msg_send![stop, setEnabled: Bool::YES];
     }
     handle_main(MainMsg::SessionsLoaded(own_device_sessions(true)));
     state_check("remote: poll reports a paused session", crate::ui::cast::remote_state().map(|r| r.paused).unwrap_or(false));
@@ -520,7 +519,7 @@ fn s_cast_series() {
     unsafe { act(sel!(jrCastClose:), nil()) };
 }
 
-fn is_hidden_or_gone(v: *mut Object) -> bool {
+fn is_hidden_or_gone(v: *mut AnyObject) -> bool {
     v.is_null() || unsafe { is_hidden(v) }
 }
 
@@ -528,17 +527,17 @@ fn s_player_airplay() {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let route = ui.pbar.route.get();
-        let is_route: BOOL = msg_send![route, isKindOfClass: class!(AVRoutePickerView)];
-        state_check("player bar: AirPlay route picker built", is_route == YES);
-        let sup: *mut Object = msg_send![route, superview];
+        let is_route: Bool = msg_send![route, isKindOfClass: class!(AVRoutePickerView)];
+        state_check("player bar: AirPlay route picker built", is_route == Bool::YES);
+        let sup: *mut AnyObject = msg_send![route, superview];
         state_check("player bar: route picker sits in the bar", sup == ui.pbar.bar.get());
         state_check("player bar: route picker visible", !is_hidden(route));
         let cast = ui.pbar.cast.get();
-        let a: objc::runtime::Sel = msg_send![cast, action];
+        let a: objc2::runtime::Sel = msg_send![cast, action];
         state_check("player bar: cast button opens the cast menu", a == sel!(showCastMenu:));
         state_check("player bar: cast button visible", !is_hidden(cast));
-        let cfg: BOOL = msg_send![ui.player.get(), allowsExternalPlayback];
-        state_check("AVPlayer allows external (AirPlay) playback", cfg == YES);
+        let cfg: Bool = msg_send![ui.player.get(), allowsExternalPlayback];
+        state_check("AVPlayer allows external (AirPlay) playback", cfg == Bool::YES);
         state_check("AirPlay card hidden while playing here", is_hidden(ui.ext.view.get()));
     }
     unsafe { crate::ui::player::set_external(true) };
@@ -599,16 +598,16 @@ fn s_player_cast() {
 }
 
 // ---- helpers --------------------------------------------------------------
-unsafe fn ctl() -> *mut Object {
+unsafe fn ctl() -> *mut AnyObject {
     UI.get_mut().unwrap().ctl.get()
 }
-unsafe fn act(sel: objc::runtime::Sel, sender: *mut Object) {
-    let _: *mut Object = msg_send![ctl(), performSelector: sel withObject: sender];
+unsafe fn act(sel: Sel, sender: *mut AnyObject) {
+    let _: *mut AnyObject = msg_send![ctl(), performSelector: sel, withObject: sender];
 }
-unsafe fn tagged_button(tag: isize) -> *mut Object {
-    let b: *mut Object = msg_send![class!(NSButton), new];
+unsafe fn tagged_button(tag: isize) -> *mut AnyObject {
+    let b: *mut AnyObject = msg_send![class!(NSButton), new];
     let _: () = msg_send![b, setTag: tag];
-    let _: *mut Object = msg_send![b, autorelease];
+    let _: *mut AnyObject = msg_send![b, autorelease];
     b
 }
 fn item(id: &str, name: &str, ty: &str, played: bool, pos: i64, run: i64) -> ListItem {
@@ -647,13 +646,9 @@ fn send_items(title: &str, items: Vec<ListItem>, back: bool) {
 }
 fn image_bytes(kind: usize, w: usize, h: usize, shade: u8) -> Vec<u8> {
     unsafe {
-        let rep: *mut Object = msg_send![class!(NSBitmapImageRep), alloc];
-        let rep: *mut Object = msg_send![rep,
-            initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>()
-            pixelsWide: w as isize pixelsHigh: h as isize bitsPerSample: 8isize
-            samplesPerPixel: 4isize hasAlpha: YES isPlanar: NO
-            colorSpaceName: ns("NSDeviceRGBColorSpace")
-            bytesPerRow: (w * 4) as isize bitsPerPixel: 32isize];
+        let rep: *mut AnyObject = msg_send![class!(NSBitmapImageRep), alloc];
+        let rep: *mut AnyObject = msg_send![rep,
+            initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>(), pixelsWide: w as isize, pixelsHigh: h as isize, bitsPerSample: 8isize, samplesPerPixel: 4isize, hasAlpha: Bool::YES, isPlanar: Bool::NO, colorSpaceName: ns("NSDeviceRGBColorSpace"), bytesPerRow: (w * 4) as isize, bitsPerPixel: 32isize];
         let px: *mut u8 = msg_send![rep, bitmapData];
         for y in 0..h {
             for x in 0..w {
@@ -664,12 +659,12 @@ fn image_bytes(kind: usize, w: usize, h: usize, shade: u8) -> Vec<u8> {
                 *px.add(o + 3) = 255;
             }
         }
-        let props: *mut Object = msg_send![class!(NSDictionary), dictionary];
+        let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
         // NSBitmapImageFileTypeJPEG = 3, PNG = 4
-        let data: *mut Object = msg_send![rep, representationUsingType: if kind == 0 { 4usize } else { 3usize } properties: props];
+        let data: *mut AnyObject = msg_send![rep, representationUsingType: if kind == 0 { 4usize } else { 3usize }, properties: props];
         let len: usize = msg_send![data, length];
-        let p: *const u8 = msg_send![data, bytes];
-        let v = std::slice::from_raw_parts(p, len).to_vec();
+        let p: *const std::ffi::c_void = msg_send![data, bytes];
+        let v = std::slice::from_raw_parts(p as *const u8, len).to_vec();
         let _: () = msg_send![rep, release];
         v
     }
@@ -702,14 +697,14 @@ fn playback(resume: f64, run: f64) -> MainMsg {
 })
 }
 /// Resolved sRGB components of a colour under the current appearance (for comparisons).
-pub(crate) unsafe fn srgb(c: *mut Object) -> [i64; 4] {
-    let space: *mut Object = msg_send![class!(NSColorSpace), sRGBColorSpace];
-    let r: *mut Object = msg_send![c, colorUsingColorSpace: space];
+pub(crate) unsafe fn srgb(c: *mut AnyObject) -> [i64; 4] {
+    let space: *mut AnyObject = msg_send![class!(NSColorSpace), sRGBColorSpace];
+    let r: *mut AnyObject = msg_send![c, colorUsingColorSpace: space];
     if r.is_null() {
         return [-1; 4];
     }
     let (mut a, mut b, mut g, mut al) = (0f64, 0f64, 0f64, 0f64);
-    let _: () = msg_send![r, getRed: &mut a green: &mut g blue: &mut b alpha: &mut al];
+    let _: () = msg_send![r, getRed: &mut a, green: &mut g, blue: &mut b, alpha: &mut al];
     [(a * 1000.).round() as i64, (g * 1000.).round() as i64, (b * 1000.).round() as i64, (al * 1000.).round() as i64]
 }
 
@@ -731,19 +726,19 @@ fn state_check(what: &str, ok: bool) {
 //  * NSButton with an empty title and no image: a transparent full-area hit target
 //    (poster cell click button, sidebar row button) that is meant to sit above its labels;
 //  * hidden views, views with alpha 0, and zero-size views.
-unsafe fn visible(v: *mut Object) -> bool {
-    let h: BOOL = msg_send![v, isHidden];
+unsafe fn visible(v: *mut AnyObject) -> bool {
+    let h: Bool = msg_send![v, isHidden];
     let a: f64 = msg_send![v, alphaValue];
-    h == NO && a > 0.01
+    h == Bool::NO && a > 0.01
 }
-unsafe fn is_kind(v: *mut Object, cls: &objc::runtime::Class) -> bool {
-    let b: BOOL = msg_send![v, isKindOfClass: cls];
-    b == YES
+unsafe fn is_kind(v: *mut AnyObject, cls: &AnyClass) -> bool {
+    let b: Bool = msg_send![v, isKindOfClass: cls];
+    b == Bool::YES
 }
-unsafe fn describe(v: *mut Object) -> String {
-    let cls: *mut Object = msg_send![v, className];
+unsafe fn describe(v: *mut AnyObject) -> String {
+    let cls: *mut AnyObject = msg_send![v, className];
     let txt = if is_kind(v, class!(NSControl)) {
-        let sv: *mut Object = msg_send![v, stringValue];
+        let sv: *mut AnyObject = msg_send![v, stringValue];
         to_str(sv)
     } else {
         String::new()
@@ -752,26 +747,26 @@ unsafe fn describe(v: *mut Object) -> String {
     let f: NSRect = msg_send![v, frame];
     format!("{}[\"{}\" {:.0},{:.0} {:.0}x{:.0}]", to_str(cls), t, f.origin.x, f.origin.y, f.size.w, f.size.h)
 }
-unsafe fn is_text_item(v: *mut Object) -> bool {
+unsafe fn is_text_item(v: *mut AnyObject) -> bool {
     is_kind(v, class!(NSTextField)) || is_kind(v, class!(NSButton))
 }
-unsafe fn is_hit_target(v: *mut Object) -> bool {
+unsafe fn is_hit_target(v: *mut AnyObject) -> bool {
     if !is_kind(v, class!(NSButton)) {
         return false;
     }
-    let t: *mut Object = msg_send![v, title];
-    let img: *mut Object = msg_send![v, image];
+    let t: *mut AnyObject = msg_send![v, title];
+    let img: *mut AnyObject = msg_send![v, image];
     to_str(t).is_empty() && img.is_null()
 }
-unsafe fn audit_view(v: *mut Object, issues: &mut Vec<String>) {
+unsafe fn audit_view(v: *mut AnyObject, issues: &mut Vec<String>) {
     if !visible(v) {
         return;
     }
-    let subs: *mut Object = msg_send![v, subviews];
+    let subs: *mut AnyObject = msg_send![v, subviews];
     let n: usize = msg_send![subs, count];
-    let mut items: Vec<*mut Object> = vec![];
+    let mut items: Vec<*mut AnyObject> = vec![];
     for i in 0..n {
-        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let c: *mut AnyObject = msg_send![subs, objectAtIndex: i];
         if !visible(c) {
             continue;
         }
@@ -796,12 +791,12 @@ unsafe fn audit_view(v: *mut Object, issues: &mut Vec<String>) {
     }
     for &c in &items {
         if is_kind(c, class!(NSTextField)) {
-            let editable: BOOL = msg_send![c, isEditable];
-            if editable == YES {
+            let editable: Bool = msg_send![c, isEditable];
+            if editable == Bool::YES {
                 continue; // inputs scroll their text
             }
             let f: NSRect = msg_send![c, frame];
-            let cell: *mut Object = msg_send![c, cell];
+            let cell: *mut AnyObject = msg_send![c, cell];
             let lb: isize = msg_send![cell, lineBreakMode];
             let sz: NSSize = msg_send![cell, cellSize];
             let txt = to_str(msg_send![c, stringValue]);
@@ -822,7 +817,7 @@ unsafe fn audit_view(v: *mut Object, issues: &mut Vec<String>) {
 }
 /// Cross-container overlap: every visible, on-canvas text item compared in window coordinates,
 /// so labels in different subviews that collide on screen are caught too.
-unsafe fn collect_text_windowrects(v: *mut Object, out: &mut Vec<(*mut Object, NSRect)>) {
+unsafe fn collect_text_windowrects(v: *mut AnyObject, out: &mut Vec<(*mut AnyObject, NSRect)>) {
     if !visible(v) {
         return;
     }
@@ -831,31 +826,31 @@ unsafe fn collect_text_windowrects(v: *mut Object, out: &mut Vec<(*mut Object, N
         let vr: NSRect = msg_send![v, visibleRect];
         if !txt.is_empty() && vr.size.w > 1.0 && vr.size.h > 1.0 {
             let bb: NSRect = msg_send![v, bounds];
-            let r: NSRect = msg_send![v, convertRect: bb toView: nil()];
+            let r: NSRect = msg_send![v, convertRect: bb, toView: nil()];
             out.push((v, r));
         }
     }
     if is_kind(v, class!(NSControl)) {
         return; // a control's internal subviews (e.g. NSButtonTextField) are part of it
     }
-    let subs: *mut Object = msg_send![v, subviews];
+    let subs: *mut AnyObject = msg_send![v, subviews];
     let n: usize = msg_send![subs, count];
     for i in 0..n {
-        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let c: *mut AnyObject = msg_send![subs, objectAtIndex: i];
         collect_text_windowrects(c, out);
     }
 }
-unsafe fn audit_global_overlap_in(root: *mut Object, issues: &mut Vec<String>) {
+unsafe fn audit_global_overlap_in(root: *mut AnyObject, issues: &mut Vec<String>) {
     let mut items = vec![];
     collect_text_windowrects(root, &mut items);
     for i in 0..items.len() {
         for j in (i + 1)..items.len() {
             let ((va, a), (vb, b)) = (items[i], items[j]);
-            let anc_a: BOOL = msg_send![va, isDescendantOf: vb];
-            let anc_b: BOOL = msg_send![vb, isDescendantOf: va];
-            let sa: *mut Object = msg_send![va, superview];
-            let sb: *mut Object = msg_send![vb, superview];
-            if anc_a == YES || anc_b == YES || sa == sb {
+            let anc_a: Bool = msg_send![va, isDescendantOf: vb];
+            let anc_b: Bool = msg_send![vb, isDescendantOf: va];
+            let sa: *mut AnyObject = msg_send![va, superview];
+            let sb: *mut AnyObject = msg_send![vb, superview];
+            if anc_a == Bool::YES || anc_b == Bool::YES || sa == sb {
                 continue; // siblings are covered by audit_view
             }
             let ox = (a.origin.x + a.size.w).min(b.origin.x + b.size.w) - a.origin.x.max(b.origin.x);
@@ -871,35 +866,35 @@ unsafe fn audit_global_overlap_in(root: *mut Object, issues: &mut Vec<String>) {
     }
 }
 /// Traffic-light collision: any visible text in the window's content that sits under a standard button.
-unsafe fn audit_traffic(win: *mut Object, issues: &mut Vec<String>) {
-    let content: *mut Object = msg_send![win, contentView];
+unsafe fn audit_traffic(win: *mut AnyObject, issues: &mut Vec<String>) {
+    let content: *mut AnyObject = msg_send![win, contentView];
     for kind in 0..3isize {
-        let b: *mut Object = msg_send![win, standardWindowButton: kind];
+        let b: *mut AnyObject = msg_send![win, standardWindowButton: kind];
         if b.is_null() || !visible(b) {
             continue;
         }
         let bb: NSRect = msg_send![b, bounds];
-        let br: NSRect = msg_send![b, convertRect: bb toView: nil()];
+        let br: NSRect = msg_send![b, convertRect: bb, toView: nil()];
         walk_text_windowrect(content, br, issues);
     }
 }
-unsafe fn walk_text_windowrect(v: *mut Object, br: NSRect, issues: &mut Vec<String>) {
+unsafe fn walk_text_windowrect(v: *mut AnyObject, br: NSRect, issues: &mut Vec<String>) {
     if !visible(v) {
         return;
     }
     if is_kind(v, class!(NSTextField)) && !to_str(msg_send![v, stringValue]).is_empty() {
         let bb: NSRect = msg_send![v, bounds];
-        let r: NSRect = msg_send![v, convertRect: bb toView: nil()];
+        let r: NSRect = msg_send![v, convertRect: bb, toView: nil()];
         let ox = (r.origin.x + r.size.w).min(br.origin.x + br.size.w) - r.origin.x.max(br.origin.x);
         let oy = (r.origin.y + r.size.h).min(br.origin.y + br.size.h) - r.origin.y.max(br.origin.y);
         if ox > 1.0 && oy > 1.0 {
             issues.push(format!("under traffic lights: {}", describe(v)));
         }
     }
-    let subs: *mut Object = msg_send![v, subviews];
+    let subs: *mut AnyObject = msg_send![v, subviews];
     let n: usize = msg_send![subs, count];
     for i in 0..n {
-        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let c: *mut AnyObject = msg_send![subs, objectAtIndex: i];
         walk_text_windowrect(c, br, issues);
     }
 }
@@ -910,25 +905,25 @@ fn check_offscreen(tag: &str) {
     }
     unsafe {
         let ui = UI.get().unwrap();
-        let wins: *mut Object = msg_send![ui.app.get(), windows];
+        let wins: *mut AnyObject = msg_send![ui.app.get(), windows];
         let n: usize = msg_send![wins, count];
-        let screens: *mut Object = msg_send![class!(NSScreen), screens];
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
         let sn: usize = msg_send![screens, count];
         let mut bad = 0;
         for i in 0..n {
-            let w: *mut Object = msg_send![wins, objectAtIndex: i];
-            let vis: BOOL = msg_send![w, isVisible];
-            if vis == NO {
+            let w: *mut AnyObject = msg_send![wins, objectAtIndex: i];
+            let vis: Bool = msg_send![w, isVisible];
+            if vis == Bool::NO {
                 continue;
             }
             let f: NSRect = msg_send![w, frame];
             for j in 0..sn {
-                let s: *mut Object = msg_send![screens, objectAtIndex: j];
+                let s: *mut AnyObject = msg_send![screens, objectAtIndex: j];
                 let sf: NSRect = msg_send![s, frame];
                 let ox = (f.origin.x + f.size.w).min(sf.origin.x + sf.size.w) - f.origin.x.max(sf.origin.x);
                 let oy = (f.origin.y + f.size.h).min(sf.origin.y + sf.size.h) - f.origin.y.max(sf.origin.y);
                 if ox > 0.0 && oy > 0.0 {
-                    let cls: *mut Object = msg_send![w, className];
+                    let cls: *mut AnyObject = msg_send![w, className];
                     log(&format!("  window on screen: {} {} {:?}", to_str(cls), to_str(msg_send![w, title]), f));
                     bad += 1;
                 }
@@ -938,7 +933,7 @@ fn check_offscreen(tag: &str) {
     }
 }
 /// With JELLYFAST_SHOTS=<dir>, capture the window with screencapture (own-window capture).
-fn shot(tag: &str, idx: usize, win: *mut Object) {
+fn shot(tag: &str, idx: usize, win: *mut AnyObject) {
     let dir = match std::env::var("JELLYFAST_SHOTS") {
         Ok(d) if !d.is_empty() => d,
         _ => return,
@@ -953,19 +948,19 @@ fn shot(tag: &str, idx: usize, win: *mut Object) {
         let path = format!("{}/{}-{}-w{}-{}.png", dir, appearance, clean, idx, wclean);
         // Render the view tree straight to a bitmap: works for off-screen windows, unlike screencapture.
         // The frame view (contentView's superview) includes the titlebar and traffic lights.
-        let content: *mut Object = msg_send![win, contentView];
-        let root: *mut Object = msg_send![content, superview];
+        let content: *mut AnyObject = msg_send![win, contentView];
+        let root: *mut AnyObject = msg_send![content, superview];
         let root = if root.is_null() { content } else { root };
         let _: () = msg_send![root, layoutSubtreeIfNeeded];
         let b: NSRect = msg_send![root, bounds];
-        let rep: *mut Object = msg_send![root, bitmapImageRepForCachingDisplayInRect: b];
+        let rep: *mut AnyObject = msg_send![root, bitmapImageRepForCachingDisplayInRect: b];
         if rep.is_null() {
             return;
         }
-        let _: () = msg_send![root, cacheDisplayInRect: b toBitmapImageRep: rep];
-        let props: *mut Object = msg_send![class!(NSDictionary), dictionary];
-        let png: *mut Object = msg_send![rep, representationUsingType: 4usize properties: props]; // NSBitmapImageFileTypePNG
-        let _: BOOL = msg_send![png, writeToFile: ns(&path) atomically: YES];
+        let _: () = msg_send![root, cacheDisplayInRect: b, toBitmapImageRep: rep];
+        let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
+        let png: *mut AnyObject = msg_send![rep, representationUsingType: 4usize, properties: props]; // NSBitmapImageFileTypePNG
+        let _: Bool = msg_send![png, writeToFile: ns(&path), atomically: Bool::YES];
         log(&format!("  shot {}", path));
     }
 }
@@ -974,17 +969,17 @@ fn audit(tag: &str) {
     check_offscreen(tag);
     unsafe {
         let ui = UI.get().unwrap();
-        let wins: *mut Object = msg_send![ui.app.get(), windows];
+        let wins: *mut AnyObject = msg_send![ui.app.get(), windows];
         let n: usize = msg_send![wins, count];
         let mut issues = vec![];
         for i in 0..n {
-            let w: *mut Object = msg_send![wins, objectAtIndex: i];
-            let vis: BOOL = msg_send![w, isVisible];
-            if vis == NO {
+            let w: *mut AnyObject = msg_send![wins, objectAtIndex: i];
+            let vis: Bool = msg_send![w, isVisible];
+            if vis == Bool::NO {
                 continue;
             }
             let _: () = msg_send![w, layoutIfNeeded];
-            let content: *mut Object = msg_send![w, contentView];
+            let content: *mut AnyObject = msg_send![w, contentView];
             let before = issues.len();
             audit_view(content, &mut issues);
             // While the card is up, only its own text is compared globally: the
@@ -1109,16 +1104,16 @@ fn s_connected() {
     unsafe {
         let ui = UI.get().unwrap();
         state_check("login hidden", {
-            let h: BOOL = msg_send![ui.login_card.get(), isHidden];
-            h == YES
+            let h: Bool = msg_send![ui.login_card.get(), isHidden];
+            h == Bool::YES
         });
         state_check("home is the default landing", ui.home.active && ui.selected_view.is_none());
         state_check("home scroll shown, library grid hidden", visible(ui.home.scroll.get()) && !visible(ui.lib_scroll.get()));
         state_check("Home sidebar row selected on launch", row_selected(ui.home.row.get()));
         state_check("no library row selected on launch", selected_rows() == 0);
-        state_check("window is opaque", { let o: BOOL = msg_send![ui.win.get(), isOpaque]; o == YES });
-        state_check("library canvas draws background", { let o: BOOL = msg_send![ui.lib_scroll.get(), drawsBackground]; o == YES });
-        state_check("login backdrop hidden once connected", { let o: BOOL = msg_send![ui.bgfx.get(), isHidden]; o == YES });
+        state_check("window is opaque", { let o: Bool = msg_send![ui.win.get(), isOpaque]; o == Bool::YES });
+        state_check("library canvas draws background", { let o: Bool = msg_send![ui.lib_scroll.get(), drawsBackground]; o == Bool::YES });
+        state_check("login backdrop hidden once connected", { let o: Bool = msg_send![ui.bgfx.get(), isHidden]; o == Bool::YES });
         let cmds = take_cmds();
         state_check("no LoadView when landing on Home", !cmds.iter().any(|c| matches!(c, UiCmd::LoadView { .. })));
         state_check("connect sent LoadHome", cmds.iter().any(|c| matches!(c, UiCmd::LoadHome)));
@@ -1242,22 +1237,22 @@ fn s_grid_checks() {
         );
         let c = &d.cells[0];
         let r: f64 = msg_send![c.art, cornerRadius];
-        let mb: BOOL = msg_send![c.art, masksToBounds];
-        state_check("art layer radius + clipping", r == R_POSTER && mb == YES);
+        let mb: Bool = msg_send![c.art, masksToBounds];
+        state_check("art layer radius + clipping", r == R_POSTER && mb == Bool::YES);
         let so: f32 = msg_send![c.shadow, shadowOpacity];
         state_check("shadow host at rest opacity 0.18", (so - 0.18).abs() < 0.001);
-        let host_clips: BOOL = msg_send![c.shadow, masksToBounds];
-        state_check("shadow host does not clip", host_clips == NO);
+        let host_clips: Bool = msg_send![c.shadow, masksToBounds];
+        state_check("shadow host does not clip", host_clips == Bool::NO);
     }
 }
 fn s_hover_model() {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let c = &ui.grid_data.as_ref().unwrap().cells[0];
-        let _: *mut Object = msg_send![c.container, mouseEntered: nil()];
+        let _: () = msg_send![c.container, mouseEntered: nil()];
         let so: f32 = msg_send![c.shadow, shadowOpacity];
         state_check("hover raises shadow to 0.32", (so - 0.32).abs() < 0.001);
-        let _: *mut Object = msg_send![c.container, mouseExited: nil()];
+        let _: () = msg_send![c.container, mouseExited: nil()];
         let so: f32 = msg_send![c.shadow, shadowOpacity];
         state_check("unhover restores shadow", (so - 0.18).abs() < 0.001);
     }
@@ -1269,12 +1264,12 @@ fn s_poster_states() {
     unsafe {
         let ui = UI.get().unwrap();
         let d = ui.grid_data.as_ref().unwrap();
-        let g0: BOOL = msg_send![d.cells[0].glyph, isHidden];
-        let g1: BOOL = msg_send![d.cells[1].glyph, isHidden];
-        let g2: BOOL = msg_send![d.cells[2].glyph, isHidden];
-        state_check("garbage bytes keep the placeholder glyph", g0 == NO);
-        state_check("valid poster hides the glyph", g1 == YES);
-        state_check("untouched cell keeps its glyph", g2 == NO);
+        let g0: Bool = msg_send![d.cells[0].glyph, isHidden];
+        let g1: Bool = msg_send![d.cells[1].glyph, isHidden];
+        let g2: Bool = msg_send![d.cells[2].glyph, isHidden];
+        state_check("garbage bytes keep the placeholder glyph", g0 == Bool::NO);
+        state_check("valid poster hides the glyph", g1 == Bool::YES);
+        state_check("untouched cell keeps its glyph", g2 == Bool::NO);
     }
     send_items("Movies", items_of("Movie", 12), false);
 }
@@ -1283,18 +1278,18 @@ fn s_hover() {
         let ui = UI.get_mut().unwrap();
         if let Some(d) = ui.grid_data.as_ref() {
             for c in &d.cells {
-                let _: *mut Object = msg_send![c.container, mouseEntered: nil()];
-                let _: *mut Object = msg_send![c.container, mouseExited: nil()];
+                let _: () = msg_send![c.container, mouseEntered: nil()];
+                let _: () = msg_send![c.container, mouseExited: nil()];
             }
         }
     }
 }
-fn row_selected(row: *mut Object) -> bool {
+fn row_selected(row: *mut AnyObject) -> bool {
     unsafe {
-        let rb: *mut Object = msg_send![row, subviews];
-        let bg: *mut Object = msg_send![rb, objectAtIndex: 0usize];
-        let t: BOOL = msg_send![bg, isTransparent];
-        t == NO
+        let rb: *mut AnyObject = msg_send![row, subviews];
+        let bg: *mut AnyObject = msg_send![rb, objectAtIndex: 0usize];
+        let t: Bool = msg_send![bg, isTransparent];
+        t == Bool::NO
     }
 }
 fn selected_rows() -> usize {
@@ -1303,10 +1298,10 @@ fn selected_rows() -> usize {
         ui.rows
             .iter()
             .filter(|r| {
-                let rb: *mut Object = msg_send![r.0, subviews];
-                let bg: *mut Object = msg_send![rb, objectAtIndex: 0usize];
-                let t: BOOL = msg_send![bg, isTransparent];
-                t == NO
+                let rb: *mut AnyObject = msg_send![r.0, subviews];
+                let bg: *mut AnyObject = msg_send![rb, objectAtIndex: 0usize];
+                let t: Bool = msg_send![bg, isTransparent];
+                t == Bool::NO
             })
             .count()
     }
@@ -1314,14 +1309,14 @@ fn selected_rows() -> usize {
 fn s_sidebar_click() {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let rows: Vec<*mut Object> = ui.rows.iter().map(|r| r.0).collect();
+        let rows: Vec<*mut AnyObject> = ui.rows.iter().map(|r| r.0).collect();
         state_check("5 library rows (livetv already present)", rows.len() == 5);
         // arranged: search field, "Library" header, then JRSidebarRow rows
-        let arr: *mut Object = msg_send![ui.side_stack.get(), arrangedSubviews];
-        let third: *mut Object = msg_send![arr, objectAtIndex: 3usize]; // search, Home, Library header, first library
-        let cls = objc::runtime::Class::get("JRSidebarRow").unwrap();
-        let k: BOOL = msg_send![third, isKindOfClass: cls];
-        state_check("first library row is a JRSidebarRow", k == YES);
+        let arr: *mut AnyObject = msg_send![ui.side_stack.get(), arrangedSubviews];
+        let third: *mut AnyObject = msg_send![arr, objectAtIndex: 3usize]; // search, Home, Library header, first library
+        let cls = AnyClass::get(c"JRSidebarRow").unwrap();
+        let k: Bool = msg_send![third, isKindOfClass: cls];
+        state_check("first library row is a JRSidebarRow", k == Bool::YES);
         let sf = frame_of(ui.side_stack.get());
         let sb = frame_of(ui.sidebar.get());
         state_check(
@@ -1333,13 +1328,13 @@ fn s_sidebar_click() {
             state_check("exactly one row selected after click", selected_rows() == 1);
             state_check("clicked row is the selected one", UI.get().unwrap().selected_view == Some(i));
         }
-        let n_before: usize = { let a: *mut Object = msg_send![ui.side_stack.get(), arrangedSubviews]; msg_send![a, count] };
+        let n_before: usize = { let a: *mut AnyObject = msg_send![ui.side_stack.get(), arrangedSubviews]; msg_send![a, count] };
         handle_main(MainMsg::Connected {
             user_name: "tester".into(),
             views: ui.views.clone(),
             has_live_tv: true,
         });
-        let n_after: usize = { let a: *mut Object = msg_send![ui.side_stack.get(), arrangedSubviews]; msg_send![a, count] };
+        let n_after: usize = { let a: *mut AnyObject = msg_send![ui.side_stack.get(), arrangedSubviews]; msg_send![a, count] };
         state_check("sidebar rebuild does not pile up views", n_before == n_after);
     }
 }
@@ -1372,8 +1367,8 @@ fn s_items_empty() {
     send_items("Empty", vec![], false);
     unsafe {
         let ui = UI.get().unwrap();
-        let h: BOOL = msg_send![ui.status_label.get(), isHidden];
-        state_check("status label visible", h == NO);
+        let h: Bool = msg_send![ui.status_label.get(), isHidden];
+        state_check("status label visible", h == Bool::NO);
         let al: isize = msg_send![ui.status_label.get(), alignment];
         state_check("status label centred (arm64-safe ALIGN_CENTER)", al as usize == crate::ui::theme::ALIGN_CENTER);
     }
@@ -1395,8 +1390,8 @@ fn s_header() {
         state_check("title x == SIDEBAR_W + EDGE without back", (header_title_x() - (SIDEBAR_W + EDGE)).abs() < 0.01);
         send_items("Episodes", items_of("Episode", 1), true);
         state_check("title shifts +36 with back", (header_title_x() - (SIDEBAR_W + EDGE + 36.)).abs() < 0.01);
-        let bh: BOOL = msg_send![ui.lib_back.get(), isHidden];
-        state_check("library back visible when can_go_back", bh == NO);
+        let bh: Bool = msg_send![ui.lib_back.get(), isHidden];
+        state_check("library back visible when can_go_back", bh == Bool::NO);
         state_check("count label singular", read_field(ui.header_count.get()) == "1 episode");
         send_items("Albums", items_of("MusicAlbum", 5), false);
         state_check("count label plural", read_field(ui.header_count.get()) == "5 albums");
@@ -1417,25 +1412,25 @@ fn s_states() {
         // first load: skeleton cells, no items clickable
         act(sel!(viewSelected:), tagged_button(1));
         state_check("skeleton cells shown on first load", ui.grid_data.as_ref().unwrap().cells.len() == 12 && ui.items.is_empty());
-        let sh: BOOL = msg_send![ui.spinner.get(), isHidden];
-        state_check("no header spinner during skeleton", sh == YES);
+        let sh: Bool = msg_send![ui.spinner.get(), isHidden];
+        state_check("no header spinner during skeleton", sh == Bool::YES);
         take_cmds();
         // error with nothing on screen
         handle_main(MainMsg::PlaybackError("HTTP 500 from the server, which is a rather long message that goes on and on and on".into()));
-        let hh: BOOL = msg_send![ui.state_host.get(), isHidden];
-        state_check("error state shown", hh == NO);
-        let bb: BOOL = msg_send![ui.state_btn.get(), isHidden];
-        state_check("Try Again visible on error", bb == NO);
+        let hh: Bool = msg_send![ui.state_host.get(), isHidden];
+        state_check("error state shown", hh == Bool::NO);
+        let bb: Bool = msg_send![ui.state_btn.get(), isHidden];
+        state_check("Try Again visible on error", bb == Bool::NO);
         // empty search state, centred on the grid area
         set_text(ui.search.get(), "zzz");
         send_items("Results", vec![], false);
         let _: () = msg_send![ui.win.get(), layoutIfNeeded];
-        let hb: BOOL = msg_send![ui.state_btn.get(), isHidden];
-        state_check("no Try Again on empty", hb == YES);
+        let hb: Bool = msg_send![ui.state_btn.get(), isHidden];
+        state_check("no Try Again on empty", hb == Bool::YES);
         state_check("empty search body", read_field(ui.state_body.get()).contains("No results for"));
         let sf = frame_of(ui.status_label.get());
-        let win_r: NSRect = msg_send![ui.status_label.get(), convertRect: bounds_of(ui.status_label.get()) toView: nil()];
-        let content: *mut Object = msg_send![ui.win.get(), contentView];
+        let win_r: NSRect = msg_send![ui.status_label.get(), convertRect: bounds_of(ui.status_label.get()), toView: nil()];
+        let content: *mut AnyObject = msg_send![ui.win.get(), contentView];
         let cw = bounds_of(content).size.w;
         let expect = SIDEBAR_W + (cw - SIDEBAR_W) / 2.;
         let _ = sf;
@@ -1446,11 +1441,11 @@ fn s_states() {
         send_items("Movies", items_of("Movie", 12), false);
         act(sel!(refresh:), nil());
         state_check("refresh keeps items", ui.grid_data.as_ref().unwrap().cells.len() == 12);
-        let sh: BOOL = msg_send![ui.spinner.get(), isHidden];
-        state_check("header spinner while refreshing", sh == NO);
+        let sh: Bool = msg_send![ui.spinner.get(), isHidden];
+        state_check("header spinner while refreshing", sh == Bool::NO);
         send_items("Movies", items_of("Movie", 12), false);
-        let sh: BOOL = msg_send![ui.spinner.get(), isHidden];
-        state_check("spinner stops on arrival", sh == YES);
+        let sh: Bool = msg_send![ui.spinner.get(), isHidden];
+        state_check("spinner stops on arrival", sh == Bool::YES);
     }
 }
 static SEARCH_BASE: Mutex<usize> = Mutex::new(0);
@@ -1463,7 +1458,7 @@ fn s_debounce_type() {
         take_cmds();
         for (i, q) in ["a", "ab", "abc"].iter().enumerate() {
             set_text(ui.search.get(), q);
-            let note: *mut Object = msg_send![class!(NSNotification), notificationWithName: ns("NSControlTextDidChangeNotification") object: ui.search.get()];
+            let note: *mut AnyObject = msg_send![class!(NSNotification), notificationWithName: ns("NSControlTextDidChangeNotification"), object: ui.search.get()];
             act(sel!(controlTextDidChange:), note);
             *SEARCH_BASE.lock().unwrap() = i;
         }
@@ -1518,9 +1513,9 @@ fn s_nav_actions() {
         let _: () = msg_send![ui.sort_popup.get(), selectItemAtIndex: idx];
         act(sel!(sortChanged:), nil());
         set_text(ui.search.get(), "query");
-        let note: *mut Object = msg_send![class!(NSNotification), notificationWithName: ns("NSControlTextDidChangeNotification") object: ui.search.get()];
+        let note: *mut AnyObject = msg_send![class!(NSNotification), notificationWithName: ns("NSControlTextDidChangeNotification"), object: ui.search.get()];
         act(sel!(controlTextDidChange:), note);
-        let note2: *mut Object = msg_send![class!(NSNotification), notificationWithName: ns("x") object: ui.login_url.get()];
+        let note2: *mut AnyObject = msg_send![class!(NSNotification), notificationWithName: ns("x"), object: ui.login_url.get()];
         act(sel!(controlTextDidChange:), note2);
         act(sel!(refresh:), nil());
         act(sel!(goBack:), nil());
@@ -1679,13 +1674,13 @@ fn s_sort_filter() {
         // Album tracks are not sorted: the popup is hidden over them and back for libraries.
         ui.sort_applies = false;
         send_items("Album", items_of("Audio", 2), true);
-        let pop: *mut Object = UI.get_mut().unwrap().sort_popup.get();
-        let hidden: BOOL = msg_send![pop, isHidden];
-        state_check("album tracks hide the sort popup", hidden == YES);
+        let pop: *mut AnyObject = UI.get_mut().unwrap().sort_popup.get();
+        let hidden: Bool = msg_send![pop, isHidden];
+        state_check("album tracks hide the sort popup", hidden == Bool::YES);
         UI.get_mut().unwrap().sort_applies = true;
         send_items("Movies", fixture.clone(), false);
-        let hidden: BOOL = msg_send![pop, isHidden];
-        state_check("library shows the sort popup", hidden == NO);
+        let hidden: Bool = msg_send![pop, isHidden];
+        state_check("library shows the sort popup", hidden == Bool::NO);
 
         // Relaunch: the popup opens on the saved choice.
         UI.get_mut().unwrap().cfg.sort_by = Some("DatePlayed".into());
@@ -1721,20 +1716,20 @@ fn s_shortcuts_menu() {
     }
 }
 /// The "Edit" submenu item with this action, if the main menu has one.
-unsafe fn edit_menu_item(action: &str) -> Option<*mut Object> {
-    let main: *mut Object = msg_send![UI.get().unwrap().app.get(), mainMenu];
+unsafe fn edit_menu_item(action: &str) -> Option<*mut AnyObject> {
+    let main: *mut AnyObject = msg_send![UI.get().unwrap().app.get(), mainMenu];
     let n: NSInteger = msg_send![main, numberOfItems];
     for i in 0..n {
-        let top: *mut Object = msg_send![main, itemAtIndex: i];
-        let sub: *mut Object = msg_send![top, submenu];
+        let top: *mut AnyObject = msg_send![main, itemAtIndex: i];
+        let sub: *mut AnyObject = msg_send![top, submenu];
         if sub.is_null() || to_str(msg_send![sub, title]) != "Edit" {
             continue;
         }
         let m: NSInteger = msg_send![sub, numberOfItems];
         for j in 0..m {
-            let it: *mut Object = msg_send![sub, itemAtIndex: j];
-            let a: objc::runtime::Sel = msg_send![it, action];
-            if !a.as_ptr().is_null() && a.name() == action {
+            let it: *mut AnyObject = msg_send![sub, itemAtIndex: j];
+            let a: Option<Sel> = msg_send![it, action];
+            if a.is_some_and(|a| a.name().to_str().ok() == Some(action)) {
                 return Some(it);
             }
         }
@@ -1759,7 +1754,7 @@ fn s_edit_menu() {
                 Some(it) => {
                     let k = to_str(msg_send![it, keyEquivalent]);
                     let m: NSUInteger = msg_send![it, keyEquivalentModifierMask];
-                    let t: *mut Object = msg_send![it, target];
+                    let t: *mut AnyObject = msg_send![it, target];
                     k == key && m & CMD != 0 && t.is_null()
                 }
                 None => false,
@@ -1773,10 +1768,10 @@ fn s_shortcuts_text() {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let win = ui.win.get();
-        let _: BOOL = msg_send![win, makeFirstResponder: ui.search.get()];
-        let fr: *mut Object = msg_send![win, firstResponder];
-        let is_text: BOOL = msg_send![fr, isKindOfClass: class!(NSText)];
-        state_check("search field is editing text", is_text == YES);
+        let _: Bool = msg_send![win, makeFirstResponder: ui.search.get()];
+        let fr: *mut AnyObject = msg_send![win, firstResponder];
+        let is_text: Bool = msg_send![fr, isKindOfClass: class!(NSText)];
+        state_check("search field is editing text", is_text == Bool::YES);
         state_check("plain Space/arrows/M/C/A/F/Tab/Return yield to typing", !item_enabled("playPause:", 0, 0)
             && !item_enabled("seekBack:", 0, 0)
             && !item_enabled("volUp:", 0, 0)
@@ -1786,10 +1781,10 @@ fn s_shortcuts_text() {
             && !item_enabled("openSelected:", 0, 0));
         state_check("⌘ shortcuts still work while typing", item_enabled("focusSearch:", 0, CMD)
             && item_enabled("refresh:", 0, CMD));
-        let _: BOOL = msg_send![win, makeFirstResponder: nil()];
-        let fr2: *mut Object = msg_send![win, firstResponder];
-        let is_text2: BOOL = msg_send![fr2, isKindOfClass: class!(NSText)];
-        state_check("focus released from the text field", is_text2 == NO);
+        let _: Bool = msg_send![win, makeFirstResponder: nil()];
+        let fr2: *mut AnyObject = msg_send![win, firstResponder];
+        let is_text2: Bool = msg_send![fr2, isKindOfClass: class!(NSText)];
+        state_check("focus released from the text field", is_text2 == Bool::NO);
     }
 }
 fn s_shortcuts_grid() {
@@ -1867,10 +1862,10 @@ fn detail_view(series: bool) -> DetailView {
     }
 }
 /// Send `sel` to a page view (its own target), like a click would.
-unsafe fn act_on(target: *mut Object, sel: objc::runtime::Sel) {
-    let _: *mut Object = msg_send![target, performSelector: sel withObject: nil()];
+unsafe fn act_on(target: *mut AnyObject, sel: Sel) {
+    let _: *mut AnyObject = msg_send![target, performSelector: sel, withObject: nil()];
 }
-fn detail_host() -> *mut Object {
+fn detail_host() -> *mut AnyObject {
     unsafe { UI.get().unwrap().detail.host.get() }
 }
 fn s_detail_movie() {
@@ -1953,22 +1948,22 @@ fn episode_rows(n: usize, prefix: &str) -> Vec<EpisodeRow> {
         .collect()
 }
 /// Send `sel` to a view with `sender`, like a control would when used.
-unsafe fn act_with(target: *mut Object, sel: objc::runtime::Sel, sender: *mut Object) {
-    let _: *mut Object = msg_send![target, performSelector: sel withObject: sender];
+unsafe fn act_with(target: *mut AnyObject, sel: Sel, sender: *mut AnyObject) {
+    let _: *mut AnyObject = msg_send![target, performSelector: sel, withObject: sender];
 }
 /// The transparent play button of the episode row with `tag`, anywhere under `v`.
-unsafe fn find_row_button(v: *mut Object, tag: isize) -> *mut Object {
+unsafe fn find_row_button(v: *mut AnyObject, tag: isize) -> *mut AnyObject {
     if is_kind(v, class!(NSButton)) {
         let t: isize = msg_send![v, tag];
-        let title: *mut Object = msg_send![v, title];
+        let title: *mut AnyObject = msg_send![v, title];
         if t == tag && to_str(title).is_empty() {
             return v;
         }
     }
-    let subs: *mut Object = msg_send![v, subviews];
+    let subs: *mut AnyObject = msg_send![v, subviews];
     let n: usize = msg_send![subs, count];
     for i in 0..n {
-        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let c: *mut AnyObject = msg_send![subs, objectAtIndex: i];
         let found = find_row_button(c, tag);
         if !found.is_null() {
             return found;
@@ -2068,11 +2063,11 @@ fn s_detail_error() {
 }
 fn s_misc_actions() {
     unsafe {
-        let mi: *mut Object = msg_send![class!(NSMenuItem), new];
+        let mi: *mut AnyObject = msg_send![class!(NSMenuItem), new];
         let _: () = msg_send![mi, setRepresentedObject: ns("Movie-1")];
         act(sel!(markWatched:), mi);
         act(sel!(openInWeb:), mi); // open_in_web never launches a browser in self-test mode
-        let _: *mut Object = msg_send![mi, autorelease];
+        let _: *mut AnyObject = msg_send![mi, autorelease];
     }
 }
 fn s_stop_idle() {
@@ -2230,12 +2225,12 @@ fn s_settings_cancel() {
                     .map(|&v| { let f: NSRect = msg_send![v, frame]; f.origin.x })
                     .collect();
                 state_check("settings controls share x = 186", ctl_x.iter().all(|&x| (x - 186.0).abs() < 0.5));
-                let c: *mut Object = msg_send![ui.settings_win.get(), contentView];
-                let subs: *mut Object = msg_send![c, subviews];
+                let c: *mut AnyObject = msg_send![ui.settings_win.get(), contentView];
+                let subs: *mut AnyObject = msg_send![c, subviews];
                 let n: usize = msg_send![subs, count];
                 let mut esc = false;
                 for i in 0..n {
-                    let v: *mut Object = msg_send![subs, objectAtIndex: i];
+                    let v: *mut AnyObject = msg_send![subs, objectAtIndex: i];
                     if is_kind(v, class!(NSButton)) && to_str(msg_send![v, title]) == "Cancel" {
                         esc = to_str(msg_send![v, keyEquivalent]) == "\u{1b}";
                     }
@@ -2353,13 +2348,13 @@ fn s_library_prefs() {
         state_check("defaults restored", ui.rows.len() == 5);
     }
 }
-unsafe fn is_shown_state(cb: *mut Object) -> bool {
+unsafe fn is_shown_state(cb: *mut AnyObject) -> bool {
     let st: NSInteger = msg_send![cb, state];
     st != 0
 }
-unsafe fn ctl_enabled(v: *mut Object) -> bool {
-    let e: BOOL = msg_send![v, isEnabled];
-    e == YES
+unsafe fn ctl_enabled(v: *mut AnyObject) -> bool {
+    let e: Bool = msg_send![v, isEnabled];
+    e == Bool::YES
 }
 /// Select an item in the Libraries popup and fire its action, as a click would.
 unsafe fn pick(i: isize) {
@@ -2426,8 +2421,8 @@ fn s_unified_actions() {
     unsafe {
         act(sel!(focusSearch:), nil());
         let ui = UI.get().unwrap();
-        let fr: *mut Object = msg_send![ui.win.get(), firstResponder];
-        let editing: *mut Object = msg_send![ui.search.get(), currentEditor];
+        let fr: *mut AnyObject = msg_send![ui.win.get(), firstResponder];
+        let editing: *mut AnyObject = msg_send![ui.search.get(), currentEditor];
         state_check("unified: Search focuses the search field", fr == ui.search.get() || !editing.is_null());
         // Seerr is off in this run, so Requests shows its setup state and has no sidebar row.
         act(sel!(requestsSelected:), nil());
@@ -2628,28 +2623,28 @@ fn s_play_chrome() {
     use crate::ui::player;
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let ap: *mut Object = msg_send![ui.player_host.get(), effectiveAppearance];
-        let name: *mut Object = msg_send![ap, name];
+        let ap: *mut AnyObject = msg_send![ui.player_host.get(), effectiveAppearance];
+        let name: *mut AnyObject = msg_send![ap, name];
         state_check("player chrome is dark", to_str(name) == "NSAppearanceNameDarkAqua");
         let cs: isize = msg_send![ui.avview.get(), controlsStyle];
         state_check("AVKit controls are off (controlsStyle none)", cs == 0);
         state_check("toast hidden when empty", !player::toast_visible());
-        let ip: BOOL = msg_send![ui.info_panel.get(), isHidden];
-        state_check("playback info hidden by default", ip == YES);
-        let sel: objc::runtime::Sel = msg_send![ui.back_btn.get(), action];
+        let ip: Bool = msg_send![ui.info_panel.get(), isHidden];
+        state_check("playback info hidden by default", ip == Bool::YES);
+        let sel: Sel = msg_send![ui.back_btn.get(), action];
         state_check("back button stops playback", sel == sel!(stopPlayback:));
         let a: f64 = msg_send![ui.top_bar.get(), alphaValue];
         state_check("top bar visible at start", a > 0.99);
         state_check("backdrop gone once playing", !player::backdrop_visible());
         // info toggle shows the panel and persists
         act(sel!(togglePlaybackInfo:), nil());
-        let ip: BOOL = msg_send![ui.info_panel.get(), isHidden];
-        state_check("info panel shown after toggle", ip == NO && ui.cfg.settings.show_stats);
+        let ip: Bool = msg_send![ui.info_panel.get(), isHidden];
+        state_check("info panel shown after toggle", ip == Bool::NO && ui.cfg.settings.show_stats);
         update_chip();
         state_check("info text filled", read_field(ui.info_label.get()).contains("/"));
         act(sel!(togglePlaybackInfo:), nil());
-        let ip: BOOL = msg_send![ui.info_panel.get(), isHidden];
-        state_check("info panel hidden after second toggle", ip == YES && !ui.cfg.settings.show_stats);
+        let ip: Bool = msg_send![ui.info_panel.get(), isHidden];
+        state_check("info panel hidden after second toggle", ip == Bool::YES && !ui.cfg.settings.show_stats);
     }
 }
 fn s_toast_hidden() {
@@ -2730,7 +2725,7 @@ fn s_player_bar_buttons() {
             (pip, sel!(togglePiP:), "picture in picture"),
             (full, sel!(fullscreen:), "full screen"),
         ] {
-            let a: objc::runtime::Sel = msg_send![b.get(), action];
+            let a: Sel = msg_send![b.get(), action];
             state_check(&format!("button {} wired", name), a == sel);
         }
         // PiP and full screen are fired too (off-screen they only count the press).
@@ -2742,19 +2737,19 @@ fn s_player_bar_buttons() {
         let pc = UI.get().unwrap().pbar.pip_ctl.get();
         state_check("pip controller exists for the video layer", !pc.is_null());
         if !pc.is_null() {
-            let possible: BOOL = msg_send![pc, isPictureInPicturePossible];
-            let en: BOOL = msg_send![pip.get(), isEnabled];
+            let possible: Bool = msg_send![pc, isPictureInPicturePossible];
+            let en: Bool = msg_send![pip.get(), isEnabled];
             state_check(
-                &format!("pip button enabled matches isPictureInPicturePossible (possible: {})", possible == YES),
-                (possible == YES) == (en == YES),
+                &format!("pip button enabled matches isPictureInPicturePossible (possible: {})", possible == Bool::YES),
+                (possible == Bool::YES) == (en == Bool::YES),
             );
-            let active: BOOL = msg_send![pc, isPictureInPictureActive];
-            state_check("pip is not showing in self-test", active == NO);
+            let active: Bool = msg_send![pc, isPictureInPictureActive];
+            state_check("pip is not showing in self-test", active == Bool::NO);
         }
-        let hid: BOOL = msg_send![pip.get(), isHidden];
-        state_check("pip button shown on this Mac", hid == NO);
-        let btn_on: BOOL = msg_send![pip.get(), isEnabled];
-        state_check("pip menu item follows the button", crate::ui::shortcuts::item_enabled("togglePiP:", 0, crate::ui::shortcuts::ALT | crate::ui::shortcuts::CMD) == (btn_on == YES));
+        let hid: Bool = msg_send![pip.get(), isHidden];
+        state_check("pip button shown on this Mac", hid == Bool::NO);
+        let btn_on: Bool = msg_send![pip.get(), isEnabled];
+        state_check("pip menu item follows the button", crate::ui::shortcuts::item_enabled("togglePiP:", 0, crate::ui::shortcuts::ALT | crate::ui::shortcuts::CMD) == (btn_on == Bool::YES));
         state_check("pip shortcut is ⌥⌘P in the table", crate::ui::shortcuts::SHORTCUTS.iter().any(|e| {
             e.action == "togglePiP:" && e.key == "p" && e.mods == crate::ui::shortcuts::ALT | crate::ui::shortcuts::CMD
         }));
@@ -2767,9 +2762,9 @@ fn s_player_bar_buttons() {
         state_check("play button toggles playback", (r0 > 0.0) != (r1 > 0.0));
         act(sel!(playPause:), play.get());
         // Mute toggles.
-        let m0: BOOL = msg_send![UI.get().unwrap().player.get(), isMuted];
+        let m0: Bool = msg_send![UI.get().unwrap().player.get(), isMuted];
         act(sel!(mute:), mute.get());
-        let m1: BOOL = msg_send![UI.get().unwrap().player.get(), isMuted];
+        let m1: Bool = msg_send![UI.get().unwrap().player.get(), isMuted];
         state_check("mute button toggles mute", m0 != m1);
         act(sel!(mute:), mute.get());
         // Back and forward run without touching anything else.
@@ -2804,11 +2799,11 @@ fn s_player_bar_buttons() {
         // Hover tooltip shows the time under the pointer and goes away again.
         pb::set_hover(Some(0.5));
         let tip = UI.get().unwrap().pbar.tip.get();
-        let th: BOOL = msg_send![tip, isHidden];
-        state_check("hover tooltip shows", th == NO && read_field(UI.get().unwrap().pbar.tip_label.get()).contains(':'));
+        let th: Bool = msg_send![tip, isHidden];
+        state_check("hover tooltip shows", th == Bool::NO && read_field(UI.get().unwrap().pbar.tip_label.get()).contains(':'));
         pb::set_hover(None);
-        let th: BOOL = msg_send![tip, isHidden];
-        state_check("hover tooltip hides", th == YES);
+        let th: Bool = msg_send![tip, isHidden];
+        state_check("hover tooltip hides", th == Bool::YES);
         // Scrubber seek moves the played fraction.
         pb::seek_frac(0.25);
         state_check("scrubber seek sets the fraction", (UI.get().unwrap().pbar.frac - 0.25).abs() < 1e-6);
@@ -2908,7 +2903,7 @@ fn sub_resize(w: f64, h: f64) {
     set_content_size(w, h);
     unsafe {
         let ui = UI.get().unwrap();
-        let content: *mut Object = msg_send![ui.win.get(), contentView];
+        let content: *mut AnyObject = msg_send![ui.win.get(), contentView];
         let _: () = msg_send![content, layoutSubtreeIfNeeded];
         crate::ui::subtitles::settle();
     }
@@ -2933,13 +2928,13 @@ fn s_sub_on_screen() {
         }
         // The Up Next card up at the minimum size, with a long two-line cue under it.
         sub_resize(960.0, 600.0);
-        let _: () = msg_send![card, setHidden: NO];
+        let _: () = msg_send![card, setHidden: Bool::NO];
         let _: () = msg_send![card, setAlphaValue: 1.0f64];
         crate::ui::subtitles::show_text(SUB_LONG);
         let problems = crate::ui::subtitles::chrome_problems();
         state_check(&format!("subtitles: long cue clear of the Up Next card ({})", problems.join("; ")), problems.is_empty());
         audit("subtitles long cue @min");
-        let _: () = msg_send![card, setHidden: YES];
+        let _: () = msg_send![card, setHidden: Bool::YES];
         crate::ui::subtitles::show_text(SUB_CUE);
         sub_resize(1280.0, 800.0);
     }
@@ -3022,7 +3017,7 @@ fn s_player_header() {
         let s = read_field(ui.top_sub.get());
         state_check("episode header: title is the episode name", t == LONG);
         state_check("episode header: series line", s == format!("{} · S12 E105", LONG_SERIES));
-        let bar: *mut Object = msg_send![ui.top_title.get(), superview];
+        let bar: *mut AnyObject = msg_send![ui.top_title.get(), superview];
         state_check("episode header sits in the top bar (fades with it)", bar == ui.top_bar.get());
     }
     audit_both("player header (episode)");
@@ -3118,12 +3113,12 @@ fn s_audio_bar() {
     unsafe {
         let ui = UI.get_mut().unwrap();
         state_check("audio: playing set", ui.playing.is_some());
-        let ph: BOOL = msg_send![ui.player_host.get(), isHidden];
-        state_check("audio: player_host stays hidden", ph == YES);
-        let ch: BOOL = msg_send![ui.content_host.get(), isHidden];
-        state_check("audio: content_host stays visible", ch == NO);
-        let bh: BOOL = msg_send![ui.now.bar.get(), isHidden];
-        state_check("audio: bar visible", bh == NO && crate::ui::nowbar::visible());
+        let ph: Bool = msg_send![ui.player_host.get(), isHidden];
+        state_check("audio: player_host stays hidden", ph == Bool::YES);
+        let ch: Bool = msg_send![ui.content_host.get(), isHidden];
+        state_check("audio: content_host stays visible", ch == Bool::NO);
+        let bh: Bool = msg_send![ui.now.bar.get(), isHidden];
+        state_check("audio: bar visible", bh == Bool::NO && crate::ui::nowbar::visible());
         let f: NSRect = msg_send![ui.lib_scroll.get(), frame];
         state_check("audio: lib_scroll origin y == NOW_BAR_H", f.origin.y == crate::ui::theme::NOW_BAR_H);
         let bf: NSRect = msg_send![ui.now.bar.get(), frame];
@@ -3162,8 +3157,8 @@ fn s_audio_stop() {
         act(sel!(stopPlayback:), nil());
         let ui = UI.get().unwrap();
         state_check("audio: playing cleared", ui.playing.is_none());
-        let bh: BOOL = msg_send![ui.now.bar.get(), isHidden];
-        state_check("audio: bar hidden after stop", bh == YES && !crate::ui::nowbar::visible());
+        let bh: Bool = msg_send![ui.now.bar.get(), isHidden];
+        state_check("audio: bar hidden after stop", bh == Bool::YES && !crate::ui::nowbar::visible());
         let f: NSRect = msg_send![ui.lib_scroll.get(), frame];
         state_check("audio: lib_scroll origin y restored to 0", f.origin.y == 0.0);
         let iv: f64 = msg_send![ui.timer.get(), timeInterval];
@@ -3404,17 +3399,17 @@ fn s_settings_skip_controls() {
         state_check("settings: autoplay checkbox back to on", a == 1);
     }
 }
-unsafe fn find_titled(v: *mut Object, title: &str) -> *mut Object {
+unsafe fn find_titled(v: *mut AnyObject, title: &str) -> *mut AnyObject {
     if is_kind(v, class!(NSButton)) {
-        let t: *mut Object = msg_send![v, title];
+        let t: *mut AnyObject = msg_send![v, title];
         if to_str(t) == title {
             return v;
         }
     }
-    let subs: *mut Object = msg_send![v, subviews];
+    let subs: *mut AnyObject = msg_send![v, subviews];
     let n: usize = msg_send![subs, count];
     for i in 0..n {
-        let c: *mut Object = msg_send![subs, objectAtIndex: i];
+        let c: *mut AnyObject = msg_send![subs, objectAtIndex: i];
         let found = find_titled(c, title);
         if !found.is_null() {
             return found;
@@ -3456,11 +3451,11 @@ fn s_signed_out() {
     handle_main(MainMsg::SignedOut);
     unsafe {
         let ui = UI.get().unwrap();
-        let c: *mut Object = msg_send![ui.login_err.get(), textColor];
-        let sec: *mut Object = msg_send![class!(NSColor), secondaryLabelColor];
+        let c: *mut AnyObject = msg_send![ui.login_err.get(), textColor];
+        let sec: *mut AnyObject = msg_send![class!(NSColor), secondaryLabelColor];
         // Theme colours are dynamic objects, so compare what they resolve to.
         state_check("signed-out message is neutral (secondary colour)", srgb(c) == srgb(sec));
-        let t: *mut Object = msg_send![ui.win.get(), title];
+        let t: *mut AnyObject = msg_send![ui.win.get(), title];
         state_check("window title still Jellyfast after playback", to_str(t) == "Jellyfast");
     }
 }
@@ -3498,10 +3493,10 @@ fn seerr_mixed() -> Vec<SeerrResult> {
         seerr_result("movie", 77, "A very long blocklisted title that has to be truncated somewhere around here", Some(2001), Availability::Blocklisted),
     ]
 }
-fn seerr_hidden(v: *mut Object) -> bool {
+fn seerr_hidden(v: *mut AnyObject) -> bool {
     unsafe {
-        let h: BOOL = msg_send![v, isHidden];
-        h == YES
+        let h: Bool = msg_send![v, isHidden];
+        h == Bool::YES
     }
 }
 /// Requests is the visible screen in the main window (not a window or sheet of its own).
@@ -3519,15 +3514,15 @@ fn sheet_open() -> bool {
     }
 }
 /// Direct subviews of `row` that are an instance of `cls` and satisfy `pred`.
-unsafe fn seerr_subviews(row: *mut Object, cls: &str, pred: &dyn Fn(*mut Object) -> bool) -> usize {
-    let c = objc::runtime::objc_getClass(format!("{}\0", cls).as_ptr() as *const std::os::raw::c_char) as *mut Object;
-    let subs: *mut Object = msg_send![row, subviews];
+unsafe fn seerr_subviews(row: *mut AnyObject, cls: &str, pred: &dyn Fn(*mut AnyObject) -> bool) -> usize {
+    let c = AnyClass::get(&std::ffi::CString::new(cls).expect("class name has no NUL")).map_or(std::ptr::null_mut(), |c| c as *const AnyClass as *mut AnyObject);
+    let subs: *mut AnyObject = msg_send![row, subviews];
     let n: usize = msg_send![subs, count];
     let mut k = 0;
     for i in 0..n {
-        let v: *mut Object = msg_send![subs, objectAtIndex: i];
-        let is: BOOL = msg_send![v, isKindOfClass: c];
-        if is == YES && pred(v) {
+        let v: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+        let is: Bool = msg_send![v, isKindOfClass: c];
+        if is == Bool::YES && pred(v) {
             k += 1;
         }
     }
@@ -3591,9 +3586,9 @@ fn seerr_sidebar_row_ok() -> bool {
         if row.is_null() {
             return false;
         }
-        let cls = objc::runtime::Class::get("JRSidebarRow").unwrap();
-        let k: BOOL = msg_send![row, isKindOfClass: cls];
-        k == YES
+        let cls = AnyClass::get(c"JRSidebarRow").unwrap();
+        let k: Bool = msg_send![row, isKindOfClass: cls];
+        k == Bool::YES
     }
 }
 fn seerr_empty_shown() -> Option<(String, String)> {
@@ -3609,9 +3604,9 @@ const TEST_PNG: [u8; 75] = [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72
 fn seerr_status_text() -> String {
     unsafe { read_field(UI.get().unwrap().seerr.status.get()) }
 }
-fn seerr_note(field: *mut Object) -> *mut Object {
+fn seerr_note(field: *mut AnyObject) -> *mut AnyObject {
     unsafe {
-        msg_send![class!(NSNotification), notificationWithName: ns("NSControlTextDidChangeNotification") object: field]
+        msg_send![class!(NSNotification), notificationWithName: ns("NSControlTextDidChangeNotification"), object: field]
     }
 }
 
@@ -4073,9 +4068,9 @@ fn expect_srgb(v: u32) -> [i64; 4] {
     let c = |s: u32| (((v >> s) & 0xff) as f64 / 255. * 1000.).round() as i64;
     [c(16), c(8), c(0), 1000]
 }
-fn popup_titles(p: *mut Object) -> Vec<String> {
+fn popup_titles(p: *mut AnyObject) -> Vec<String> {
     unsafe {
-        let t: *mut Object = msg_send![p, itemTitles];
+        let t: *mut AnyObject = msg_send![p, itemTitles];
         let n: usize = msg_send![t, count];
         (0..n).map(|i| to_str(msg_send![t, objectAtIndex: i])).collect()
     }
@@ -4165,7 +4160,7 @@ fn s_themes_restore() {
 fn active_theme_is_builtin() -> bool {
     unsafe {
         let text = srgb(crate::ui::theme::color(crate::ui::theme::Col::Text));
-        let label: *mut Object = msg_send![class!(NSColor), labelColor];
+        let label: *mut AnyObject = msg_send![class!(NSColor), labelColor];
         text == srgb(label)
     }
 }

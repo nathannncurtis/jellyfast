@@ -2,14 +2,13 @@
 //! One table drives everything keyboard-related: the native menu bar, the key
 //! equivalents, the enable rules that keep plain keys out of text fields, and the
 //! Keyboard Shortcuts help window (⌘/). Self-test checks the menus against it.
+use objc2::runtime::{AnyObject, Bool, Sel};
+use objc2::{class, msg_send};
 use crate::*;
 use crate::platform::appkit::*;
 use crate::ui::theme::*;
-use objc::class;
-use objc::msg_send;
-use objc::runtime::{Object, Sel, BOOL, NO, YES};
-use objc::{sel, sel_impl};
 use std::cell::RefCell;
+use std::ffi::CString;
 
 pub(crate) const CMD: NSUInteger = 1 << 20;
 pub(crate) const ALT: NSUInteger = 1 << 19;
@@ -202,8 +201,8 @@ pub(crate) unsafe fn item_enabled(action: &str, tag: NSInteger, mods: NSUInteger
     match action {
         "viewSelected:" => (tag as usize) < ui.views.len(),
         "focusSearch:" => {
-            let hidden: BOOL = msg_send![ui.search.get(), isHiddenOrHasHiddenAncestor];
-            hidden == NO
+            let hidden: Bool = msg_send![ui.search.get(), isHiddenOrHasHiddenAncestor];
+            hidden == Bool::NO
         }
         "openSelected:" => main_window_active() && crate::ui::library::kb_focus_index().is_some(),
         "focusNext:" | "focusPrevious:" => main_window_active() && grid_has_items() && !settings_open(),
@@ -214,27 +213,27 @@ pub(crate) unsafe fn item_enabled(action: &str, tag: NSInteger, mods: NSUInteger
     }
 }
 
-unsafe fn key_window() -> *mut Object {
+unsafe fn key_window() -> *mut AnyObject {
     let ui = UI.get().unwrap();
-    let k: *mut Object = msg_send![ui.app.get(), keyWindow];
+    let k: *mut AnyObject = msg_send![ui.app.get(), keyWindow];
     if k.is_null() { ui.win.get() } else { k }
 }
 
 /// True while the first responder of the key window is a text editor.
 unsafe fn text_editing() -> bool {
     let w = key_window();
-    let fr: *mut Object = msg_send![w, firstResponder];
+    let fr: *mut AnyObject = msg_send![w, firstResponder];
     if fr.is_null() {
         return false;
     }
-    let is_text: BOOL = msg_send![fr, isKindOfClass: class!(NSText)];
-    is_text == YES
+    let is_text: Bool = msg_send![fr, isKindOfClass: class!(NSText)];
+    is_text == Bool::YES
 }
 
 /// Keyboard grid navigation only runs when the main window is the one in front.
 unsafe fn main_window_active() -> bool {
     let ui = UI.get().unwrap();
-    let k: *mut Object = msg_send![ui.app.get(), keyWindow];
+    let k: *mut AnyObject = msg_send![ui.app.get(), keyWindow];
     k.is_null() || k == ui.win.get()
 }
 
@@ -245,19 +244,19 @@ unsafe fn grid_has_items() -> bool {
 
 /// Menu validation: greys out items that cannot act right now, and lets the key fall
 /// through to the focused control when they are disabled.
-pub(crate) extern "C" fn validate_menu_item(_t: &mut Object, _c: Sel, item: *mut Object) -> BOOL {
+pub(crate) extern "C" fn validate_menu_item(_t: *mut AnyObject, _c: Sel, item: *mut AnyObject) -> Bool {
     unsafe {
-        let action: Sel = msg_send![item, action];
-        if action.as_ptr().is_null() {
-            return YES;
-        }
+        let action: Option<Sel> = msg_send![item, action];
+        let Some(action) = action else {
+            return Bool::YES;
+        };
         let mods: NSUInteger = msg_send![item, keyEquivalentModifierMask];
         let tag: NSInteger = msg_send![item, tag];
-        if item_enabled(action.name(), tag, mods) { YES } else { NO }
+        if item_enabled(action.name().to_str().unwrap_or(""), tag, mods) { Bool::YES } else { Bool::NO }
     }
 }
 
-pub(crate) extern "C" fn focus_search(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn focus_search(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
         let k = key_window();
@@ -266,21 +265,21 @@ pub(crate) extern "C" fn focus_search(_t: &mut Object, _c: Sel, _s: *mut Object)
         } else {
             ui.search.get()
         };
-        let _: BOOL = msg_send![k, makeFirstResponder: field];
+        let _: Bool = msg_send![k, makeFirstResponder: field];
         let _: () = msg_send![field, selectText: nil()];
     }
 }
 
-pub(crate) extern "C" fn open_selected(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn open_selected(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { crate::ui::library::kb_open() }
 }
-pub(crate) extern "C" fn focus_next(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn focus_next(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { crate::ui::library::kb_move(1) }
 }
-pub(crate) extern "C" fn focus_previous(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn focus_previous(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { crate::ui::library::kb_move(-1) }
 }
-pub(crate) extern "C" fn seerr_show_tab(_t: &mut Object, _c: Sel, sender: *mut Object) {
+pub(crate) extern "C" fn seerr_show_tab(_t: *mut AnyObject, _c: Sel, sender: *mut AnyObject) {
     unsafe {
         let tag: NSInteger = msg_send![sender, tag];
         crate::ui::seerr::select_mode(tag == 1);
@@ -292,7 +291,7 @@ thread_local! {
 }
 
 /// ⌘/: show (or bring forward) the Keyboard Shortcuts window, built from the table.
-pub(crate) extern "C" fn show_shortcuts(_t: &mut Object, _c: Sel, _s: *mut Object) {
+pub(crate) extern "C" fn show_shortcuts(_t: *mut AnyObject, _c: Sel, _s: *mut AnyObject) {
     unsafe { show_shortcuts_window() }
 }
 
@@ -317,14 +316,13 @@ pub(crate) unsafe fn show_shortcuts_window() {
         };
     }
     h += 8. * headings.saturating_sub(1) as f64; // gap before every heading but the first
-    let w: *mut Object = msg_send![jr_window_class(), alloc];
-    let w: *mut Object = msg_send![w,
-        initWithContentRect: rect(0., 0., W, h)
-        styleMask: (1 | 2) as NSUInteger backing: 2usize defer: NO];
+    let w: *mut AnyObject = msg_send![jr_window_class(), alloc];
+    let w: *mut AnyObject = msg_send![w,
+        initWithContentRect: rect(0., 0., W, h), styleMask: (1 | 2) as NSUInteger, backing: 2usize, defer: Bool::NO];
     let w = autorel(w);
     let _: () = msg_send![w, setTitle: ns("Keyboard Shortcuts")];
-    let _: () = msg_send![w, setReleasedWhenClosed: NO];
-    let c: *mut Object = msg_send![w, contentView];
+    let _: () = msg_send![w, setReleasedWhenClosed: Bool::NO];
+    let c: *mut AnyObject = msg_send![w, contentView];
     let mut top = h - PAD;
     for r in &rows {
         match r {
@@ -362,8 +360,8 @@ pub(crate) unsafe fn hide_shortcuts_window() {
 pub(crate) unsafe fn shortcuts_window_visible() -> bool {
     match HELP_WIN.with(|h| h.borrow().as_ref().map(|p| p.get())) {
         Some(w) => {
-            let v: BOOL = msg_send![w, isVisible];
-            v == YES
+            let v: Bool = msg_send![w, isVisible];
+            v == Bool::YES
         }
         None => false,
     }
@@ -373,23 +371,23 @@ pub(crate) unsafe fn shortcuts_window_visible() -> bool {
 pub(crate) unsafe fn build_menus_from_table() {
     let ui = UI.get_mut().unwrap();
     let ctl = ui.ctl.get();
-    let main_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-    let main_menu: *mut Object = msg_send![main_menu, initWithTitle: ns("MainMenu")];
+    let main_menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
+    let main_menu: *mut AnyObject = msg_send![main_menu, initWithTitle: ns("MainMenu")];
     let _: () = msg_send![ui.app.get(), setMainMenu: main_menu];
     autorel(main_menu);
 
-    let top = |title: &str| -> *mut Object {
-        let item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-        let item: *mut Object = msg_send![item, initWithTitle: ns(title) action: nil() keyEquivalent: ns("")];
+    let top = |title: &str| -> *mut AnyObject {
+        let item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
+        let item: *mut AnyObject = msg_send![item, initWithTitle: ns(title), action: None::<Sel>, keyEquivalent: ns("")];
         autorel(item);
-        let menu: *mut Object = msg_send![class!(NSMenu), alloc];
-        let menu: *mut Object = msg_send![menu, initWithTitle: ns(title)];
+        let menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
+        let menu: *mut AnyObject = msg_send![menu, initWithTitle: ns(title)];
         let _: () = msg_send![item, setSubmenu: menu];
         let _: () = msg_send![main_menu, addItem: item];
         autorel(menu)
     };
-    let add = |menu: *mut Object, e: &Shortcut| -> *mut Object {
-        let it = menu_item(e.title, Sel::register(e.action), e.key);
+    let add = |menu: *mut AnyObject, e: &Shortcut| -> *mut AnyObject {
+        let it = menu_item(e.title, sel_named(e.action), e.key);
         // Edit items keep a nil target so AppKit sends them down the responder chain
         // to the focused text field. Everything else goes to our controller.
         if e.action != "terminate:" && e.menu != "Edit" {
@@ -400,7 +398,7 @@ pub(crate) unsafe fn build_menus_from_table() {
         let _: () = msg_send![menu, addItem: it];
         it
     };
-    let sep = || -> *mut Object { msg_send![class!(NSMenuItem), separatorItem] };
+    let sep = || -> *mut AnyObject { msg_send![class!(NSMenuItem), separatorItem] };
 
     let app_menu = top("Jellyfast");
     for e in SHORTCUTS.iter().filter(|e| e.menu == "App") {
@@ -430,11 +428,11 @@ pub(crate) unsafe fn build_menus_from_table() {
         }
     }
     {
-        let item: *mut Object = msg_send![class!(NSMenuItem), alloc];
-        let item: *mut Object = msg_send![item, initWithTitle: ns("Playback Speed") action: nil() keyEquivalent: ns("")];
+        let item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
+        let item: *mut AnyObject = msg_send![item, initWithTitle: ns("Playback Speed"), action: None::<Sel>, keyEquivalent: ns("")];
         autorel(item);
-        let speed_menu: *mut Object = msg_send![class!(NSMenu), alloc];
-        let speed_menu: *mut Object = msg_send![speed_menu, initWithTitle: ns("Playback Speed")];
+        let speed_menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
+        let speed_menu: *mut AnyObject = msg_send![speed_menu, initWithTitle: ns("Playback Speed")];
         autorel(speed_menu);
         let _: () = msg_send![item, setSubmenu: speed_menu];
         let _: () = msg_send![ctl_menu, addItem: sep()];
@@ -462,24 +460,24 @@ pub(crate) unsafe fn build_menus_from_table() {
 /// no key combination is bound twice, and the menus match the table exactly.
 pub(crate) unsafe fn menu_key_problems() -> Vec<String> {
     let ui = UI.get().unwrap();
-    let main: *mut Object = msg_send![ui.app.get(), mainMenu];
+    let main: *mut AnyObject = msg_send![ui.app.get(), mainMenu];
     let mut problems = Vec::new();
     let mut seen: Vec<(String, NSUInteger, String)> = Vec::new();
     let mut leaves = 0usize;
     let mut keyed = 0usize;
     walk_menu(main, &mut |item| {
-        let action: Sel = msg_send![item, action];
-        if action.as_ptr().is_null() {
+        let action: Option<Sel> = msg_send![item, action];
+        let Some(action) = action else {
             return;
-        }
-        if is_system_edit_item(action.name()) {
+        };
+        if is_system_edit_item(action.name().to_str().unwrap_or("")) {
             return;
         }
         leaves += 1;
         let title = to_str(msg_send![item, title]);
         let key = to_str(msg_send![item, keyEquivalent]);
         let mods: NSUInteger = msg_send![item, keyEquivalentModifierMask];
-        let name = action.name();
+        let name = action.name().to_str().unwrap_or("");
         if is_system_edit_item(name) {
             return;
         }
@@ -515,11 +513,11 @@ fn is_system_edit_item(action: &str) -> bool {
     action.starts_with('_') || matches!(action, "startDictation:" | "orderFrontCharacterPalette:")
 }
 
-unsafe fn walk_menu(menu: *mut Object, f: &mut dyn FnMut(*mut Object)) {
+unsafe fn walk_menu(menu: *mut AnyObject, f: &mut dyn FnMut(*mut AnyObject)) {
     let n: NSInteger = msg_send![menu, numberOfItems];
     for i in 0..n {
-        let item: *mut Object = msg_send![menu, itemAtIndex: i];
-        let sub: *mut Object = msg_send![item, submenu];
+        let item: *mut AnyObject = msg_send![menu, itemAtIndex: i];
+        let sub: *mut AnyObject = msg_send![item, submenu];
         if !sub.is_null() {
             walk_menu(sub, f);
         } else {

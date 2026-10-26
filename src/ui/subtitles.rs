@@ -8,15 +8,12 @@
 use crate::platform::appkit::*;
 use crate::ui::shell::is_hidden;
 use crate::ui::theme::*;
-use objc::class;
-use objc::declare::ClassDecl;
-use objc::msg_send;
-use objc::runtime::{Class, Object, Protocol, Sel, NO, YES};
-use objc::{sel, sel_impl};
+use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, ClassBuilder, Sel};
+use objc2::{class, msg_send, sel};
 use std::os::raw::c_char;
 use std::sync::OnceLock;
 
-static DELEGATE_CLASS: OnceLock<&'static Class> = OnceLock::new();
+static DELEGATE_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 
 /// Gap between the overlay and whatever sits above it (the transport bar or the skip stack).
 const GAP: f64 = SP4;
@@ -63,50 +60,50 @@ impl SubtitleUi {
 }
 
 extern "C" {
-    fn dispatch_queue_create(label: *const c_char, attr: *mut Object) -> *mut Object;
+    fn dispatch_queue_create(label: *const c_char, attr: *mut AnyObject) -> *mut AnyObject;
 }
 
 pub(crate) unsafe fn register_classes() {
-    let mut d = ClassDecl::new("JRLegibleDelegate", class!(NSObject)).unwrap();
-    if let Some(p) = Protocol::get("AVPlayerItemLegibleOutputPushDelegate") {
+    let mut d = ClassBuilder::new(c"JRLegibleDelegate", class!(NSObject)).unwrap();
+    if let Some(p) = AnyProtocol::get(c"AVPlayerItemLegibleOutputPushDelegate") {
         d.add_protocol(p);
     }
     d.add_method(
         sel!(legibleOutput:didOutputAttributedStrings:nativeSampleBuffers:forItemTime:),
-        legible_output as extern "C" fn(&mut Object, Sel, *mut Object, *mut Object, *mut Object, CMTime),
+        legible_output as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject, *mut AnyObject, CMTime),
     );
-    d.add_method(sel!(jrShowCues:), show_cues as extern "C" fn(&mut Object, Sel, *mut Object));
+    d.add_method(sel!(jrShowCues:), show_cues as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
     DELEGATE_CLASS.set(d.register()).ok();
 }
 
 /// Builds the overlay label inside the player host. Called before the AirPlay card and the
 /// bars are added, so those stay above it.
-pub(crate) unsafe fn build(ph: *mut Object) {
+pub(crate) unsafe fn build(ph: *mut AnyObject) {
     let ui = UI.get_mut().unwrap();
-    let lab: *mut Object = msg_send![class!(NSTextField), labelWithString: ns("")];
+    let lab: *mut AnyObject = msg_send![class!(NSTextField), labelWithString: ns("")];
     let _: () = msg_send![lab, setAlignment: ALIGN_CENTER];
     let _: () = msg_send![lab, setLineBreakMode: 0usize]; // word wrap
-    let _: () = msg_send![lab, setUsesSingleLineMode: NO];
+    let _: () = msg_send![lab, setUsesSingleLineMode: Bool::NO];
     let _: () = msg_send![lab, setMaximumNumberOfLines: 0isize];
-    let _: () = msg_send![lab, setSelectable: NO];
-    let _: () = msg_send![lab, setEditable: NO];
-    let _: () = msg_send![lab, setBezeled: NO];
-    let _: () = msg_send![lab, setBordered: NO];
-    let _: () = msg_send![lab, setDrawsBackground: NO];
+    let _: () = msg_send![lab, setSelectable: Bool::NO];
+    let _: () = msg_send![lab, setEditable: Bool::NO];
+    let _: () = msg_send![lab, setBezeled: Bool::NO];
+    let _: () = msg_send![lab, setBordered: Bool::NO];
+    let _: () = msg_send![lab, setDrawsBackground: Bool::NO];
     set_hidden(lab, true);
     add_sub(ph, lab);
     ui.subs.label = Ptr(lab);
 }
 
 /// Gives a new item its legible output. Called right after the item is made, before it plays.
-pub(crate) unsafe fn attach(item: *mut Object) {
+pub(crate) unsafe fn attach(item: *mut AnyObject) {
     ensure_delegate();
     let ui = UI.get_mut().unwrap();
-    let none: *mut Object = msg_send![class!(NSArray), array];
-    let out: *mut Object = msg_send![class!(AVPlayerItemLegibleOutput), alloc];
-    let out: *mut Object = autorel(msg_send![out, initWithMediaSubtypesForNativeRepresentation: none]);
-    let _: () = msg_send![out, setSuppressesPlayerRendering: YES];
-    let _: () = msg_send![out, setDelegate: ui.subs.delegate.get() queue: ui.subs.queue.get()];
+    let none: *mut AnyObject = msg_send![class!(NSArray), array];
+    let out: *mut AnyObject = msg_send![class!(AVPlayerItemLegibleOutput), alloc];
+    let out: *mut AnyObject = autorel(msg_send![out, initWithMediaSubtypesForNativeRepresentation: none]);
+    let _: () = msg_send![out, setSuppressesPlayerRendering: Bool::YES];
+    let _: () = msg_send![out, setDelegate: ui.subs.delegate.get(), queue: ui.subs.queue.get()];
     let _: () = msg_send![item, addOutput: out];
     release_obj(ui.subs.output.get());
     ui.subs.output = Ptr::retained(out);
@@ -127,37 +124,37 @@ unsafe fn ensure_delegate() {
         return;
     }
     let cls = *DELEGATE_CLASS.get().unwrap();
-    let d: *mut Object = msg_send![cls, alloc];
-    let d: *mut Object = msg_send![d, init];
+    let d: *mut AnyObject = msg_send![cls, alloc];
+    let d: *mut AnyObject = msg_send![d, init];
     ui.subs.delegate = Ptr(d);
     ui.subs.queue = Ptr(dispatch_queue_create(b"jellyfast.legible\0".as_ptr() as *const c_char, nil()));
 }
 
 /// AVKit's queue: the strings are handed to the main thread together with their output.
-extern "C" fn legible_output(this: &mut Object, _c: Sel, out: *mut Object, strings: *mut Object, _bufs: *mut Object, _at: CMTime) {
+extern "C" fn legible_output(this: *mut AnyObject, _c: Sel, out: *mut AnyObject, strings: *mut AnyObject, _bufs: *mut AnyObject, _at: CMTime) {
     unsafe {
         let objs = [out, strings];
-        let pair: *mut Object = msg_send![class!(NSArray), arrayWithObjects: objs.as_ptr() count: 2usize];
-        let me = this as *mut Object;
-        let _: () = msg_send![me, performSelectorOnMainThread: sel!(jrShowCues:) withObject: pair waitUntilDone: NO];
+        let pair: *mut AnyObject = msg_send![class!(NSArray), arrayWithObjects: objs.as_ptr(), count: 2usize];
+        let me = this;
+        let _: () = msg_send![me, performSelectorOnMainThread: sel!(jrShowCues:), withObject: pair, waitUntilDone: Bool::NO];
     }
 }
 
 /// Main thread: joins the cue's strings into the overlay text. Cues from an output that is no
 /// longer the current item's are dropped.
-extern "C" fn show_cues(_this: &mut Object, _c: Sel, pair: *mut Object) {
+extern "C" fn show_cues(_this: *mut AnyObject, _c: Sel, pair: *mut AnyObject) {
     unsafe {
         let ui = UI.get_mut().unwrap();
-        let out: *mut Object = msg_send![pair, objectAtIndex: 0usize];
+        let out: *mut AnyObject = msg_send![pair, objectAtIndex: 0usize];
         if out != ui.subs.output.get() {
             return;
         }
-        let strings: *mut Object = msg_send![pair, objectAtIndex: 1usize];
+        let strings: *mut AnyObject = msg_send![pair, objectAtIndex: 1usize];
         let n: NSUInteger = msg_send![strings, count];
         let mut parts: Vec<String> = Vec::new();
         for i in 0..n {
-            let s: *mut Object = msg_send![strings, objectAtIndex: i];
-            let text_obj: *mut Object = msg_send![s, string];
+            let s: *mut AnyObject = msg_send![strings, objectAtIndex: i];
+            let text_obj: *mut AnyObject = msg_send![s, string];
             let t = to_str(text_obj);
             if !t.trim().is_empty() {
                 parts.push(t.trim().to_string());
@@ -231,9 +228,9 @@ unsafe fn place(animate: bool) {
     }
 
     let maxw = host.size.w * MAX_W_FRAC;
-    let attr: *mut Object = msg_send![lab, attributedStringValue];
+    let attr: *mut AnyObject = msg_send![lab, attributedStringValue];
     let inner = maxw - 2. * PAD_X - CELL_SLACK;
-    let r: NSRect = msg_send![attr, boundingRectWithSize: size(inner, 10000.) options: 1usize context: nil()];
+    let r: NSRect = msg_send![attr, boundingRectWithSize: size(inner, 10000.), options: 1usize, context: nil()];
     let w = (r.size.w.ceil() + 2. * PAD_X + CELL_SLACK).min(maxw);
     let h = r.size.h.ceil() + 2. * PAD_Y;
     let x = ((host.size.w - w) / 2.).max(0.);
@@ -264,7 +261,7 @@ unsafe fn place(animate: bool) {
     let fr = rect(x, bottom, w, h);
     if animate && !first {
         anim_begin(M_STD, timing_ease_out());
-        let a: *mut Object = msg_send![lab, animator];
+        let a: *mut AnyObject = msg_send![lab, animator];
         let _: () = msg_send![a, setFrame: fr];
         anim_end();
     } else {
@@ -273,23 +270,23 @@ unsafe fn place(animate: bool) {
 }
 
 /// Attributed text for the overlay: white, centred, soft shadow, AVKit's own styling dropped.
-unsafe fn styled(text: &str, pt: f64) -> *mut Object {
-    let font: *mut Object = msg_send![class!(NSFont), systemFontOfSize: pt];
-    let white: *mut Object = msg_send![class!(NSColor), whiteColor];
-    let shadow: *mut Object = autorel(msg_send![class!(NSShadow), new]);
+unsafe fn styled(text: &str, pt: f64) -> *mut AnyObject {
+    let font: *mut AnyObject = msg_send![class!(NSFont), systemFontOfSize: pt];
+    let white: *mut AnyObject = msg_send![class!(NSColor), whiteColor];
+    let shadow: *mut AnyObject = autorel(msg_send![class!(NSShadow), new]);
     let _: () = msg_send![shadow, setShadowOffset: size(0., -1.)];
     let _: () = msg_send![shadow, setShadowBlurRadius: 4.0f64];
-    let sc: *mut Object = msg_send![class!(NSColor), colorWithCalibratedWhite: 0.0f64 alpha: 0.85f64];
+    let sc: *mut AnyObject = msg_send![class!(NSColor), colorWithCalibratedWhite: 0.0f64, alpha: 0.85f64];
     let _: () = msg_send![shadow, setShadowColor: sc];
-    let ps: *mut Object = autorel(msg_send![class!(NSMutableParagraphStyle), new]);
+    let ps: *mut AnyObject = autorel(msg_send![class!(NSMutableParagraphStyle), new]);
     let _: () = msg_send![ps, setAlignment: ALIGN_CENTER];
     let _: () = msg_send![ps, setLineBreakMode: 0usize];
-    let vals: [*mut Object; 4] = [font, white, shadow, ps];
-    let keys: [*mut Object; 4] = [ns("NSFont"), ns("NSColor"), ns("NSShadow"), ns("NSParagraphStyle")];
-    let attrs: *mut Object = msg_send![class!(NSDictionary),
-        dictionaryWithObjects: vals.as_ptr() forKeys: keys.as_ptr() count: 4usize];
-    let s: *mut Object = msg_send![class!(NSAttributedString), alloc];
-    autorel(msg_send![s, initWithString: ns(text) attributes: attrs])
+    let vals: [*mut AnyObject; 4] = [font, white, shadow, ps];
+    let keys: [*mut AnyObject; 4] = [ns("NSFont"), ns("NSColor"), ns("NSShadow"), ns("NSParagraphStyle")];
+    let attrs: *mut AnyObject = msg_send![class!(NSDictionary),
+        dictionaryWithObjects: vals.as_ptr(), forKeys: keys.as_ptr(), count: 4usize];
+    let s: *mut AnyObject = msg_send![class!(NSAttributedString), alloc];
+    autorel(msg_send![s, initWithString: ns(text), attributes: attrs])
 }
 
 // ---- self-test views ----------------------------------------------------------------------
